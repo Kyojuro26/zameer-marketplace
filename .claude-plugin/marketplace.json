@@ -1,0 +1,13 @@
+{
+  "name": "zameer-marketplace",
+  "owner": {
+    "name": "Zameer"
+  },
+  "plugins": [
+    {
+      "name": "unrivaled-solutions",
+      "source": "./plugins/unrivaled-solutions",
+      "description": "Unrivaled Solutions operations plugin — Outlook-based CRM (PO automation, sales engine, and bank recon ship as updates)."
+    }
+  ]
+}
