@@ -92,6 +92,9 @@ VENDOR_FIELDS = {
 COMPANY_ROLES = {"customer", "vendor"}
 
 
+SERVER_VERSION = "0.1.5"
+
+
 class StoreError(Exception):
     pass
 
@@ -102,6 +105,13 @@ class Store:
     def __init__(self, root: Path):
         self.root = root
         missing = [f for f in ENTITY_FILES.values() if not (root / f).exists()]
+        if missing and "companies.json" not in missing:
+            # Real store, newer schema: create the missing entity files empty
+            # rather than dying (the invoices.json lesson, 2026-07-14).
+            for f in missing:
+                (root / f).write_text("[]\n", encoding="utf-8")
+            _launch_log(f"auto-created missing store files: {missing}")
+            missing = []
         if missing:
             raise StoreError(f"store at {root} is missing: {missing}")
 
@@ -791,6 +801,7 @@ def crm_info() -> dict:
     """Interface version, store location, record counts, and needs_review summary."""
     counts = {e: len(STORE.load(e)) for e in ENTITY_FILES}
     return {"ok": True, "interface_version": VERSION,
+            "server_version": SERVER_VERSION,
             "store": str(STORE.root), "counts": counts,
             "archived_companies": len(_archived_ids()),
             "enriched_companies": len(STORE.load_enrichment())}

@@ -184,6 +184,17 @@ def from_env(store_root):
     client_id = os.environ.get("GRAPH_CLIENT_ID")
     tenant_id = os.environ.get("GRAPH_TENANT_ID")
     if not client_id or not tenant_id:
+        # Claude spawns plugin servers with a sanitized env, so env vars never
+        # arrive in production. Fall back to a config file inside the store.
+        _cfg_path = Path(store_root) / ".graph_config.json"
+        if _cfg_path.exists():
+            try:
+                _cfg = json.loads(_cfg_path.read_text(encoding="utf-8"))
+                client_id = client_id or _cfg.get("client_id")
+                tenant_id = tenant_id or _cfg.get("tenant_id")
+            except Exception:
+                pass
+    if not client_id or not tenant_id:
         raise GraphError(
             "Outlook writes not configured (set GRAPH_CLIENT_ID / "
             "GRAPH_TENANT_ID). Store edits still persist; click-to-draft "
