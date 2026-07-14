@@ -112,8 +112,8 @@ Get-Content "$store\changelog.jsonl" -Tail 5
 
 1. **Reboot**, retry Step 7. (Claude inherits PATH from Explorer; a reboot forces the refresh.)
 2. Re-run **Step 0** and read the new error — it will have changed. Send it to me.
-3. Nuclear option (I do this, not on Dillon's PC): ship plugin v0.1.3 with `"command": "${UNRIVALED_PYTHON:-python3}"`, then on Dillon's PC:
+3. **Escape hatch (already shipped — plugin v0.1.3 supports it).** Requires Steps 3–5 done (real Python + `mcp` installed). On Dillon's PC:
    ```powershell
    setx UNRIVALED_PYTHON "$((Get-Command python).Source)"
    ```
-   update the plugin in Claude, full quit, relaunch. Absolute-path spawn bypasses PATH/aliases entirely.
+   Then in Claude: Customize → Plugins → update `unrivaled-solutions` to v0.1.3, full quit (Step 7), relaunch. This spawns Python by absolute path, bypassing PATH and aliases entirely.

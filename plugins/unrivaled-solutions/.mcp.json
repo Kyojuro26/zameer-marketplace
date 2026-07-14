@@ -1,15 +1,15 @@
 {
   "mcpServers": {
     "unrivaled-crm": {
-      "command": "python3",
+      "command": "${UNRIVALED_PYTHON:-python3}",
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/skills/crm/mcp/server.py",
         "--store",
         "${UNRIVALED_CRM_STORE}"
       ],
       "env": {
-        "GRAPH_CLIENT_ID": "${GRAPH_CLIENT_ID}",
-        "GRAPH_TENANT_ID": "${GRAPH_TENANT_ID}",
+        "GRAPH_CLIENT_ID": "${GRAPH_CLIENT_ID:-}",
+        "GRAPH_TENANT_ID": "${GRAPH_TENANT_ID:-}",
         "GRAPH_TOKEN_CACHE": "${UNRIVALED_CRM_STORE}/.graph_token_cache.json"
       }
     }
