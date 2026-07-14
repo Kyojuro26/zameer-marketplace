@@ -86,3 +86,20 @@ Just talk to Claude:
 Your data stays yours (a folder you own; nothing hard-coded). Drafts only —
 nothing is ever sent on your behalf. Outlook data is never deleted. Anything
 the system isn't sure about is flagged for your review, never guessed.
+
+
+## Dev/prod protocol (2026-07-14)
+
+- **Production data = Dillon's store** (`C:\UnrivaledCRM\store`, pointed to by
+  `~\.unrivaled-crm-store`; daily robocopy backup into OneDrive `CRM-Backups`).
+  Zeeshan's Mac store is a dev fixture. Data never moves between machines.
+- **Code flows one way:** edit build -> rsync into zameer-marketplace clone
+  (publish.sh exclusions) -> bump `plugin.json` version -> push `main` ->
+  Dillon updates in Settings -> verify with "crm info" (`server_version`).
+- **Never ship store data.** Pipeline (`normalize.py`) output must never
+  overwrite a live store. Schema changes ship as server migrations (e.g.
+  v0.1.5 auto-creates missing entity files).
+- **No env vars, ever.** Claude spawns plugin servers with a sanitized env.
+  Store path: `~/.unrivaled-crm-store` pointer file. Graph/Outlook creds:
+  `.graph_config.json` inside the store. Launch diagnostics:
+  `unrivaled-crm-launch.log` in the OS temp dir.
