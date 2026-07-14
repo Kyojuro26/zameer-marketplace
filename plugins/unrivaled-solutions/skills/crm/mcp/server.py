@@ -27,7 +27,22 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+def _launch_log(msg):
+    try:
+        with open(Path(tempfile.gettempdir()) / "unrivaled-crm-launch.log", "a", encoding="utf-8") as _f:
+            _f.write(f"{datetime.now(timezone.utc).isoformat()} {msg}\n")
+    except Exception:
+        pass
+
+
+_launch_log(f"launch python={sys.executable} argv={sys.argv!r} "
+            f"UNRIVALED_CRM_STORE={os.environ.get('UNRIVALED_CRM_STORE')!r}")
+
+try:
+    from mcp.server.fastmcp import FastMCP
+except Exception as _e:
+    _launch_log(f"FATAL: mcp import failed: {_e!r}")
+    raise
 
 VERSION = "0.1"
 
@@ -789,9 +804,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--store", default=os.environ.get("UNRIVALED_CRM_STORE"))
     args = ap.parse_args()
+    if args.store and args.store.lstrip().startswith("${"):
+        _launch_log(f"store arg is an unexpanded placeholder {args.store!r}; using env fallback")
+        args.store = os.environ.get("UNRIVALED_CRM_STORE")
     if not args.store:
-        sys.exit("no store: set UNRIVALED_CRM_STORE or pass --store")
-    STORE = Store(Path(args.store).resolve())
+        _cfg = Path.home() / ".unrivaled-crm-store"
+        if _cfg.exists():
+            args.store = _cfg.read_text(encoding="utf-8").strip() or None
+            _launch_log(f"store from pointer file {_cfg}: {args.store!r}")
+    if not args.store:
+        _launch_log("FATAL: no store configured")
+        sys.exit("no store: pass --store, set UNRIVALED_CRM_STORE, "
+                 "or write the store path into ~/.unrivaled-crm-store")
+    try:
+        STORE = Store(Path(args.store).resolve())
+    except StoreError as e:
+        _launch_log(f"FATAL: {e}")
+        sys.exit(str(e))
+    _launch_log(f"store ok: {Path(args.store).resolve()}")
     mcp.run()  # stdio
 
 
