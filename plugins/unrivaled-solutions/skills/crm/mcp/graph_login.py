@@ -4,7 +4,7 @@
 Runs the device-code flow and persists the token cache so the MCP's Outlook
 tools (draft_email, sync_outlook) work silently afterwards.
 
-    export GRAPH_CLIENT_ID=... GRAPH_TENANT_ID=...
+    # creds come from <store>/.graph_config.json (or GRAPH_* env in dev)
     python3 graph_login.py --store ../store
 
 Sign in with the SANDBOX account during development — never a production
@@ -25,7 +25,13 @@ def main():
     ap.add_argument("--store", default=os.environ.get("UNRIVALED_CRM_STORE"))
     args = ap.parse_args()
     if not args.store:
-        sys.exit("no store: set UNRIVALED_CRM_STORE or pass --store")
+        # Same pointer-file fallback the MCP server uses.
+        ptr = Path.home() / ".unrivaled-crm-store"
+        if ptr.exists():
+            args.store = graph._read_text_tolerant(ptr).strip().strip('"').strip("'").strip() or None
+    if not args.store:
+        sys.exit("no store: pass --store, set UNRIVALED_CRM_STORE, "
+                 "or write the store path into ~/.unrivaled-crm-store")
     try:
         auth, client = graph.from_env(args.store)
     except graph.GraphError as e:

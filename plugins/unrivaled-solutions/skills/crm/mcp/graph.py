@@ -23,7 +23,31 @@ The transport is injectable for tests.
 
 import json
 import os
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def _launch_log(msg):
+    """Append to the shared launch log (same file server.py uses). Never raises."""
+    try:
+        p = Path(tempfile.gettempdir()) / "unrivaled-crm-launch.log"
+        if p.exists() and p.stat().st_size > 262144:
+            tail = p.read_text(encoding="utf-8", errors="replace")[-32768:]
+            p.write_text(tail, encoding="utf-8")
+        with open(p, "a", encoding="utf-8") as _f:
+            _f.write(f"{datetime.now(timezone.utc).isoformat()} graph: {msg}\n")
+    except Exception:
+        pass
+
+
+def _read_text_tolerant(path):
+    """Read a config file written by any Windows tool: utf-8-sig strips a BOM;
+    PowerShell Out-File/Set-Content default to UTF-16, so fall back to that."""
+    try:
+        return Path(path).read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return Path(path).read_text(encoding="utf-16")
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = [
@@ -52,7 +76,13 @@ class GraphAuth:
         self.cache_path = Path(cache_path)
         self.cache = msal.SerializableTokenCache()
         if self.cache_path.exists():
-            self.cache.deserialize(self.cache_path.read_text(encoding="utf-8"))
+            try:
+                self.cache.deserialize(
+                    self.cache_path.read_text(encoding="utf-8-sig"))
+            except Exception as ex:
+                # A truncated/corrupt cache must degrade to "sign in again",
+                # not crash the tool call with a raw ValueError.
+                _launch_log(f"token cache unreadable ({ex!r}); starting empty")
         self.app = msal.PublicClientApplication(
             client_id,
             authority=f"https://login.microsoftonline.com/{tenant_id}",
@@ -189,11 +219,16 @@ def from_env(store_root):
         _cfg_path = Path(store_root) / ".graph_config.json"
         if _cfg_path.exists():
             try:
-                _cfg = json.loads(_cfg_path.read_text(encoding="utf-8"))
+                _cfg = json.loads(_read_text_tolerant(_cfg_path))
                 client_id = client_id or _cfg.get("client_id")
                 tenant_id = tenant_id or _cfg.get("tenant_id")
-            except Exception:
-                pass
+            except Exception as ex:
+                _launch_log(f"failed to parse {_cfg_path.name}: {ex!r}")
+                raise GraphError(
+                    f"Outlook config file {_cfg_path.name} exists but could "
+                    f"not be parsed ({type(ex).__name__}). Re-save it as "
+                    "plain JSON (UTF-8). Store edits still persist; "
+                    "click-to-draft falls back to a compose link.")
     if not client_id or not tenant_id:
         raise GraphError(
             "Outlook writes not configured (set GRAPH_CLIENT_ID / "

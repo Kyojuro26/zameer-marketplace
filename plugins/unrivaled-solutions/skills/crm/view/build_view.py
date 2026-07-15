@@ -14,7 +14,7 @@ In modes 1–2 every save persists through the MCP's validated write path and
 the header pill shows "Live". Embedded data is always rendered instantly as
 bootstrap, then replaced by a live refresh when a backend is present.
 """
-import argparse, json, os
+import argparse, json, os, sys
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -140,13 +140,42 @@ TEMPLATE = r"""<!DOCTYPE html>
 const DATA = __DATA__;
 
 /* ---------------- CRM client: cowork MCP -> dev bridge -> embedded demo -- */
-const TOOL_PREFIX = 'mcp__unrivaled-crm__';     // adjust if the connector id differs
+// Cowork names installed-plugin tools mcp__plugin_<plugin>_<server>__<tool>;
+// bare mcp__<server>__ appears in dev / non-plugin contexts. Probe at startup
+// instead of hardcoding — a wrong guess must degrade to Demo, never fake Live.
+const TOOL_PREFIX_CANDIDATES = [
+  'mcp__plugin_unrivaled-solutions_unrivaled-crm__',
+  'mcp__unrivaled-crm__',
+];
+let TOOL_PREFIX = null;
+let SERVER_VERSION = null;
 const BRIDGE = 'http://127.0.0.1:8765';
 
 const CRM = {
   mode: 'embedded',
+  async probeCowork(){
+    for (const p of TOOL_PREFIX_CANDIDATES){
+      try{
+        const r = await window.cowork.callMcpTool(p + 'crm_info', {});
+        if (r && !r.isError){
+          const body = r.structuredContent ?? JSON.parse(r.content[0].text);
+          // crm_info reports ok:false when a store file is degraded — that is
+          // still a live server; only a non-answer means the prefix is wrong.
+          if (body && (body.interface_version || body.server_version)){
+            TOOL_PREFIX = p;
+            SERVER_VERSION = body.server_version || body.version || null;
+            return true;
+          }
+        }
+      }catch(e){ /* try next candidate */ }
+    }
+    console.warn('cowork present but no CRM tool prefix answered crm_info; staying in demo mode');
+    return false;
+  },
   async detect(){
-    if (window.cowork && window.cowork.callMcpTool){ this.mode = 'cowork'; }
+    if (window.cowork && window.cowork.callMcpTool){
+      if (await this.probeCowork()) this.mode = 'cowork';
+    }
     else {
       try{
         const c = new AbortController(); setTimeout(()=>c.abort(), 1200);
@@ -241,13 +270,17 @@ async function refreshData(){
     if (sh.ok) DATA.shipments = sh.shipments;
     if (iv && iv.ok) DATA.invoices = iv.invoices;
     reindex(); kpis(); renderList(); if (selected) renderMain();
-  }catch(e){ console.warn('live refresh failed; keeping embedded data', e); }
+  }catch(e){
+    console.warn('live refresh failed; keeping embedded data', e);
+    const el = document.getElementById('modePill');
+    if (el){ el.textContent = 'Live · refresh failed — showing last built data'; }
+  }
 }
 
 function setModePill(){
   const el = document.getElementById('modePill');
   el.textContent = {
-    cowork:   'Live · edits persist (CRM MCP v0.1)',
+    cowork:   'Live · edits persist (CRM MCP' + (SERVER_VERSION ? ' v' + SERVER_VERSION : '') + ')',
     http:     'Live · edits persist (dev bridge)',
     embedded: 'Demo · edits last this browser session only',
   }[CRM.mode];
@@ -314,7 +347,7 @@ function renderList(){
     const np=(projectsByCo[c.company_id]||[]).length, ns=(shipsByCo[c.company_id]||[]).length;
     return `<div class="citem ${c.company_id===selected?'sel':''}" onclick="select('${jesc(c.company_id)}')">
       <div class="cn">${esc(c.display_name||c.company_id)}</div>
-      <div class="cm"><span>${c.role}</span>${np?`<span>· ${np} project${np>1?'s':''}</span>`:''}${ns?`<span>· ${ns} shipment${ns>1?'s':''}</span>`:''}</div>
+      <div class="cm"><span>${esc(c.role)}</span>${np?`<span>· ${np} project${np>1?'s':''}</span>`:''}${ns?`<span>· ${ns} shipment${ns>1?'s':''}</span>`:''}</div>
     </div>`;
   }).join('') || '<div class="muted" style="padding:14px">No matches.</div>';
 }
@@ -357,14 +390,14 @@ function enrichmentSection(id){
 }
 
 function statusBadge(s){ s=(s||'').toLowerCase(); const cls={won:'b-won',pending:'b-pending',lost:'b-lost'}[s]||'b-stage';
-  return s?`<span class="badge ${cls}">${s}</span>`:''; }
+  return s?`<span class="badge ${cls}">${esc(s)}</span>`:''; }
 
 function renderMain(){
   const c=companyById[selected]; if(!c){return;}
   const cts=contactsByCo[selected]||[], prs=projectsByCo[selected]||[], sps=shipsByCo[selected]||[];
   const draftAll = cts.filter(x=>x.email)[0];
   let h=`<div class="co-head"><h1>${esc(c.display_name||c.company_id)}</h1>
-    <span class="badge b-${c.role}">${c.role}</span>
+    <span class="badge b-${esc(c.role)}">${esc(c.role)}</span>
     ${c.primary_location?`<span class="muted">${esc(c.primary_location)}</span>`:''}
     <span style="margin-left:auto;display:flex;gap:8px">
       <button class="pill-btn" onclick="openNewProject('${jesc(c.company_id)}')">+ New project</button>
@@ -768,9 +801,28 @@ def main():
     ap.add_argument("--out", default="./unrivaled-crm.html")
     a = ap.parse_args()
     data = {}
+    problems = []
     for name in ["companies", "contacts", "projects", "shipments", "invoices", "vendors"]:
-        with open(os.path.join(a.store, f"{name}.json"), encoding="utf-8-sig") as f:
-            data[name] = json.load(f)
+        path = os.path.join(a.store, f"{name}.json")
+        # Degrade per-file: a missing or corrupt store file (OneDrive
+        # conflicted copy, half-written temp) must not kill the whole build.
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                data[name] = json.load(f)
+        except FileNotFoundError:
+            data[name] = []
+            if name != "invoices":  # invoices.json is server-created; absence is normal
+                problems.append(f"{name}.json missing — built with 0 {name}")
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as ex:
+            data[name] = []
+            problems.append(f"{name}.json unreadable ({type(ex).__name__}) — built with 0 {name}")
+    if not data.get("companies"):
+        raise SystemExit(
+            "companies.json missing or unreadable — refusing to build an empty "
+            "view over a broken store. Fix the store file and rebuild.\n"
+            + "\n".join(problems))
+    for p in problems:
+        print(f"WARNING: {p}", file=sys.stderr)
     # archived companies never ship into the demo bootstrap
     arch = {c["company_id"] for c in data["companies"] if c.get("archived")}
     data["companies"] = [c for c in data["companies"] if not c.get("archived")]

@@ -32,12 +32,20 @@ arrive as updates to this same plugin.
 pip3 install mcp msal requests
 ```
 
-**2. Your data folder.** Your CRM records live in a folder YOU own (it can
-be inside OneDrive so it's backed up). Set its location as an environment
-variable before starting Claude:
+**2. Your data folder.** Your CRM records live in a folder YOU own. Keep the
+live store OUTSIDE OneDrive (sync locks break saves); back it up INTO OneDrive
+with the scheduled robocopy task instead. Tell the plugin where the store is by
+writing its path into a pointer file in your home directory (env vars never
+reach the server — Claude spawns it with a sanitized environment):
+
+```powershell
+# Windows (PowerShell) — ASCII avoids BOM/UTF-16 surprises
+Set-Content -Path "$HOME\.unrivaled-crm-store" -Value "C:\UnrivaledCRM\store" -Encoding Ascii
+```
 
 ```bash
-export UNRIVALED_CRM_STORE="$HOME/Unrivaled-CRM/store"
+# macOS/Linux
+printf '%s' "$HOME/Unrivaled-CRM/store" > ~/.unrivaled-crm-store
 ```
 
 The initial records are migrated from your sales tracker workbook by the
@@ -46,12 +54,17 @@ delivery engineer (pipeline/normalize.py) — you don't run that yourself.
 **3. Outlook drafts & sync (optional but recommended).** Requires a one-time
 app registration in your Microsoft 365 tenant (your admin: ~2 minutes —
 instructions in `skills/crm/mcp/graph_login.py` header and the delivery
-note), then:
+note), then create `.graph_config.json` inside the store folder (plain UTF-8
+JSON — not `Out-File`, which writes UTF-16):
+
+```powershell
+Set-Content -Path "C:\UnrivaledCRM\store\.graph_config.json" -Encoding Ascii -Value '{"client_id": "<app client id>", "tenant_id": "<tenant id>"}'
+```
+
+Then sign in once:
 
 ```bash
-export GRAPH_CLIENT_ID="<your app's client id>"
-export GRAPH_TENANT_ID="<your tenant id>"
-python3 skills/crm/mcp/graph_login.py --store "$UNRIVALED_CRM_STORE"
+python3 skills/crm/mcp/graph_login.py --store "C:\UnrivaledCRM\store"
 ```
 
 Sign in once with the device code; after that everything is silent. Without
@@ -73,13 +86,12 @@ Just talk to Claude:
 - "Sync Ford into my Outlook"
 - "Open the CRM" — the visual app
 
-## Environment variables
+## Configuration files (no env vars — see Dev/prod protocol)
 
-| Variable | Required | Purpose |
+| File | Required | Purpose |
 |---|---|---|
-| `UNRIVALED_CRM_STORE` | Yes | Path to your CRM data folder |
-| `GRAPH_CLIENT_ID` | For Outlook writes | Your tenant's app registration |
-| `GRAPH_TENANT_ID` | For Outlook writes | Your Microsoft 365 tenant |
+| `~/.unrivaled-crm-store` | Yes | One line: path to your CRM data folder |
+| `<store>/.graph_config.json` | For Outlook writes | `{"client_id": ..., "tenant_id": ...}` |
 
 ## Guarantees
 

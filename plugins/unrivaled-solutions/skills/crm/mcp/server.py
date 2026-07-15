@@ -98,7 +98,7 @@ VENDOR_FIELDS = {
 COMPANY_ROLES = {"customer", "vendor"}
 
 
-SERVER_VERSION = "0.1.7"
+SERVER_VERSION = "0.1.8"
 
 
 class StoreError(Exception):
