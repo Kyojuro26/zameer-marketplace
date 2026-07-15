@@ -52,7 +52,7 @@ class GraphAuth:
         self.cache_path = Path(cache_path)
         self.cache = msal.SerializableTokenCache()
         if self.cache_path.exists():
-            self.cache.deserialize(self.cache_path.read_text())
+            self.cache.deserialize(self.cache_path.read_text(encoding="utf-8"))
         self.app = msal.PublicClientApplication(
             client_id,
             authority=f"https://login.microsoftonline.com/{tenant_id}",
@@ -61,9 +61,9 @@ class GraphAuth:
 
     def _persist(self):
         if self.cache.has_state_changed:
-            self.cache_path.write_text(self.cache.serialize())
+            self.cache_path.write_text(self.cache.serialize(), encoding="utf-8")
             try:
-                os.chmod(self.cache_path, 0o600)
+                os.chmod(self.cache_path, 0o600)  # POSIX only; no-op on Windows
             except OSError:
                 pass
 

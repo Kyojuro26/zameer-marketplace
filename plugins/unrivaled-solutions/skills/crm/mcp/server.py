@@ -24,12 +24,18 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 def _launch_log(msg):
     try:
-        with open(Path(tempfile.gettempdir()) / "unrivaled-crm-launch.log", "a", encoding="utf-8") as _f:
+        p = Path(tempfile.gettempdir()) / "unrivaled-crm-launch.log"
+        # Cap growth: truncate if it passes ~256KB. Diagnostic tail only.
+        if p.exists() and p.stat().st_size > 262144:
+            tail = p.read_text(encoding="utf-8", errors="replace")[-32768:]
+            p.write_text(tail, encoding="utf-8")
+        with open(p, "a", encoding="utf-8") as _f:
             _f.write(f"{datetime.now(timezone.utc).isoformat()} {msg}\n")
     except Exception:
         pass
@@ -92,7 +98,7 @@ VENDOR_FIELDS = {
 COMPANY_ROLES = {"customer", "vendor"}
 
 
-SERVER_VERSION = "0.1.5"
+SERVER_VERSION = "0.1.7"
 
 
 class StoreError(Exception):
@@ -116,8 +122,21 @@ class Store:
             raise StoreError(f"store at {root} is missing: {missing}")
 
     def load(self, entity):
-        with open(self.root / ENTITY_FILES[entity], encoding="utf-8") as f:
-            return json.load(f)
+        return self._read_json(self.root / ENTITY_FILES[entity], [])
+
+    @staticmethod
+    def _read_json(path, default):
+        """Tolerant read: utf-8-sig (survives a BOM), and a clear StoreError
+        rather than a raw JSONDecodeError if a file is corrupt/half-written
+        (OneDrive conflicted copy, crash mid-write, hand-edit typo)."""
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return default
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise StoreError(f"{path.name} is unreadable ({e}); restore it from "
+                             f"a backup or fix the JSON") from e
 
     def save(self, entity, records):
         """Atomic write: temp file in the same dir, then os.replace."""
@@ -125,24 +144,40 @@ class Store:
 
     def _write(self, filename, data):
         target = self.root / filename
-        fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
+        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".~", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=1, ensure_ascii=False, default=str)
-            os.replace(tmp, target)
+                f.flush()
+                os.fsync(f.fileno())
+            # os.replace raises PermissionError on Windows when the target is
+            # momentarily held open by OneDrive sync, robocopy, or Defender.
+            # Retry with backoff before giving up.
+            last = None
+            for delay in (0, 0.15, 0.4, 0.8, 1.5):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    os.replace(tmp, target)
+                    return
+                except PermissionError as e:
+                    last = e
+            raise StoreError(
+                f"could not save {filename}: the file is locked by another "
+                f"process (OneDrive/backup/antivirus). Change not written — "
+                f"retry in a moment. ({last})")
         except BaseException:
             if os.path.exists(tmp):
-                os.unlink(tmp)
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
             raise
 
     # Outlook read-signal overlay (Phase 4). Optional file; never part of
     # the core records — the store stays the source of truth.
     def load_enrichment(self):
-        p = self.root / ENRICHMENT_FILE
-        if not p.exists():
-            return {}
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
+        return self._read_json(self.root / ENRICHMENT_FILE, {})
 
     def save_enrichment(self, data):
         self._write(ENRICHMENT_FILE, data)
@@ -153,8 +188,14 @@ class Store:
             "op": op, "entity": entity, "key": key, "fields": fields,
             "interface_version": VERSION,
         }
-        with open(self.root / "changelog.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, default=str) + "\n")
+        # Best-effort: the data write already succeeded and is the source of
+        # truth. A locked changelog (OneDrive/AV) must not fail the operation
+        # or double-raise after a successful save.
+        try:
+            with open(self.root / "changelog.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+        except OSError as e:
+            _launch_log(f"changelog append failed (non-fatal): {e}")
 
 
 STORE: Store = None  # set in main()
@@ -799,12 +840,26 @@ def sync_outlook(company_id: str, dry_run: bool = False) -> dict:
 @mcp.tool()
 def crm_info() -> dict:
     """Interface version, store location, record counts, and needs_review summary."""
-    counts = {e: len(STORE.load(e)) for e in ENTITY_FILES}
-    return {"ok": True, "interface_version": VERSION,
-            "server_version": SERVER_VERSION,
-            "store": str(STORE.root), "counts": counts,
-            "archived_companies": len(_archived_ids()),
-            "enriched_companies": len(STORE.load_enrichment())}
+    # Per-file tolerance: one unreadable file reports as an error string for
+    # that entity instead of taking down the whole health check.
+    counts, problems = {}, {}
+    for e in ENTITY_FILES:
+        try:
+            counts[e] = len(STORE.load(e))
+        except StoreError as ex:
+            counts[e] = None
+            problems[e] = str(ex)
+    out = {"ok": not problems, "interface_version": VERSION,
+           "server_version": SERVER_VERSION,
+           "store": str(STORE.root), "counts": counts}
+    try:
+        out["archived_companies"] = len(_archived_ids())
+        out["enriched_companies"] = len(STORE.load_enrichment())
+    except StoreError as ex:
+        problems["enrichment/archive"] = str(ex)
+    if problems:
+        out["problems"] = problems
+    return out
 
 
 # ----------------------------------------------------------------- main
@@ -821,7 +876,13 @@ def main():
     if not args.store:
         _cfg = Path.home() / ".unrivaled-crm-store"
         if _cfg.exists():
-            args.store = _cfg.read_text(encoding="utf-8").strip() or None
+            # utf-8-sig strips a BOM; Windows PowerShell writes UTF-16 by
+            # default, so fall back to that. Strip stray quotes/whitespace.
+            try:
+                _raw = _cfg.read_text(encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                _raw = _cfg.read_text(encoding="utf-16")
+            args.store = _raw.strip().strip('"').strip("'").strip() or None
             _launch_log(f"store from pointer file {_cfg}: {args.store!r}")
     if not args.store:
         _launch_log("FATAL: no store configured")

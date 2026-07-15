@@ -21,6 +21,10 @@ TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+<!-- Defense in depth: no plugins, no <base> hijack, no framing; block any
+     javascript:/external script that slips past output encoding. Inline
+     script/style are still permitted (this file is self-contained). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src http://127.0.0.1:8765; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"/>
 <title>Unrivaled CRM</title>
 <style>
   :root{
@@ -265,7 +269,16 @@ function reindex(){
 }
 const money = (n)=> (n==null||isNaN(n))?'—':'$'+Number(n).toLocaleString(undefined,{maximumFractionDigits:0});
 const pct = (n)=> (n==null||isNaN(n))?'—':(Number(n)*100).toFixed(0)+'%';
-const esc = (s)=> (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = (s)=> (s==null?'':String(s)).replace(/[&<>"'`/]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;','/':'&#47;'}[c]));
+// JS-string-literal escaper for values placed inside an inline handler arg,
+// e.g. onclick="fn('${jesc(x)}')". HTML-entity escaping is WRONG there: the
+// browser HTML-decodes the attribute before the JS parser runs, so &#39;
+// becomes ' and breaks out. Hex-escape every non-alphanumeric to \xHH, which
+// is inert through both the HTML-attribute decode and the JS string parse.
+const jesc = (s)=> (s==null?'':String(s)).replace(/[^a-zA-Z0-9_]/g,c=>{
+  const h=c.charCodeAt(0); return h<256?'\\x'+h.toString(16).padStart(2,'0'):'\\u'+h.toString(16).padStart(4,'0'); });
+// Only allow http(s)/mailto hrefs; neutralize javascript:, data:, etc.
+const safeUrl = (u)=>{ const s=String(u||'').trim(); return /^(https?:|mailto:)/i.test(s) ? s : '#'; };
 
 let filter='all', selected=null, query='';
 
@@ -299,7 +312,7 @@ function renderList(){
     .sort((a,b)=>(a.display_name||'').localeCompare(b.display_name||''));
   document.getElementById('clist').innerHTML = items.slice(0,400).map(c=>{
     const np=(projectsByCo[c.company_id]||[]).length, ns=(shipsByCo[c.company_id]||[]).length;
-    return `<div class="citem ${c.company_id===selected?'sel':''}" onclick="select('${c.company_id}')">
+    return `<div class="citem ${c.company_id===selected?'sel':''}" onclick="select('${jesc(c.company_id)}')">
       <div class="cn">${esc(c.display_name||c.company_id)}</div>
       <div class="cm"><span>${c.role}</span>${np?`<span>· ${np} project${np>1?'s':''}</span>`:''}${ns?`<span>· ${ns} shipment${ns>1?'s':''}</span>`:''}</div>
     </div>`;
@@ -329,7 +342,7 @@ function enrichmentSection(id){
   const th = e.threads || [];
   if (th.length){
     h += `<table><thead><tr><th>Recent thread</th><th>With</th><th>Date</th></tr></thead><tbody>` +
-      th.slice(0,5).map(t=>`<tr><td>${t.webLink?`<a href="${esc(t.webLink)}" target="_blank" rel="noopener">${esc(t.subject||'(no subject)')}</a>`:esc(t.subject||'(no subject)')}</td>
+      th.slice(0,5).map(t=>`<tr><td>${t.webLink?`<a href="${esc(safeUrl(t.webLink))}" target="_blank" rel="noopener">${esc(t.subject||'(no subject)')}</a>`:esc(t.subject||'(no subject)')}</td>
         <td class="muted">${esc(t.with||'')}</td><td class="muted">${esc(String(t.date||'').slice(0,10))}</td></tr>`).join('') + `</tbody></table>`;
   } else {
     h += `<div class="muted">No recent email threads.</div>`;
@@ -354,11 +367,11 @@ function renderMain(){
     <span class="badge b-${c.role}">${c.role}</span>
     ${c.primary_location?`<span class="muted">${esc(c.primary_location)}</span>`:''}
     <span style="margin-left:auto;display:flex;gap:8px">
-      <button class="pill-btn" onclick="openNewProject('${esc(c.company_id)}')">+ New project</button>
-      <button class="pill-btn" onclick="openNewContact('${esc(c.company_id)}')">+ Add contact</button>
-      ${c.role==='vendor'?`<button class="pill-btn" onclick="openEditVendor('${esc(c.company_id)}')">Edit vendor</button>`:''}
-      ${draftAll?`<button class="pill-btn" onclick="draft('${esc(draftAll.email)}','${esc(draftAll.name||'')}')">✉ Draft email</button>`:''}
-      <button class="pill-btn" style="background:var(--red-soft);color:var(--red)" onclick="deleteCompany('${esc(c.company_id)}')">Delete</button>
+      <button class="pill-btn" onclick="openNewProject('${jesc(c.company_id)}')">+ New project</button>
+      <button class="pill-btn" onclick="openNewContact('${jesc(c.company_id)}')">+ Add contact</button>
+      ${c.role==='vendor'?`<button class="pill-btn" onclick="openEditVendor('${jesc(c.company_id)}')">Edit vendor</button>`:''}
+      ${draftAll?`<button class="pill-btn" onclick="draft('${jesc(draftAll.email)}','${jesc(draftAll.name||'')}')">✉ Draft email</button>`:''}
+      <button class="pill-btn" style="background:var(--red-soft);color:var(--red)" onclick="deleteCompany('${jesc(c.company_id)}')">Delete</button>
     </span>
   </div>`;
 
@@ -368,7 +381,7 @@ function renderMain(){
     const v=vendorById[selected]||{};
     h+=`<div class="section"><h2>Vendor details</h2>
       <div class="kv"><span class="k">Rep</span><span>${esc(v.rep||'—')}</span></div>
-      <div class="kv"><span class="k">Email</span><span>${v.email?`<a href="#" onclick="draft('${esc(v.email)}','${esc(v.rep||'')}');return false">${esc(v.email)}</a>`:'—'}</span></div>
+      <div class="kv"><span class="k">Email</span><span>${v.email?`<a href="#" onclick="draft('${jesc(v.email)}','${jesc(v.rep||'')}');return false">${esc(v.email)}</a>`:'—'}</span></div>
       <div class="kv"><span class="k">Phone</span><span>${esc(v.phone||'—')}</span></div>
       <div class="kv"><span class="k">Offerings</span><span>${esc(v.offerings||'—')}</span></div>
       <div class="kv"><span class="k">Send POs to</span><span>${esc(v.po_routing||'—')}</span></div>
@@ -379,7 +392,7 @@ function renderMain(){
   h+=`<div class="section"><h2>Contacts (${cts.length})</h2>`;
   h+= cts.length?`<table><thead><tr><th>Name</th><th>Title</th><th>Email</th><th>Phone</th><th>Last action</th></tr></thead><tbody>`+
     cts.map(x=>`<tr><td>${esc(x.name||'—')}</td><td class="muted">${esc(x.title||'')}</td>
-      <td class="contact">${x.email?`<a href="#" onclick="draft('${esc(x.email)}','${esc(x.name||'')}');return false">${esc(x.email)}</a>`:'—'}</td>
+      <td class="contact">${x.email?`<a href="#" onclick="draft('${jesc(x.email)}','${jesc(x.name||'')}');return false">${esc(x.email)}</a>`:'—'}</td>
       <td class="muted">${esc(x.phone||'')}</td><td class="muted">${esc((x.last_action||'').slice(0,10))}</td></tr>`).join('')+
     `</tbody></table>`:'<div class="muted">No contacts.</div>';
   h+=`</div>`;
@@ -387,9 +400,9 @@ function renderMain(){
   h+=`<div class="section"><h2>Projects (${prs.length})</h2>`;
   h+= prs.length?`<table><thead><tr><th>Project #</th><th>Description</th><th>Status</th><th>Owner</th>
       <th class="num">Revenue</th><th class="num">Margin</th><th>Collection</th></tr></thead><tbody>`+
-    prs.map(p=>`<tr class="click" onclick="openProject('${esc(p.project_no||'')}')">
+    prs.map(p=>`<tr class="click" onclick="openProject('${jesc(p.project_no||'')}')">
       <td><b>${esc(p.project_no||'—')}</b></td><td>${esc(p.description||'')}</td>
-      <td>${statusBadge(p.status)}</td><td>${(p.owner||[]).join(', ')||'—'}</td>
+      <td>${statusBadge(p.status)}</td><td>${esc((p.owner||[]).join(', '))||'—'}</td>
       <td class="num">${money(p.revenue)}</td><td class="num">${pct(p.margin)}</td>
       <td class="muted">${esc(p.collection_status||'')}</td></tr>`).join('')+
     `</tbody></table>`:'<div class="muted">No projects.</div>';
@@ -410,7 +423,7 @@ function renderMain(){
 
   h+=`<div class="section"><h2>Shipments (${sps.length})</h2>`;
   h+= sps.length?`<table><thead><tr><th>Project #</th><th>Vendor PO</th><th>Stage</th><th>Ship date</th></tr></thead><tbody>`+
-    sps.map(s=>`<tr class="click" onclick="openShipment('${esc(s.shipment_id||'')}')">
+    sps.map(s=>`<tr class="click" onclick="openShipment('${jesc(s.shipment_id||'')}')">
       <td>${esc(s.project_no||'—')}</td><td>${esc(s.vendor_po_raw||'')}</td>
       <td><span class="badge b-stage">${esc(s.stage||'—')}</span></td>
       <td class="muted">${esc((s.ship_date||'').slice(0,10))}</td></tr>`).join('')+
@@ -437,8 +450,8 @@ function openProject(pno){
     </div>
     <div class="field"><label>Owner (reps, comma-separated)</label><input id="f_owner" value="${esc((p.owner||[]).join(', '))}"/></div>
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
-    <button class="btn" id="saveBtn" onclick="saveProject('${esc(pno)}')">Save changes</button>
-    <button class="btn ghost" onclick="openNewShipment('${esc(pno)}')" style="margin-left:8px">+ Add shipment</button>
+    <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}')">Save changes</button>
+    <button class="btn ghost" onclick="openNewShipment('${jesc(pno)}')" style="margin-left:8px">+ Add shipment</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px" id="drawerNote"></p>`;
   document.getElementById('drawerNote').textContent = CRM.mode==='embedded'
@@ -476,7 +489,7 @@ function openNewProject(cid){
       <div class="field"><label>Owner (reps)</label><input id="n_owner" placeholder="D, G"/></div>
     </div>
     <div class="field"><label>Notes</label><textarea id="n_notes"></textarea></div>
-    <button class="btn" id="saveBtn" onclick="saveNewProject('${esc(cid)}')">Create project</button>
+    <button class="btn" id="saveBtn" onclick="saveNewProject('${jesc(cid)}')">Create project</button>
     <span class="saved" id="savedMsg"></span>`;
   document.getElementById('drawer').classList.add('open');
 }
@@ -512,7 +525,7 @@ function openNewContact(cid){
       <div class="field"><label>Email</label><input id="n_email" type="email"/></div>
       <div class="field"><label>Phone</label><input id="n_phone"/></div>
     </div>
-    <button class="btn" id="saveBtn" onclick="saveNewContact('${esc(cid)}')">Add contact</button>
+    <button class="btn" id="saveBtn" onclick="saveNewContact('${jesc(cid)}')">Add contact</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Matched by email if one already exists — no duplicates.</p>`;
   document.getElementById('drawer').classList.add('open');
@@ -544,7 +557,7 @@ function openNewShipment(pno){
         ${STAGES.map(x=>`<option ${x==='Ordered'?'selected':''}>${x}</option>`).join('')}</select></div>
       <div class="field"><label>Ship date</label><input id="n_sdate" type="date"/></div>
     </div>
-    <button class="btn" id="saveBtn" onclick="saveNewShipment('${esc(pno)}')">Add shipment</button>
+    <button class="btn" id="saveBtn" onclick="saveNewShipment('${jesc(pno)}')">Add shipment</button>
     <span class="saved" id="savedMsg"></span>`;
   document.getElementById('drawer').classList.add('open');
 }
@@ -580,7 +593,7 @@ function openNewCompany(role){
         <div class="field"><label>Send invoices to</label><input id="c_inv"/></div>
       </div>`
     :`<div class="field"><label>Primary location</label><input id="c_loc" placeholder="e.g. Louisville, KY"/></div>`}
-    <button class="btn" id="saveBtn" onclick="saveNewCompany('${esc(role)}')">Add ${isV?'vendor':'customer'}</button>
+    <button class="btn" id="saveBtn" onclick="saveNewCompany('${jesc(role)}')">Add ${isV?'vendor':'customer'}</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Saved to your CRM records; the name must be unique.</p>`;
   document.getElementById('drawer').classList.add('open');
@@ -628,7 +641,7 @@ function openEditVendor(cid){
       <div class="field"><label>Send POs to</label><input id="e_po" value="${esc(v.po_routing||'')}"/></div>
       <div class="field"><label>Send invoices to</label><input id="e_inv" value="${esc(v.invoice_routing||'')}"/></div>
     </div>
-    <button class="btn" id="saveBtn" onclick="saveEditVendor('${esc(cid)}')">Save changes</button>
+    <button class="btn" id="saveBtn" onclick="saveEditVendor('${jesc(cid)}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>`;
   document.getElementById('drawer').classList.add('open');
 }
@@ -675,7 +688,7 @@ function openShipment(sid){
         ${STAGES.map(x=>`<option ${s.stage===x?'selected':''}>${x}</option>`).join('')}</select></div>
       <div class="field"><label>Ship date</label><input id="s_date" type="date" value="${esc((s.ship_date||'').slice(0,10))}"/></div>
     </div>
-    <button class="btn" id="saveBtn" onclick="saveShipment('${esc(sid)}')">Save changes</button>
+    <button class="btn" id="saveBtn" onclick="saveShipment('${jesc(sid)}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">${CRM.mode==='embedded'
       ? 'Demo mode: this save lasts only for this browser session.'
@@ -725,7 +738,7 @@ async function draft(email,name){
     try{
       const r = await CRM.call('draft_email', {contact_email: email});
       if (r && r.ok && r.draft && r.draft.webLink){
-        window.open(r.draft.webLink, '_blank');
+        window.open(safeUrl(r.draft.webLink), '_blank');
         return;
       }
       console.warn('draft_email unavailable; compose-link fallback:', r && r.error);
@@ -756,7 +769,7 @@ def main():
     a = ap.parse_args()
     data = {}
     for name in ["companies", "contacts", "projects", "shipments", "invoices", "vendors"]:
-        with open(os.path.join(a.store, f"{name}.json")) as f:
+        with open(os.path.join(a.store, f"{name}.json"), encoding="utf-8-sig") as f:
             data[name] = json.load(f)
     # archived companies never ship into the demo bootstrap
     arch = {c["company_id"] for c in data["companies"] if c.get("archived")}
@@ -764,8 +777,14 @@ def main():
     for k in ["contacts", "projects", "shipments", "invoices"]:
         data[k] = [x for x in data[k] if x.get("company_id") not in arch]
     data["vendors"] = [v for v in data["vendors"] if not v.get("archived")]
-    html = TEMPLATE.replace("__DATA__", json.dumps(data))
-    with open(a.out, "w") as f:
+    # Embed as a JSON literal in an inline <script>. json.dumps does NOT
+    # escape "</script>" or U+2028/2029, so a store value containing those
+    # would break out of the script element. Neutralize them.
+    blob = (json.dumps(data)
+            .replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace(" ", "\\u2028").replace(" ", "\\u2029"))
+    html = TEMPLATE.replace("__DATA__", blob)
+    with open(a.out, "w", encoding="utf-8") as f:
         f.write(html)
     kb = round(len(html) / 1024)
     print(f"Wrote {a.out} ({kb} KB) — {len(data['companies'])} companies, "
