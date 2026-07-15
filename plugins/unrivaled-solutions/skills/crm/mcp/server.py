@@ -19,6 +19,7 @@ Contract rules (crm-hybrid-build-plan.md):
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -97,8 +98,12 @@ VENDOR_FIELDS = {
 }
 COMPANY_ROLES = {"customer", "vendor"}
 
+LOCK_FILENAME = ".store.lock"
+LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
+LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
-SERVER_VERSION = "0.1.9"
+
+SERVER_VERSION = "0.1.10"
 
 
 class StoreError(Exception):
@@ -201,6 +206,54 @@ class Store:
                 f.write(json.dumps(entry, default=str) + "\n")
         except OSError as e:
             _launch_log(f"changelog append failed (non-fatal): {e}")
+
+    @contextlib.contextmanager
+    def write_lock(self):
+        """Exclusive lock across the whole store, held for one write tool's
+        full read-modify-write (v0.1.10). Each open Cowork chat window spawns
+        its own server.py process against the same store; without this, two
+        windows can each load a file before either saves, and whichever save
+        lands second silently discards the other's change — ok:true returned
+        to both callers, no error anywhere. Implemented with atomic exclusive
+        file creation (O_CREAT|O_EXCL), which behaves the same on Windows and
+        POSIX, unlike fcntl/msvcrt — no extra dependency needed. Self-heals:
+        a lock file older than LOCK_STALE_SECONDS is treated as an orphan
+        from a crashed process and taken over, rather than deadlocking the
+        store forever."""
+        lock_path = self.root / LOCK_FILENAME
+        deadline = time.time() + LOCK_WAIT_SECONDS
+        acquired = False
+        while not acquired:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"{os.getpid()} "
+                             f"{datetime.now(timezone.utc).isoformat()}".encode())
+                os.close(fd)
+                acquired = True
+            except FileExistsError:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                except OSError:
+                    age = 0  # vanished between the failed create and stat; retry
+                if age > LOCK_STALE_SECONDS:
+                    try:
+                        lock_path.unlink()
+                    except OSError:
+                        pass
+                    continue
+                if time.time() >= deadline:
+                    raise StoreError(
+                        "store is locked by another operation (another "
+                        "Cowork window may be mid-save) — try again in a "
+                        "moment")
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
 
 
 STORE: Store = None  # set in main()
@@ -450,17 +503,18 @@ def update_project(project_no: str, fields: dict) -> dict:
     """Edit a project card (status, owner, revenue, collection_status, notes, ...).
     Validated against the v0.1 schema; persists atomically."""
     try:
-        _validate(fields, PROJECT_FIELDS - {"project_no"}, "project")
-        if "company_id" in fields:
-            _require_company(fields["company_id"])
-        projects = STORE.load("projects")
-        target = [p for p in projects if str(p["project_no"]) == str(project_no)]
-        if not target:
-            return _err(f"project '{project_no}' not found")
-        target[0].update(fields)
-        STORE.save("projects", projects)
-        STORE.log("update", "project", str(project_no), fields)
-        return {"ok": True, "interface_version": VERSION, "project": target[0]}
+        with STORE.write_lock():
+            _validate(fields, PROJECT_FIELDS - {"project_no"}, "project")
+            if "company_id" in fields:
+                _require_company(fields["company_id"])
+            projects = STORE.load("projects")
+            target = [p for p in projects if str(p["project_no"]) == str(project_no)]
+            if not target:
+                return _err(f"project '{project_no}' not found")
+            target[0].update(fields)
+            STORE.save("projects", projects)
+            STORE.log("update", "project", str(project_no), fields)
+            return {"ok": True, "interface_version": VERSION, "project": target[0]}
     except StoreError as e:
         return _err(e)
 
@@ -470,15 +524,16 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
     """Edit a shipment leg — advance stage (Ordered|Shipped|Delivered|Installed|
     On Hold|Cancelled), set ship_date/eta/notes."""
     try:
-        _validate(fields, SHIPMENT_FIELDS - {"shipment_id"}, "shipment")
-        shipments = STORE.load("shipments")
-        target = [s for s in shipments if s["shipment_id"] == shipment_id]
-        if not target:
-            return _err(f"shipment '{shipment_id}' not found")
-        target[0].update(fields)
-        STORE.save("shipments", shipments)
-        STORE.log("update", "shipment", shipment_id, fields)
-        return {"ok": True, "interface_version": VERSION, "shipment": target[0]}
+        with STORE.write_lock():
+            _validate(fields, SHIPMENT_FIELDS - {"shipment_id"}, "shipment")
+            shipments = STORE.load("shipments")
+            target = [s for s in shipments if s["shipment_id"] == shipment_id]
+            if not target:
+                return _err(f"shipment '{shipment_id}' not found")
+            target[0].update(fields)
+            STORE.save("shipments", shipments)
+            STORE.log("update", "shipment", shipment_id, fields)
+            return {"ok": True, "interface_version": VERSION, "shipment": target[0]}
     except StoreError as e:
         return _err(e)
 
@@ -488,30 +543,31 @@ def upsert_contact(fields: dict) -> dict:
     """Create or update a contact. Match key: email if present, else
     (company_id, name). company_id must exist."""
     try:
-        _validate(fields, CONTACT_FIELDS, "contact")
-        if not fields.get("company_id") or not fields.get("name"):
-            raise StoreError("contact needs at least company_id and name")
-        _require_company(fields["company_id"])
-        contacts = STORE.load("contacts")
-        match = None
-        if fields.get("email"):
-            match = next((c for c in contacts
-                          if _norm(c.get("email")) == _norm(fields["email"])), None)
-        if match is None:
-            match = next((c for c in contacts
-                          if c["company_id"] == fields["company_id"]
-                          and _norm(c.get("name")) == _norm(fields["name"])), None)
-        if match:
-            match.update(fields)
-            op, record = "update", match
-        else:
-            record = {k: None for k in CONTACT_FIELDS}
-            record.update(fields)
-            contacts.append(record)
-            op = "create"
-        STORE.save("contacts", contacts)
-        STORE.log(op, "contact", fields.get("email") or fields["name"], fields)
-        return {"ok": True, "interface_version": VERSION, "op": op, "contact": record}
+        with STORE.write_lock():
+            _validate(fields, CONTACT_FIELDS, "contact")
+            if not fields.get("company_id") or not fields.get("name"):
+                raise StoreError("contact needs at least company_id and name")
+            _require_company(fields["company_id"])
+            contacts = STORE.load("contacts")
+            match = None
+            if fields.get("email"):
+                match = next((c for c in contacts
+                              if _norm(c.get("email")) == _norm(fields["email"])), None)
+            if match is None:
+                match = next((c for c in contacts
+                              if c["company_id"] == fields["company_id"]
+                              and _norm(c.get("name")) == _norm(fields["name"])), None)
+            if match:
+                match.update(fields)
+                op, record = "update", match
+            else:
+                record = {k: None for k in CONTACT_FIELDS}
+                record.update(fields)
+                contacts.append(record)
+                op = "create"
+            STORE.save("contacts", contacts)
+            STORE.log(op, "contact", fields.get("email") or fields["name"], fields)
+            return {"ok": True, "interface_version": VERSION, "op": op, "contact": record}
     except StoreError as e:
         return _err(e)
 
@@ -520,15 +576,16 @@ def upsert_contact(fields: dict) -> dict:
 def update_company(company_id: str, fields: dict) -> dict:
     """Edit a company record (display_name, role, domains, locations)."""
     try:
-        _validate(fields, COMPANY_FIELDS - {"company_id"}, "company")
-        companies = STORE.load("companies")
-        target = [c for c in companies if c["company_id"] == company_id]
-        if not target:
-            return _err(f"company '{company_id}' not found")
-        target[0].update(fields)
-        STORE.save("companies", companies)
-        STORE.log("update", "company", company_id, fields)
-        return {"ok": True, "interface_version": VERSION, "company": target[0]}
+        with STORE.write_lock():
+            _validate(fields, COMPANY_FIELDS - {"company_id"}, "company")
+            companies = STORE.load("companies")
+            target = [c for c in companies if c["company_id"] == company_id]
+            if not target:
+                return _err(f"company '{company_id}' not found")
+            target[0].update(fields)
+            STORE.save("companies", companies)
+            STORE.log("update", "company", company_id, fields)
+            return {"ok": True, "interface_version": VERSION, "company": target[0]}
     except StoreError as e:
         return _err(e)
 
@@ -538,21 +595,22 @@ def create_project(fields: dict) -> dict:
     """Add a project card. Requires project_no (unique) and an existing
     company_id."""
     try:
-        _validate(fields, PROJECT_FIELDS, "project")
-        pn = fields.get("project_no")
-        if not pn or not fields.get("company_id"):
-            raise StoreError("create_project needs project_no and company_id")
-        _require_company(fields["company_id"])
-        projects = STORE.load("projects")
-        if any(str(p["project_no"]) == str(pn) for p in projects):
-            raise StoreError(f"project '{pn}' already exists")
-        record = {k: None for k in PROJECT_FIELDS}
-        record.update({"owner": [], "annotations": [], "po_flag": False})
-        record.update(fields)
-        projects.append(record)
-        STORE.save("projects", projects)
-        STORE.log("create", "project", str(pn), fields)
-        return {"ok": True, "interface_version": VERSION, "project": record}
+        with STORE.write_lock():
+            _validate(fields, PROJECT_FIELDS, "project")
+            pn = fields.get("project_no")
+            if not pn or not fields.get("company_id"):
+                raise StoreError("create_project needs project_no and company_id")
+            _require_company(fields["company_id"])
+            projects = STORE.load("projects")
+            if any(str(p["project_no"]) == str(pn) for p in projects):
+                raise StoreError(f"project '{pn}' already exists")
+            record = {k: None for k in PROJECT_FIELDS}
+            record.update({"owner": [], "annotations": [], "po_flag": False})
+            record.update(fields)
+            projects.append(record)
+            STORE.save("projects", projects)
+            STORE.log("create", "project", str(pn), fields)
+            return {"ok": True, "interface_version": VERSION, "project": record}
     except StoreError as e:
         return _err(e)
 
@@ -562,32 +620,33 @@ def create_shipment(project_no: str, fields: dict) -> dict:
     """Add a shipment leg to an existing project. shipment_id is derived
     (<project_no>-L<n>) unless supplied."""
     try:
-        _validate(fields, SHIPMENT_FIELDS, "shipment")
-        projects = STORE.load("projects")
-        pr = next((p for p in projects if str(p["project_no"]) == str(project_no)), None)
-        if not pr:
-            raise StoreError(f"project '{project_no}' not found")
-        shipments = STORE.load("shipments")
-        sid = fields.get("shipment_id")
-        if not sid:
-            n = 1 + sum(1 for s in shipments
-                        if str(s.get("project_no")) == str(project_no))
-            sid = f"{project_no}-L{n}"
-        if any(s["shipment_id"] == sid for s in shipments):
-            raise StoreError(f"shipment '{sid}' already exists")
-        record = {k: None for k in SHIPMENT_FIELDS}
-        record.update({
-            "shipment_id": sid, "project_no": str(project_no),
-            "all_project_nos": [str(project_no)], "stage": "Ordered",
-            "company_id": pr["company_id"], "client_name": pr.get("company_name"),
-            "linked_to_project": True,
-        })
-        record.update(fields)
-        _validate({"stage": record["stage"]}, SHIPMENT_FIELDS, "shipment")
-        shipments.append(record)
-        STORE.save("shipments", shipments)
-        STORE.log("create", "shipment", sid, fields)
-        return {"ok": True, "interface_version": VERSION, "shipment": record}
+        with STORE.write_lock():
+            _validate(fields, SHIPMENT_FIELDS, "shipment")
+            projects = STORE.load("projects")
+            pr = next((p for p in projects if str(p["project_no"]) == str(project_no)), None)
+            if not pr:
+                raise StoreError(f"project '{project_no}' not found")
+            shipments = STORE.load("shipments")
+            sid = fields.get("shipment_id")
+            if not sid:
+                n = 1 + sum(1 for s in shipments
+                            if str(s.get("project_no")) == str(project_no))
+                sid = f"{project_no}-L{n}"
+            if any(s["shipment_id"] == sid for s in shipments):
+                raise StoreError(f"shipment '{sid}' already exists")
+            record = {k: None for k in SHIPMENT_FIELDS}
+            record.update({
+                "shipment_id": sid, "project_no": str(project_no),
+                "all_project_nos": [str(project_no)], "stage": "Ordered",
+                "company_id": pr["company_id"], "client_name": pr.get("company_name"),
+                "linked_to_project": True,
+            })
+            record.update(fields)
+            _validate({"stage": record["stage"]}, SHIPMENT_FIELDS, "shipment")
+            shipments.append(record)
+            STORE.save("shipments", shipments)
+            STORE.log("create", "shipment", sid, fields)
+            return {"ok": True, "interface_version": VERSION, "shipment": record}
     except StoreError as e:
         return _err(e)
 
@@ -598,30 +657,31 @@ def create_company(fields: dict) -> dict:
     to 'customer'. company_id is derived from the name unless supplied, and
     must be unique."""
     try:
-        _validate(fields, COMPANY_FIELDS, "company")
-        name = fields.get("display_name")
-        if not name:
-            raise StoreError("create_company needs display_name")
-        role = fields.get("role") or "customer"
-        if role not in COMPANY_ROLES:
-            raise StoreError(f"role must be one of {sorted(COMPANY_ROLES)}")
-        cid = fields.get("company_id") or _slug(name)
-        if not cid:
-            raise StoreError("could not derive a company_id from display_name")
-        companies = STORE.load("companies")
-        if any(c["company_id"] == cid for c in companies):
-            raise StoreError(f"company '{cid}' already exists")
-        record = {k: None for k in COMPANY_FIELDS}
-        record.update({"company_id": cid, "display_name": name, "role": role,
-                       "domains": [], "locations": [], "archived": False})
-        record.update(fields)
-        record["company_id"], record["role"] = cid, role
-        if not record.get("primary_location") and record.get("locations"):
-            record["primary_location"] = record["locations"][0]
-        companies.append(record)
-        STORE.save("companies", companies)
-        STORE.log("create", "company", cid, {"display_name": name, "role": role})
-        return {"ok": True, "interface_version": VERSION, "company": record}
+        with STORE.write_lock():
+            _validate(fields, COMPANY_FIELDS, "company")
+            name = fields.get("display_name")
+            if not name:
+                raise StoreError("create_company needs display_name")
+            role = fields.get("role") or "customer"
+            if role not in COMPANY_ROLES:
+                raise StoreError(f"role must be one of {sorted(COMPANY_ROLES)}")
+            cid = fields.get("company_id") or _slug(name)
+            if not cid:
+                raise StoreError("could not derive a company_id from display_name")
+            companies = STORE.load("companies")
+            if any(c["company_id"] == cid for c in companies):
+                raise StoreError(f"company '{cid}' already exists")
+            record = {k: None for k in COMPANY_FIELDS}
+            record.update({"company_id": cid, "display_name": name, "role": role,
+                           "domains": [], "locations": [], "archived": False})
+            record.update(fields)
+            record["company_id"], record["role"] = cid, role
+            if not record.get("primary_location") and record.get("locations"):
+                record["primary_location"] = record["locations"][0]
+            companies.append(record)
+            STORE.save("companies", companies)
+            STORE.log("create", "company", cid, {"display_name": name, "role": role})
+            return {"ok": True, "interface_version": VERSION, "company": record}
     except StoreError as e:
         return _err(e)
 
@@ -633,35 +693,36 @@ def create_vendor(fields: dict) -> dict:
     routing). Requires display_name; company_id derived from the name unless
     supplied. Vendor detail must not already exist."""
     try:
-        _validate(fields, VENDOR_FIELDS, "vendor")
-        name = fields.get("display_name")
-        if not name:
-            raise StoreError("create_vendor needs display_name")
-        cid = fields.get("company_id") or _slug(name)
-        if not cid:
-            raise StoreError("could not derive a company_id from display_name")
-        companies = STORE.load("companies")
-        comp = next((c for c in companies if c["company_id"] == cid), None)
-        if comp is None:
-            comp = {k: None for k in COMPANY_FIELDS}
-            comp.update({"company_id": cid, "display_name": name, "role": "vendor",
-                         "domains": [], "locations": [], "archived": False})
-            companies.append(comp)
-        else:
-            comp["role"] = "vendor"
-        STORE.save("companies", companies)
-        vendors = STORE.load("vendors")
-        if any(v["company_id"] == cid for v in vendors):
-            raise StoreError(f"vendor '{cid}' already exists")
-        record = {k: None for k in VENDOR_FIELDS}
-        record.update({"company_id": cid, "display_name": name, "archived": False,
-                       "po_routing_source": fields.get("po_routing_source") or "manual"})
-        record.update(fields)
-        record["company_id"] = cid
-        vendors.append(record)
-        STORE.save("vendors", vendors)
-        STORE.log("create", "vendor", cid, {"display_name": name})
-        return {"ok": True, "interface_version": VERSION, "vendor": record}
+        with STORE.write_lock():
+            _validate(fields, VENDOR_FIELDS, "vendor")
+            name = fields.get("display_name")
+            if not name:
+                raise StoreError("create_vendor needs display_name")
+            cid = fields.get("company_id") or _slug(name)
+            if not cid:
+                raise StoreError("could not derive a company_id from display_name")
+            companies = STORE.load("companies")
+            comp = next((c for c in companies if c["company_id"] == cid), None)
+            if comp is None:
+                comp = {k: None for k in COMPANY_FIELDS}
+                comp.update({"company_id": cid, "display_name": name, "role": "vendor",
+                             "domains": [], "locations": [], "archived": False})
+                companies.append(comp)
+            else:
+                comp["role"] = "vendor"
+            STORE.save("companies", companies)
+            vendors = STORE.load("vendors")
+            if any(v["company_id"] == cid for v in vendors):
+                raise StoreError(f"vendor '{cid}' already exists")
+            record = {k: None for k in VENDOR_FIELDS}
+            record.update({"company_id": cid, "display_name": name, "archived": False,
+                           "po_routing_source": fields.get("po_routing_source") or "manual"})
+            record.update(fields)
+            record["company_id"] = cid
+            vendors.append(record)
+            STORE.save("vendors", vendors)
+            STORE.log("create", "vendor", cid, {"display_name": name})
+            return {"ok": True, "interface_version": VERSION, "vendor": record}
     except StoreError as e:
         return _err(e)
 
@@ -671,15 +732,16 @@ def update_vendor(company_id: str, fields: dict) -> dict:
     """Edit a vendor detail record (rep, email, phone, offerings, PO/invoice
     routing, hq_location)."""
     try:
-        _validate(fields, VENDOR_FIELDS - {"company_id"}, "vendor")
-        vendors = STORE.load("vendors")
-        target = [v for v in vendors if v["company_id"] == company_id]
-        if not target:
-            return _err(f"vendor '{company_id}' not found")
-        target[0].update(fields)
-        STORE.save("vendors", vendors)
-        STORE.log("update", "vendor", company_id, fields)
-        return {"ok": True, "interface_version": VERSION, "vendor": target[0]}
+        with STORE.write_lock():
+            _validate(fields, VENDOR_FIELDS - {"company_id"}, "vendor")
+            vendors = STORE.load("vendors")
+            target = [v for v in vendors if v["company_id"] == company_id]
+            if not target:
+                return _err(f"vendor '{company_id}' not found")
+            target[0].update(fields)
+            STORE.save("vendors", vendors)
+            STORE.log("update", "vendor", company_id, fields)
+            return {"ok": True, "interface_version": VERSION, "vendor": target[0]}
     except StoreError as e:
         return _err(e)
 
@@ -689,24 +751,25 @@ def _set_archived(company_id: str, archived: bool) -> dict:
     the record is flagged and hidden from default reads; its projects, contacts,
     shipments, and invoices are preserved and reappear on restore."""
     try:
-        companies = STORE.load("companies")
-        target = [c for c in companies if c["company_id"] == company_id]
-        if not target:
-            return _err(f"company '{company_id}' not found")
-        target[0]["archived"] = archived
-        target[0]["archived_at"] = (
-            datetime.now(timezone.utc).isoformat() if archived else None)
-        STORE.save("companies", companies)
-        # mirror onto the vendor detail record if this company is a vendor
-        vendors = STORE.load("vendors")
-        if any(v["company_id"] == company_id for v in vendors):
-            for v in vendors:
-                if v["company_id"] == company_id:
-                    v["archived"] = archived
-            STORE.save("vendors", vendors)
-        STORE.log("archive" if archived else "restore", "company", company_id,
-                  {"archived": archived})
-        return {"ok": True, "interface_version": VERSION, "company": target[0]}
+        with STORE.write_lock():
+            companies = STORE.load("companies")
+            target = [c for c in companies if c["company_id"] == company_id]
+            if not target:
+                return _err(f"company '{company_id}' not found")
+            target[0]["archived"] = archived
+            target[0]["archived_at"] = (
+                datetime.now(timezone.utc).isoformat() if archived else None)
+            STORE.save("companies", companies)
+            # mirror onto the vendor detail record if this company is a vendor
+            vendors = STORE.load("vendors")
+            if any(v["company_id"] == company_id for v in vendors):
+                for v in vendors:
+                    if v["company_id"] == company_id:
+                        v["archived"] = archived
+                STORE.save("vendors", vendors)
+            STORE.log("archive" if archived else "restore", "company", company_id,
+                      {"archived": archived})
+            return {"ok": True, "interface_version": VERSION, "company": target[0]}
     except StoreError as e:
         return _err(e)
 
@@ -734,21 +797,22 @@ def set_enrichment(company_id: str, data: dict) -> dict:
     (the CRM skill, via the read-only Outlook MCP) computes the data; this
     tool only persists it."""
     try:
-        _require_company(company_id)
-        unknown = set(data) - ENRICHMENT_FIELDS
-        if unknown:
-            raise StoreError(f"unknown enrichment field(s): {sorted(unknown)}")
-        enrichment = STORE.load_enrichment()
-        entry = dict(data)
-        entry.setdefault("refreshed_at", datetime.now(timezone.utc).isoformat())
-        enrichment[company_id] = entry
-        STORE.save_enrichment(enrichment)
-        STORE.log("enrich", "company", company_id,
-                  {"threads": len(data.get("threads") or []),
-                   "meetings": len(data.get("meetings") or []),
-                   "last_contact": data.get("last_contact")})
-        return {"ok": True, "interface_version": VERSION,
-                "company_id": company_id, "enrichment": entry}
+        with STORE.write_lock():
+            _require_company(company_id)
+            unknown = set(data) - ENRICHMENT_FIELDS
+            if unknown:
+                raise StoreError(f"unknown enrichment field(s): {sorted(unknown)}")
+            enrichment = STORE.load_enrichment()
+            entry = dict(data)
+            entry.setdefault("refreshed_at", datetime.now(timezone.utc).isoformat())
+            enrichment[company_id] = entry
+            STORE.save_enrichment(enrichment)
+            STORE.log("enrich", "company", company_id,
+                      {"threads": len(data.get("threads") or []),
+                       "meetings": len(data.get("meetings") or []),
+                       "last_contact": data.get("last_contact")})
+            return {"ok": True, "interface_version": VERSION,
+                    "company_id": company_id, "enrichment": entry}
     except StoreError as e:
         return _err(e)
 

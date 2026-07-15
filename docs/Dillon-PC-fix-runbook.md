@@ -1,4 +1,4 @@
-# Unrivaled CRM — production setup (v0.1.9, updated 7/15)
+# Unrivaled CRM — production setup (v0.1.10, updated 7/15)
 
 Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `powershell` → Enter). No admin needed.
 
@@ -6,9 +6,9 @@ Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `po
 
 ---
 
-## STEP 1 — Install plugin v0.1.9
+## STEP 1 — Install plugin v0.1.10
 
-Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.9** — anything older than 0.1.4 can never connect, 0.1.8 is the first where the visual CRM app talks live to the server, and 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed). (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
+Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.10** — anything older than 0.1.4 can never connect, 0.1.8 is the first where the visual CRM app talks live to the server, 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed), and 0.1.10 adds a store-wide write lock so two open Cowork windows can't silently overwrite each other's edits (if the store is briefly locked you'll see a clear "try again in a moment" message instead of a lost change). (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
 
 ## STEP 2 — Real Python with the `mcp` package
 

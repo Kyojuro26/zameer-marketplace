@@ -114,7 +114,10 @@ Just talk to Claude:
 
 Your data stays yours (a folder you own; nothing hard-coded). Drafts only —
 nothing is ever sent on your behalf. Outlook data is never deleted. Anything
-the system isn't sure about is flagged for your review, never guessed.
+the system isn't sure about is flagged for your review, never guessed. If two
+Cowork windows edit the CRM at the same moment, the store is locked for the
+instant it takes to save — you'll see a "try again in a moment" message
+instead of one edit silently overwriting the other.
 
 
 ## Dev/prod protocol (2026-07-14)
