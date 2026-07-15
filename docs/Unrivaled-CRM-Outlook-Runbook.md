@@ -31,11 +31,13 @@ registration**:
 ### 2. Sign in once (PowerShell)
 ```powershell
 cd "$env:USERPROFILE\Downloads\zameer-marketplace\plugins\unrivaled-solutions\skills\crm\mcp"
-# Creds live in a config file INSIDE the store — env vars never reach the
-# plugin (Claude spawns it with a sanitized environment). -Encoding Ascii
-# matters: Out-File / default Set-Content write UTF-16, which older plugin
-# versions couldn't read (0.1.8+ tolerates any encoding, but be kind).
-Set-Content -Path "C:\UnrivaledCRM\store\.graph_config.json" -Encoding Ascii -Value '{"client_id": "<his client id>", "tenant_id": "<his tenant id>"}'
+# Creds live in a config file inside the store's .secrets subfolder (v0.1.9+;
+# excluded from the OneDrive backup task) — env vars never reach the plugin
+# (Claude spawns it with a sanitized environment). -Encoding Ascii matters:
+# Out-File / default Set-Content write UTF-16, which older plugin versions
+# couldn't read (0.1.8+ tolerates any encoding, but be kind).
+New-Item -ItemType Directory -Force -Path "C:\UnrivaledCRM\store\.secrets" | Out-Null
+Set-Content -Path "C:\UnrivaledCRM\store\.secrets\.graph_config.json" -Encoding Ascii -Value '{"client_id": "<his client id>", "tenant_id": "<his tenant id>"}'
 python -m pip install msal requests --quiet
 python -u graph_login.py --store "C:\UnrivaledCRM\store"
 ```
@@ -44,8 +46,8 @@ mailbox. Wait ~15 s for the code line to appear (the `-u` forces it to print).
 Look for "Signed in as … — Outlook tools are now live."
 
 ### 3. Make it live inside Cowork
-Nothing to set — the plugin reads `.graph_config.json` from the store (written
-in Step 2) and the token cache saved by the sign-in. **Fully quit
+Nothing to set — the plugin reads `.secrets/.graph_config.json` from the store
+(written in Step 2) and the token cache saved by the sign-in. **Fully quit
 Cowork** (system-tray icon → Quit) and **reopen it** so the plugin restarts. Click-to-draft in the CRM
 now writes real Outlook drafts.
 

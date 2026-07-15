@@ -45,14 +45,14 @@ After this one-time step, your CRM is live and everything you change is saved.
 
 Just talk to Claude in plain English. For example:
 
-- *"Pull up Vibracoustic"* — see a customer's contacts, projects, shipments,
+- *"Pull up Ace Manufacturing"* — see a customer's contacts, projects, shipments,
   and invoices.
-- *"What's the status of project 1318?"*
-- *"Mark shipment 1352-L1 delivered."*
-- *"Add a new customer — Ace Manufacturing in Louisville."*
+- *"What's the status of project 4521?"*
+- *"Mark shipment 4521-L1 delivered."*
+- *"Add a new customer — Meridian Corp in Louisville."*
 - *"Add a vendor — Bolt Supply, rep Jane, they sell fasteners."*
-- *"Delete Dallas Group of America"* (see *Deleting* below — it's reversible).
-- *"Draft an email to Jeff Haysley."*
+- *"Delete Riverside Fasteners"* (see *Deleting* below — it's reversible).
+- *"Draft an email to Alex Rivera."*
 - *"Open the CRM"* — opens the visual app: search on the left, click any
   company to see everything, and use the buttons to add a customer or vendor,
   add a project, or delete.
@@ -96,7 +96,7 @@ shipment stages, tracking receivables — all saved to your own records.
 ## A couple of things we'll confirm with you
 
 To make the records perfect, we'll want your quick input on: which look-alike
-names are the same company (e.g. *Dallas Group* vs *Dallas Group of America*),
+names are the same company (e.g. *Riverside Fasteners* vs *Riverside Fasteners Inc*),
 and what the rep initials **D** and **G** stand for so owners show real names.
 
 ---

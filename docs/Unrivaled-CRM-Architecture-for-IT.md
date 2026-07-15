@@ -27,8 +27,11 @@ data.** Nothing needs to be provisioned, hosted, or opened to the network.
 - Files: customers, contacts, projects, shipments, invoices, vendors, plus an
   append-only change log for auditing.
 - **Backup is a daily scheduled robocopy into OneDrive** (`CRM-Backups`),
-  which keeps it covered by your existing
-  Microsoft 365 backup/retention. No separate backup system is required.
+  which keeps it covered by your existing Microsoft 365 backup/retention. No
+  separate backup system is required. The backup task excludes the store's
+  `.secrets` subfolder (`/XD .secrets`) — that's where the Outlook OAuth
+  token cache and app credentials live, and they're deliberately never
+  written to cloud-synced storage.
 - Data never leaves Dylan's environment. It is **not** stored in any cloud CRM,
   SaaS, or third-party database.
 

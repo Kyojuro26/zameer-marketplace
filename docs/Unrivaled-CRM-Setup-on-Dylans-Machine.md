@@ -89,8 +89,8 @@ Dylan now has a fully working CRM.
 Follow **`Unrivaled-CRM-Outlook-Runbook.md`** (Windows steps). In short:
 1. Register the app in **Dylan's** M365 (his admin) → client + tenant IDs.
 2. One-time `python -u graph_login.py` device sign-in with **Dylan's** mailbox.
-3. Write `.graph_config.json` into the store (client + tenant IDs) + restart
-   Cowork → click-to-draft writes real Outlook **drafts** (never sends).
+3. Write `.secrets/.graph_config.json` into the store (client + tenant IDs) +
+   restart Cowork → click-to-draft writes real Outlook **drafts** (never sends).
 4. Connect the read-only **Microsoft 365 connector** for inbound activity.
 5. Create the **scheduled auto-refresh** so each customer's Outlook activity
    updates every morning on its own.
@@ -118,7 +118,7 @@ Follow **`Unrivaled-CRM-Outlook-Runbook.md`** (Windows steps). In short:
   (`type $HOME\.unrivaled-crm-store` must print the store path) and read the
   launch log: `type $env:TEMP\unrivaled-crm-launch.log`. Fully restart Cowork
   (check the system tray). Confirm the store folder has the `.json` files.
-- **Outlook draft says "not configured":** `.graph_config.json` is missing
-  from the store, unparseable, or the client/tenant IDs in it aren't
+- **Outlook draft says "not configured":** `.secrets/.graph_config.json` is
+  missing from the store, unparseable, or the client/tenant IDs in it aren't
   written correctly, or `graph_login` hasn't been run for this store — see Part 5.
 - **Paths with spaces:** always keep them in double quotes in PowerShell.

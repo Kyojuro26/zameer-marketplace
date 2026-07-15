@@ -34,9 +34,18 @@ pip3 install mcp msal requests
 
 **2. Your data folder.** Your CRM records live in a folder YOU own. Keep the
 live store OUTSIDE OneDrive (sync locks break saves); back it up INTO OneDrive
-with the scheduled robocopy task instead. Tell the plugin where the store is by
-writing its path into a pointer file in your home directory (env vars never
-reach the server — Claude spawns it with a sanitized environment):
+with a scheduled robocopy task instead — **excluding the `.secrets` subfolder**,
+which holds your Outlook sign-in token, so a mailbox-access credential never
+ends up in synced cloud storage:
+
+```powershell
+# Scheduled Task action — run daily. /XD excludes the whole .secrets directory.
+robocopy "C:\UnrivaledCRM\store" "$env:OneDrive\CRM-Backups" /MIR /XD .secrets
+```
+
+Tell the plugin where the store is by writing its path into a pointer file in
+your home directory (env vars never reach the server — Claude spawns it with a
+sanitized environment):
 
 ```powershell
 # Windows (PowerShell) — ASCII avoids BOM/UTF-16 surprises
@@ -54,12 +63,20 @@ delivery engineer (pipeline/normalize.py) — you don't run that yourself.
 **3. Outlook drafts & sync (optional but recommended).** Requires a one-time
 app registration in your Microsoft 365 tenant (your admin: ~2 minutes —
 instructions in `skills/crm/mcp/graph_login.py` header and the delivery
-note), then create `.graph_config.json` inside the store folder (plain UTF-8
-JSON — not `Out-File`, which writes UTF-16):
+note), then create `.graph_config.json` inside a `.secrets` subfolder of the
+store (plain UTF-8 JSON — not `Out-File`, which writes UTF-16). This folder is
+what the backup command above excludes, so create it explicitly:
 
 ```powershell
-Set-Content -Path "C:\UnrivaledCRM\store\.graph_config.json" -Encoding Ascii -Value '{"client_id": "<app client id>", "tenant_id": "<tenant id>"}'
+New-Item -ItemType Directory -Force -Path "C:\UnrivaledCRM\store\.secrets" | Out-Null
+Set-Content -Path "C:\UnrivaledCRM\store\.secrets\.graph_config.json" -Encoding Ascii -Value '{"client_id": "<app client id>", "tenant_id": "<tenant id>"}'
 ```
+
+(Upgrading from an older version? The server auto-migrates an existing
+`.graph_config.json`/`.graph_token_cache.json` from the top of the store into
+`.secrets/` the first time it runs — no action needed, but double-check your
+scheduled backup task already has the `/XD .secrets` flag above, since that's
+a one-time manual edit to the task itself.)
 
 Then sign in once:
 
@@ -79,11 +96,11 @@ dates, threads, and meetings per company.
 
 Just talk to Claude:
 
-- "Pull up Vibracoustic" / "what's the status of project 1318"
-- "Mark shipment 1352-L1 delivered"
-- "Add a new project for Ford — racking install, $12k, rep D"
-- "Draft an email to Jeff Haysley"
-- "Sync Ford into my Outlook"
+- "Pull up Ace Manufacturing" / "what's the status of project 4521"
+- "Mark shipment 4521-L1 delivered"
+- "Add a new project for Meridian Corp — racking install, $12k, rep D"
+- "Draft an email to Alex Rivera"
+- "Sync Meridian Corp into my Outlook"
 - "Open the CRM" — the visual app
 
 ## Configuration files (no env vars — see Dev/prod protocol)
@@ -91,7 +108,7 @@ Just talk to Claude:
 | File | Required | Purpose |
 |---|---|---|
 | `~/.unrivaled-crm-store` | Yes | One line: path to your CRM data folder |
-| `<store>/.graph_config.json` | For Outlook writes | `{"client_id": ..., "tenant_id": ...}` |
+| `<store>/.secrets/.graph_config.json` | For Outlook writes | `{"client_id": ..., "tenant_id": ...}` — exclude `.secrets` from any backup |
 
 ## Guarantees
 
@@ -103,15 +120,18 @@ the system isn't sure about is flagged for your review, never guessed.
 ## Dev/prod protocol (2026-07-14)
 
 - **Production data = Dillon's store** (`C:\UnrivaledCRM\store`, pointed to by
-  `~\.unrivaled-crm-store`; daily robocopy backup into OneDrive `CRM-Backups`).
+  `~\.unrivaled-crm-store`; daily robocopy backup into OneDrive `CRM-Backups`,
+  `/XD .secrets` so the Outlook token never leaves his machine).
   Zeeshan's Mac store is a dev fixture. Data never moves between machines.
 - **Code flows one way:** edit build -> rsync into zameer-marketplace clone
   (publish.sh exclusions) -> bump `plugin.json` version -> push `main` ->
   Dillon updates in Settings -> verify with "crm info" (`server_version`).
 - **Never ship store data.** Pipeline (`normalize.py`) output must never
   overwrite a live store. Schema changes ship as server migrations (e.g.
-  v0.1.5 auto-creates missing entity files).
+  v0.1.5 auto-creates missing entity files, v0.1.9 relocates secrets into
+  `.secrets/` with an automatic one-time migration).
 - **No env vars, ever.** Claude spawns plugin servers with a sanitized env.
   Store path: `~/.unrivaled-crm-store` pointer file. Graph/Outlook creds:
-  `.graph_config.json` inside the store. Launch diagnostics:
+  `.secrets/.graph_config.json` inside the store — kept in a subfolder so a
+  whole-store backup can exclude it with one flag. Launch diagnostics:
   `unrivaled-crm-launch.log` in the OS temp dir.

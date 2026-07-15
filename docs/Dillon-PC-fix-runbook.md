@@ -1,4 +1,4 @@
-# Unrivaled CRM — production setup (v0.1.8, updated 7/15)
+# Unrivaled CRM — production setup (v0.1.9, updated 7/15)
 
 Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `powershell` → Enter). No admin needed.
 
@@ -6,9 +6,9 @@ Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `po
 
 ---
 
-## STEP 1 — Install plugin v0.1.8
+## STEP 1 — Install plugin v0.1.9
 
-Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.8** — anything older than 0.1.4 can never connect, and 0.1.8 is the first where the visual CRM app talks live to the server. (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
+Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.9** — anything older than 0.1.4 can never connect, 0.1.8 is the first where the visual CRM app talks live to the server, and 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed). (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
 
 ## STEP 2 — Real Python with the `mcp` package
 
@@ -56,19 +56,22 @@ Get-ChildItem "C:\UnrivaledCRM\store" -Filter *.json | Select-Object Name
 This gives OneDrive's file versioning as the backup without OneDrive touching the live store:
 
 ```powershell
-schtasks /Create /F /SC DAILY /ST 18:00 /TN "UnrivaledCRM-Backup" /TR "robocopy C:\UnrivaledCRM\store \"C:\Users\DillonCarpenter\OneDrive - unrivaledsolutions.com\CRM-Backups\store\" /MIR /XF .graph_token_cache.json .graph_config.json /R:2 /W:5"
+schtasks /Create /F /SC DAILY /ST 18:00 /TN "UnrivaledCRM-Backup" /TR "robocopy C:\UnrivaledCRM\store \"C:\Users\DillonCarpenter\OneDrive - unrivaledsolutions.com\CRM-Backups\store\" /MIR /XD .secrets /R:2 /W:5"
 ```
 
 **Expect:** `SUCCESS: The scheduled task "UnrivaledCRM-Backup" has successfully been created.` Daily at 6pm the store is mirrored into OneDrive; OneDrive keeps version history of every backup. Restore = copy the folder back and fix the pointer file.
 
-**Note the `/XF` exclusions** — the Graph token cache and credential config are deliberately kept OUT of the cloud backup (they're an OAuth refresh token and app IDs; they don't belong in OneDrive). They regenerate on next sign-in if lost.
+**Note the `/XD .secrets` exclusion** — the Graph token cache and credential config live in a `.secrets` subfolder that's deliberately kept OUT of the cloud backup (they're an OAuth refresh token and app IDs; they don't belong in OneDrive). They regenerate on next sign-in if lost.
+
+**If this task already exists from before v0.1.9** (created with `/XF .graph_token_cache.json .graph_config.json` instead), re-run the command above with `/F` to replace it — the old by-filename exclusion still works today but won't cover any new secret file added later, where `/XD .secrets` will.
 
 ## STEP 3c — Outlook credentials (optional, for draft_email / sync_outlook)
 
-Env vars never reach the server, so Graph credentials live in a config file inside the store (get the IDs from Zeeshan / the Azure app registration):
+Env vars never reach the server, so Graph credentials live in a config file inside the store's `.secrets` subfolder (get the IDs from Zeeshan / the Azure app registration):
 
 ```powershell
-Set-Content -Path "C:\UnrivaledCRM\store\.graph_config.json" -Value '{"client_id": "AZURE_APP_CLIENT_ID", "tenant_id": "AZURE_TENANT_ID"}'
+New-Item -ItemType Directory -Force -Path "C:\UnrivaledCRM\store\.secrets" | Out-Null
+Set-Content -Path "C:\UnrivaledCRM\store\.secrets\.graph_config.json" -Encoding Ascii -Value '{"client_id": "AZURE_APP_CLIENT_ID", "tenant_id": "AZURE_TENANT_ID"}'
 ```
 
 First Outlook action will prompt a one-time device-code sign-in; the token caches into the store folder. Skip this step entirely if Outlook drafts aren't needed yet — the CRM works without it.

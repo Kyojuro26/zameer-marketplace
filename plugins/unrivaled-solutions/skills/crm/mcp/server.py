@@ -98,7 +98,7 @@ VENDOR_FIELDS = {
 COMPANY_ROLES = {"customer", "vendor"}
 
 
-SERVER_VERSION = "0.1.8"
+SERVER_VERSION = "0.1.9"
 
 
 class StoreError(Exception):
@@ -113,9 +113,14 @@ class Store:
         missing = [f for f in ENTITY_FILES.values() if not (root / f).exists()]
         if missing and "companies.json" not in missing:
             # Real store, newer schema: create the missing entity files empty
-            # rather than dying (the invoices.json lesson, 2026-07-14).
+            # rather than dying (the invoices.json lesson, 2026-07-14). Goes
+            # through self._write — the same atomic-temp-file + os.replace
+            # Windows-lock retry as every other store write (v0.1.9). A bare
+            # write_text here defeated the exact lesson this code exists to
+            # apply: it could still throw an unhandled PermissionError and
+            # take the whole server down at boot.
             for f in missing:
-                (root / f).write_text("[]\n", encoding="utf-8")
+                self._write(f, [])
             _launch_log(f"auto-created missing store files: {missing}")
             missing = []
         if missing:

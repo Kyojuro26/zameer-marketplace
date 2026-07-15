@@ -3,8 +3,8 @@ name: crm
 description: >
   This skill should be used when the user asks about their customers,
   projects, deals, shipments, vendors, or receivables — for example "pull up
-  Vibracoustic", "what's the status of project 1318", "mark that shipment
-  delivered", "add a new project for Ford", "draft an email to Jeff",
+  Ace Manufacturing", "what's the status of project 4521", "mark that shipment
+  delivered", "add a new project for Meridian Corp", "draft an email to Alex",
   "what's shipping this week", "who owes us money", or "refresh Outlook
   activity". It operates the Unrivaled CRM: reading and updating the CRM
   records, creating drafts in Outlook, and syncing contacts and statuses

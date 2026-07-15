@@ -45,7 +45,8 @@ In Claude Code / Cowork:
 
 - `skills/crm/store/` — that's DATA, not the product. Dylan's store lives
   in his own folder, seeded at delivery by the migration.
-- `.graph_token_cache.json` — credentials, never committed anywhere.
+- `skills/crm/store/.secrets/` — credentials (Graph token cache + config),
+  never committed anywhere.
 - `view/unrivaled-crm.html` — generated file with embedded data; the
   builder (`build_view.py`) is what ships.
 - `node_modules/`, `__pycache__/`, changelogs from dev.

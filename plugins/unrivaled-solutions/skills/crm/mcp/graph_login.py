@@ -4,7 +4,7 @@
 Runs the device-code flow and persists the token cache so the MCP's Outlook
 tools (draft_email, sync_outlook) work silently afterwards.
 
-    # creds come from <store>/.graph_config.json (or GRAPH_* env in dev)
+    # creds come from <store>/.secrets/.graph_config.json (or GRAPH_* env in dev)
     python3 graph_login.py --store ../store
 
 Sign in with the SANDBOX account during development — never a production

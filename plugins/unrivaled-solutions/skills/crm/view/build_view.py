@@ -584,7 +584,7 @@ async function saveNewContact(cid){
 function openNewShipment(pno){
   document.getElementById('dtitle').textContent='Add shipment — project '+pno;
   document.getElementById('dbody').innerHTML=`
-    <div class="field"><label>Vendor PO</label><input id="n_po" placeholder="e.g. PO# 1142 Hallowell"/></div>
+    <div class="field"><label>Vendor PO</label><input id="n_po" placeholder="e.g. PO# 4521 Acme Freight"/></div>
     <div class="row2">
       <div class="field"><label>Stage</label><select id="n_stage">
         ${STAGES.map(x=>`<option ${x==='Ordered'?'selected':''}>${x}</option>`).join('')}</select></div>

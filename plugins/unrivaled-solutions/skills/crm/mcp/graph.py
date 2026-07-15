@@ -16,14 +16,23 @@ operator signs in once and silent refresh covers every later call. Establish
 the cache with graph_login.py; tools fail with a clear message when no
 cached sign-in exists (they never block waiting for a human).
 
-Config (env): GRAPH_CLIENT_ID, GRAPH_TENANT_ID,
-GRAPH_TOKEN_CACHE (optional; default <store>/.graph_token_cache.json).
+Config: no env vars in production (Claude spawns plugin servers with a
+sanitized environment) — GRAPH_CLIENT_ID/GRAPH_TENANT_ID/GRAPH_TOKEN_CACHE
+below are a dev-only convenience. Production reads
+<store>/.secrets/.graph_config.json and persists the token cache to
+<store>/.secrets/.graph_token_cache.json. That subdirectory exists so a
+backup that mirrors the whole store (e.g. the daily robocopy into OneDrive)
+can exclude it with a single /XD .secrets flag — see the setup docs. v0.1.8
+and earlier kept both files at the top of the store, where a "back up the
+whole store" task had no way to leave out a live OAuth token; v0.1.9
+auto-migrates existing installs into .secrets/ the first time this runs.
 The transport is injectable for tests.
 """
 
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,6 +57,45 @@ def _read_text_tolerant(path):
         return Path(path).read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
         return Path(path).read_text(encoding="utf-16")
+
+
+SECRETS_DIRNAME = ".secrets"
+
+
+def _secrets_dir(store_root):
+    """Directory for OAuth secrets, kept out of the top-level store folder so
+    a whole-store backup can exclude it with one /XD flag."""
+    d = Path(store_root) / SECRETS_DIRNAME
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def _migrate_legacy_secret(store_root, filename):
+    """v0.1.9: secrets moved from <store>/<filename> to <store>/.secrets/<filename>
+    so a store-wide backup can exclude the whole directory instead of relying on
+    every backup command remembering to name each secret file. One-time, silent,
+    non-fatal migration on first launch after upgrading; a brand-new install just
+    gets the new location directly. If the move itself fails (e.g. a transient
+    Windows lock), fall back to reading the old location for this run rather than
+    raising — the file is still safe, just not yet relocated."""
+    new_path = _secrets_dir(store_root) / filename
+    old_path = Path(store_root) / filename
+    if not new_path.exists() and old_path.exists():
+        try:
+            os.replace(old_path, new_path)
+            _launch_log(f"migrated {filename} into .secrets/ (v0.1.9)")
+        except OSError as e:
+            # Two concurrent Graph calls can both see "not migrated yet" and
+            # race here; the loser's os.replace fails because old_path was
+            # already moved by the winner, not because of a real lock. Check
+            # for that before falling back to the (now-deleted) old path.
+            if new_path.exists():
+                return new_path
+            _launch_log(f"could not migrate {filename} into .secrets/: {e!r}; "
+                        f"reading from the old location this run instead")
+            return old_path
+    return new_path
+
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = [
@@ -90,12 +138,45 @@ class GraphAuth:
         )
 
     def _persist(self):
-        if self.cache.has_state_changed:
-            self.cache_path.write_text(self.cache.serialize(), encoding="utf-8")
-            try:
-                os.chmod(self.cache_path, 0o600)  # POSIX only; no-op on Windows
-            except OSError:
-                pass
+        if not self.cache.has_state_changed:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write + Windows-lock retry, matching Store._write in server.py —
+        # this file holds a live OAuth token, so a torn write on a transient
+        # OneDrive/AV lock is worse here than for ordinary CRM records.
+        fd, tmp = tempfile.mkstemp(dir=self.cache_path.parent, prefix=".~", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(self.cache.serialize())
+                f.flush()
+                os.fsync(f.fileno())
+            last = None
+            for delay in (0, 0.15, 0.4, 0.8, 1.5):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    os.replace(tmp, self.cache_path)
+                    tmp = None
+                    break
+                except PermissionError as e:
+                    last = e
+            else:
+                raise GraphError(
+                    f"could not save the Outlook token cache: the file is "
+                    f"locked by another process (OneDrive/backup/antivirus). "
+                    f"Sign-in not persisted — retry in a moment. ({last})")
+        finally:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        try:
+            os.chmod(self.cache_path, 0o600)  # POSIX only; no-op on Windows —
+            # real protection on Windows is the .secrets/ backup exclusion,
+            # not this permission bit.
+        except OSError:
+            pass
 
     def token_silent(self):
         accounts = self.app.get_accounts()
@@ -215,8 +296,10 @@ def from_env(store_root):
     tenant_id = os.environ.get("GRAPH_TENANT_ID")
     if not client_id or not tenant_id:
         # Claude spawns plugin servers with a sanitized env, so env vars never
-        # arrive in production. Fall back to a config file inside the store.
-        _cfg_path = Path(store_root) / ".graph_config.json"
+        # arrive in production. Fall back to a config file in the store's
+        # .secrets/ directory (auto-migrated there from the pre-v0.1.9
+        # top-level location so a store-wide backup can exclude it).
+        _cfg_path = _migrate_legacy_secret(store_root, ".graph_config.json")
         if _cfg_path.exists():
             try:
                 _cfg = json.loads(_read_text_tolerant(_cfg_path))
@@ -232,9 +315,11 @@ def from_env(store_root):
     if not client_id or not tenant_id:
         raise GraphError(
             "Outlook writes not configured (set GRAPH_CLIENT_ID / "
-            "GRAPH_TENANT_ID). Store edits still persist; click-to-draft "
-            "falls back to a compose link.")
-    cache = os.environ.get("GRAPH_TOKEN_CACHE",
-                           str(Path(store_root) / ".graph_token_cache.json"))
+            "GRAPH_TENANT_ID, or write client_id/tenant_id into "
+            "<store>/.secrets/.graph_config.json). Store edits still "
+            "persist; click-to-draft falls back to a compose link.")
+    cache = os.environ.get(
+        "GRAPH_TOKEN_CACHE",
+        str(_migrate_legacy_secret(store_root, ".graph_token_cache.json")))
     auth = GraphAuth(client_id, tenant_id, cache)
     return auth, GraphClient(auth.token_silent)

@@ -197,7 +197,7 @@ def domain_of(email):
 def parse_project_key(raw):
     """
     Parse a Project Tracker key cell into {project_nos, invoice_no, collection_status,
-    review}. Handles '1318 (INV 1107-PAID)', '1351 (INV 1137-50%)', '1163 and 1164',
+    review}. Handles '4521 (INV 9001-PAID)', '4522 (INV 9002-50%)', '4530 and 4531',
     'Word Proposal', 'Check'.
     """
     out = {"project_nos": [], "invoice_no": None, "collection_status": None,
@@ -209,7 +209,7 @@ def parse_project_key(raw):
 
     m = LEADING_NUMS_RE.match(s)
     if m:
-        # capture every 2-6 digit run in the leading segment (handles "1163 and 1164")
+        # capture every 2-6 digit run in the leading segment (handles "4530 and 4531")
         lead = m.group(0)
         out["project_nos"] = ONE_NUM_RE.findall(lead)
     if not out["project_nos"]:
