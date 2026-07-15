@@ -45,10 +45,12 @@ Uses his logged-in GitHub credentials for the private repo.
 1. Get the pipeline scripts: on GitHub open `Kyojuro26/zameer-marketplace` →
    **Code → Download ZIP** → extract (e.g. to `Downloads\zameer-marketplace`).
    _(No Git needed. If you prefer Git: `git clone …` instead.)_
-2. In PowerShell, create his store folder (OneDrive-synced is ideal for backup)
-   and run the migration into it:
+2. In PowerShell, create his store folder (plain local — NOT OneDrive; sync
+   locks break saves, the daily robocopy task handles backup) and run the
+   migration into it. **Only on first-ever setup: never re-run the migration
+   over a live store — it would overwrite his edits.**
    ```powershell
-   $store = "$env:USERPROFILE\OneDrive\Unrivaled-CRM\store"
+   $store = "C:\UnrivaledCRM\store"
    New-Item -ItemType Directory -Force -Path $store | Out-Null
    cd "$env:USERPROFILE\Downloads\zameer-marketplace\plugins\unrivaled-solutions\skills\crm"
    python pipeline\normalize.py --workbook "C:\path\to\Sales Tracker.xlsx" --out "$store"
@@ -62,14 +64,15 @@ Uses his logged-in GitHub credentials for the private repo.
 
 ## Part 4 — Point Cowork at his store + run
 
-Windows GUI apps don't see a PowerShell session's variables, so set it as a
-**permanent user variable** with `setx`, then restart Cowork:
+Env vars never reach the plugin (Claude spawns it with a sanitized
+environment) — the store path lives in a **pointer file** in his home folder.
+Keep the live store OUT of OneDrive (sync locks break saves); the daily
+robocopy task backs it up INTO OneDrive instead.
 ```powershell
-setx UNRIVALED_CRM_STORE "$env:USERPROFILE\OneDrive\Unrivaled-CRM\store"
+Set-Content -Path "$HOME\.unrivaled-crm-store" -Value "C:\UnrivaledCRM\store" -Encoding Ascii
 ```
-`setx` is permanent (survives reboots) but only applies to apps started
-**after** it — so **fully quit Cowork** (right-click its taskbar/system-tray
-icon → Quit; make sure it's not still running in the tray) and **reopen it**.
+Then **fully quit Cowork** (right-click its taskbar/system-tray icon → Quit;
+make sure it's not still running in the tray) and **reopen it**.
 
 **Verify the core CRM (no Outlook needed):** in Cowork say *"open the CRM"* or
 *"pull up [a customer]"*, and confirm you can:
@@ -86,8 +89,8 @@ Dylan now has a fully working CRM.
 Follow **`Unrivaled-CRM-Outlook-Runbook.md`** (Windows steps). In short:
 1. Register the app in **Dylan's** M365 (his admin) → client + tenant IDs.
 2. One-time `python -u graph_login.py` device sign-in with **Dylan's** mailbox.
-3. `setx GRAPH_CLIENT_ID …` and `setx GRAPH_TENANT_ID …` + restart Cowork →
-   click-to-draft writes real Outlook **drafts** (never sends).
+3. Write `.graph_config.json` into the store (client + tenant IDs) + restart
+   Cowork → click-to-draft writes real Outlook **drafts** (never sends).
 4. Connect the read-only **Microsoft 365 connector** for inbound activity.
 5. Create the **scheduled auto-refresh** so each customer's Outlook activity
    updates every morning on its own.
@@ -111,9 +114,11 @@ Follow **`Unrivaled-CRM-Outlook-Runbook.md`** (Windows steps). In short:
 - **`python3` not recognized:** install Python from the **Microsoft Store**
   (not just python.org). That's what registers `python3`. Then reinstall the
   packages with `python -m pip install mcp msal requests openpyxl`.
-- **CRM plugin won't start / tools don't appear:** `UNRIVALED_CRM_STORE` isn't
-  visible to Cowork — re-run the `setx` line and **fully** restart Cowork
+- **CRM plugin won't start / tools don't appear:** check the pointer file
+  (`type $HOME\.unrivaled-crm-store` must print the store path) and read the
+  launch log: `type $env:TEMP\unrivaled-crm-launch.log`. Fully restart Cowork
   (check the system tray). Confirm the store folder has the `.json` files.
-- **Outlook draft says "not configured":** `GRAPH_CLIENT_ID/TENANT_ID` aren't
-  set (via `setx`) or `graph_login` hasn't been run for this store — see Part 5.
+- **Outlook draft says "not configured":** `.graph_config.json` is missing
+  from the store, unparseable, or the client/tenant IDs in it aren't
+  written correctly, or `graph_login` hasn't been run for this store — see Part 5.
 - **Paths with spaces:** always keep them in double quotes in PowerShell.

@@ -33,7 +33,8 @@ This is the part we'll do together the first time. It does three small things:
 
 1. Installs a few helper components the CRM needs to run.
 2. Picks the folder where **your** records live — a folder you own (we'll put
-   it in your OneDrive so it's automatically backed up). Your data never leaves
+   it OUTSIDE OneDrive — sync locks break saves; a scheduled backup copies it
+   INTO OneDrive daily instead). Your data never leaves
    your computer.
 3. Loads your customers, projects, shipments, and receivables from your Sales
    Tracker workbook into that folder.

@@ -1,119 +1,113 @@
-# Unrivaled CRM — MCP connect fix, exact commands
-Run on Dillon's PC, logged in as his user. Open **PowerShell** (Start → type `powershell` → Enter). Regular user is fine, no admin needed. Run the blocks in order. Each block says what you should see.
+# Unrivaled CRM — production setup (v0.1.8, updated 7/15)
+
+Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `powershell` → Enter). No admin needed.
+
+**What changed since the old runbook:** we proved on Zeeshan's Mac that Claude spawns plugin servers with a **sanitized environment — user env vars never reach the server.** Every `UNRIVALED_CRM_STORE` / `UNRIVALED_PYTHON` env-var step in the old runbook was a dead end and is gone. Plugin **v0.1.4** reads its store path from a pointer file instead, and writes a launch log so failures are readable. Two other confirmed bugs are also fixed in v0.1.4: the store must contain `invoices.json`, and the old plugin config passed an unexpandable `${UNRIVALED_CRM_STORE}` placeholder.
 
 ---
 
-## STEP 0 — Read Claude's MCP log (the real decisive test, 30 sec)
+## STEP 1 — Install plugin v0.1.8
 
-```powershell
-Get-ChildItem "$env:APPDATA\Claude\logs" | Sort-Object LastWriteTime -Descending | Select-Object Name, LastWriteTime -First 15
-```
+Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.8** — anything older than 0.1.4 can never connect, and 0.1.8 is the first where the visual CRM app talks live to the server. (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
 
-Find the log for the CRM server (name contains `unrivaled`), then dump its tail — and the main mcp log:
+## STEP 2 — Real Python with the `mcp` package
 
-```powershell
-Get-ChildItem "$env:APPDATA\Claude\logs" -Filter "*unrivaled*" | ForEach-Object { Write-Host "=== $($_.Name) ==="; Get-Content $_.FullName -Tail 40 }
-Get-Content "$env:APPDATA\Claude\logs\mcp.log" -Tail 40 -ErrorAction SilentlyContinue
-```
-
-**Interpretation — this decides everything:**
-- `spawn python3 ENOENT` (or `EINVAL` / `UNKNOWN` on spawn) → **alias problem confirmed. Continue to Step 1.**
-- `StoreError: store at ... is missing` or literal `${UNRIVALED_CRM_STORE}` in the error → env var isn't reaching Claude. Check it: `[Environment]::GetEnvironmentVariable("UNRIVALED_CRM_STORE","User")` — if that prints the store path correctly, reboot and re-check the log. Don't do the Python fix yet; send me the log line.
-- Anything else you don't recognize → send me the log line before proceeding.
-
-## STEP 1 — Confirm python3 is the Store alias
+The plugin launches `python3`. On Windows that must resolve to a real Python, not the Microsoft Store shim.
 
 ```powershell
 where.exe python3
 ```
 
-**Expect:** a path containing `\Microsoft\WindowsApps\python3.exe`. That's the broken shim.
-
-## STEP 2 — Kill the Store aliases (pure CLI)
+- If it shows `...\Microsoft\WindowsApps\python3.exe` → that's the broken shim. Remove it and install real Python:
 
 ```powershell
 Remove-Item "$env:LOCALAPPDATA\Microsoft\WindowsApps\python3.exe" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:LOCALAPPDATA\Microsoft\WindowsApps\python.exe"  -Force -ErrorAction SilentlyContinue
-where.exe python3
-```
-
-**Expect:** the last line now errors with "could not find files" — good, the shim is gone.
-*(If Remove-Item is denied: Start → "Manage app execution aliases" → toggle OFF both `python.exe` and `python3.exe` App Installer entries, then re-run the `where.exe` check.)*
-
-## STEP 3 — Install real Python (silent, no clicking)
-
-```powershell
 Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile "$env:TEMP\python-installer.exe"
 Start-Process "$env:TEMP\python-installer.exe" -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1" -Wait
-```
-
-**Expect:** ~2–3 min, no output. `-Wait` returns when done.
-
-## STEP 4 — Refresh PATH in this window, create python3.exe
-
-```powershell
 $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
 $py = (Get-Command python).Source
-Write-Host "python is: $py"
 Copy-Item $py (Join-Path (Split-Path $py) "python3.exe") -Force
-where.exe python3
 python3 --version
 ```
 
-**Expect:** `python is:` shows `...\AppData\Local\Programs\Python\Python312\python.exe` (NOT WindowsApps). `where.exe python3` shows the same dir. Version prints `Python 3.12.10`.
-
-## STEP 5 — Install the server's dependencies
+**Expect:** `Python 3.12.10`. Then install the server's dependency:
 
 ```powershell
-python -m pip install --upgrade pip
-python -m pip install mcp msal requests openpyxl
+python3 -m pip install mcp msal requests
 ```
 
-**Expect:** ends with `Successfully installed ...`. (Only `mcp` is needed for the server to connect; the rest are for Outlook later.)
+(Only `mcp` is needed to connect; `msal`/`requests` are for Outlook features.)
 
-## STEP 6 — Sanity-run the server by hand under the NEW python3
+## STEP 3 — Move the store to a plain local folder + pointer file
+
+The store must NOT live inside OneDrive — sync locking and Files-On-Demand placeholders can corrupt or stall the server's atomic writes. Move it once, point at it forever:
 
 ```powershell
-$store = [Environment]::GetEnvironmentVariable("UNRIVALED_CRM_STORE","User")
-Write-Host "store is: $store"
-Invoke-WebRequest "https://raw.githubusercontent.com/Kyojuro26/zameer-marketplace/main/plugins/unrivaled-solutions/skills/crm/mcp/server.py" -OutFile "$env:TEMP\ucrm_server.py"
-python3 "$env:TEMP\ucrm_server.py" --store "$store"
+robocopy "C:\Users\DillonCarpenter\OneDrive - unrivaledsolutions.com\Desktop\store" "C:\UnrivaledCRM\store" /E
+Set-Content -Path "$HOME\.unrivaled-crm-store" -Value "C:\UnrivaledCRM\store"
+Get-ChildItem "C:\UnrivaledCRM\store" -Filter *.json | Select-Object Name
 ```
 
-**Expect:** `store is:` prints `C:\Users\DillonCarpenter\OneDrive - unrivaledsolutions.com\Desktop\store`, then the last command **sits silently with a blinking cursor — that IS success** (server running, waiting on stdio). Press **Ctrl+C** to stop it.
-If it instead prints `store at ... is missing [...]` → store files problem, stop and send me the output.
-If `ModuleNotFoundError: mcp` → Step 5 installed into a different Python; run `python3 -m pip install mcp` and retry.
+**Expect:** six or seven `.json` files (`companies`, `contacts`, `projects`, `shipments`, `vendors`, `needs_review`, maybe `invoices`). v0.1.5 auto-creates any missing entity file, so no manual `invoices.json` step. After confirming the CRM works (Step 4), delete the old OneDrive copy so there's only one store.
 
-## STEP 7 — Fully quit Claude and relaunch
+## STEP 3b — Automatic backup (local store → OneDrive, one-way)
+
+This gives OneDrive's file versioning as the backup without OneDrive touching the live store:
+
+```powershell
+schtasks /Create /F /SC DAILY /ST 18:00 /TN "UnrivaledCRM-Backup" /TR "robocopy C:\UnrivaledCRM\store \"C:\Users\DillonCarpenter\OneDrive - unrivaledsolutions.com\CRM-Backups\store\" /MIR /XF .graph_token_cache.json .graph_config.json /R:2 /W:5"
+```
+
+**Expect:** `SUCCESS: The scheduled task "UnrivaledCRM-Backup" has successfully been created.` Daily at 6pm the store is mirrored into OneDrive; OneDrive keeps version history of every backup. Restore = copy the folder back and fix the pointer file.
+
+**Note the `/XF` exclusions** — the Graph token cache and credential config are deliberately kept OUT of the cloud backup (they're an OAuth refresh token and app IDs; they don't belong in OneDrive). They regenerate on next sign-in if lost.
+
+## STEP 3c — Outlook credentials (optional, for draft_email / sync_outlook)
+
+Env vars never reach the server, so Graph credentials live in a config file inside the store (get the IDs from Zeeshan / the Azure app registration):
+
+```powershell
+Set-Content -Path "C:\UnrivaledCRM\store\.graph_config.json" -Value '{"client_id": "AZURE_APP_CLIENT_ID", "tenant_id": "AZURE_TENANT_ID"}'
+```
+
+First Outlook action will prompt a one-time device-code sign-in; the token caches into the store folder. Skip this step entirely if Outlook drafts aren't needed yet — the CRM works without it.
+
+## STEP 4 — Full quit, relaunch, test
 
 ```powershell
 Stop-Process -Name "Claude" -Force -ErrorAction SilentlyContinue
-Start-Sleep 3
 ```
 
-Relaunch Claude from the Start menu. In Claude, type: **pull up a customer** (or "crm info").
+Relaunch Claude from the Start menu, open a **new chat**, type: **pull up a customer**.
 
-**Expect:** real data back (378 companies / 369 contacts / 210 projects...).
+**Expect:** real data (378 companies / 369 contacts / 210 projects...). Confirmed working on Zeeshan's Mac 7/14 with this exact setup.
 
-## STEP 8 — Prove a write persists
+## STEP 5 — Prove a write persists
 
-Make any small edit through Claude (e.g. "mark shipment X delivered" on a test record, or add/archive a throwaway customer), then:
+Make any small edit through Claude (archive a throwaway customer, mark a test shipment delivered), then:
 
 ```powershell
-$store = [Environment]::GetEnvironmentVariable("UNRIVALED_CRM_STORE","User")
+$store = Get-Content "$HOME\.unrivaled-crm-store"
 Get-Content "$store\changelog.jsonl" -Tail 5
 ```
 
-**Expect:** a fresh timestamped entry for your edit. Reads + writes = done.
+**Expect:** a fresh timestamped entry. Reads + writes = done.
 
 ---
 
-## If Step 7 still fails
+## If it still won't connect
 
-1. **Reboot**, retry Step 7. (Claude inherits PATH from Explorer; a reboot forces the refresh.)
-2. Re-run **Step 0** and read the new error — it will have changed. Send it to me.
-3. **Escape hatch (already shipped — plugin v0.1.3 supports it).** Requires Steps 3–5 done (real Python + `mcp` installed). On Dillon's PC:
-   ```powershell
-   setx UNRIVALED_PYTHON "$((Get-Command python).Source)"
-   ```
-   Then in Claude: Customize → Plugins → update `unrivaled-solutions` to v0.1.3, full quit (Step 7), relaunch. This spawns Python by absolute path, bypassing PATH and aliases entirely.
+v0.1.4 logs every launch attempt. This one command replaces all the old log spelunking:
+
+```powershell
+Get-Content "$env:TEMP\unrivaled-crm-launch.log" -Tail 10
+```
+
+- **File doesn't exist** → the server never started: plugin not on v0.1.4, or `python3` still unresolvable (re-run Step 2's `where.exe python3`).
+- **`FATAL: mcp import failed`** → wrong Python answered; run `python3 -m pip install mcp` and retry.
+- **`FATAL: no store configured`** → pointer file missing or empty (Step 3).
+- **`FATAL: store at ... is missing [...]`** → store path wrong or files missing; the message names exactly which.
+- **Ends with `store ok`** → server is healthy; the problem is on Claude's side — full quit, relaunch, new chat, and if it persists send Zeeshan the log lines.
+
+*(This supersedes `Message-for-Dillon-python-fix.md` and the old runbook's env-var steps entirely.)*

@@ -21,11 +21,13 @@ data.** Nothing needs to be provisioned, hosted, or opened to the network.
 ## Where the data lives (no database)
 
 - The system of record is a set of **plain JSON files** in a single folder that
-  Dylan owns — recommended location: his **OneDrive** (e.g.
-  `…\OneDrive\Unrivaled-CRM\store`).
+  Dylan owns — recommended location: a plain local folder (e.g.
+  `C:\UnrivaledCRM\store`), deliberately **outside OneDrive** (sync-client
+  file locks break the CRM's atomic writes).
 - Files: customers, contacts, projects, shipments, invoices, vendors, plus an
   append-only change log for auditing.
-- **Backup is handled by OneDrive** — the folder is covered by your existing
+- **Backup is a daily scheduled robocopy into OneDrive** (`CRM-Backups`),
+  which keeps it covered by your existing
   Microsoft 365 backup/retention. No separate backup system is required.
 - Data never leaves Dylan's environment. It is **not** stored in any cloud CRM,
   SaaS, or third-party database.
