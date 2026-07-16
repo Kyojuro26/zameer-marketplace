@@ -487,8 +487,16 @@ function openProject(pno){
   const marginPct = (p.margin==null||isNaN(p.margin)) ? '' : Math.round(p.margin*10000)/100;
   document.getElementById('dbody').innerHTML=`
     <div class="kv"><span class="k">Company</span><span>${esc((companyById[p.company_id]||{}).display_name||p.company_name||'—')}</span></div>
-    <div class="kv"><span class="k">Description</span><span>${esc(p.description||'—')}</span></div>
-    <div class="kv"><span class="k">Invoice #</span><span>${esc(p.invoice_no||'—')}</span></div>
+    <div class="field"><label>Description</label><input id="f_desc" value="${esc(p.description||'')}"/></div>
+    <div class="row2">
+      <div class="field"><label>Location</label><input id="f_loc" value="${esc(p.location||'')}"/></div>
+      <div class="field"><label>Deal date</label><input id="f_date" value="${esc(p.date||'')}"/></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Client PO #</label><input id="f_cpo" value="${esc(p.client_po_no||'')}"/></div>
+      <div class="field"><label>Invoice #</label><input id="f_inv" value="${esc(p.invoice_no||'')}"/></div>
+    </div>
+    <div class="field"><label><input type="checkbox" id="f_poflag" ${p.po_flag?'checked':''} style="width:auto;margin-right:6px;vertical-align:middle"/>PO on file</label></div>
     <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
     <div class="row2">
       <div class="field"><label>Status</label><select id="f_status">
@@ -506,6 +514,7 @@ function openProject(pno){
     </div>
     <div class="field"><label>Owner (reps, comma-separated)</label><input id="f_owner" value="${esc((p.owner||[]).join(', '))}"/></div>
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
+    <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc((p.annotations||[]).join('\n'))}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}')">Save changes</button>
     <button class="btn ghost" onclick="openNewShipment('${jesc(pno)}')" style="margin-left:8px">+ Add shipment</button>
     <span class="saved" id="savedMsg"></span>
@@ -524,10 +533,17 @@ function numOrNull(id){
 async function saveProject(pno){
   const marginRaw = numOrNull('f_margin');
   const fields = {
+    description: document.getElementById('f_desc').value.trim() || null,
+    location: document.getElementById('f_loc').value.trim() || null,
+    date: document.getElementById('f_date').value.trim() || null,
+    client_po_no: document.getElementById('f_cpo').value.trim() || null,
+    invoice_no: document.getElementById('f_inv').value.trim() || null,
+    po_flag: document.getElementById('f_poflag').checked,
     status: document.getElementById('f_status').value,
     collection_status: document.getElementById('f_coll').value || null,
     notes: document.getElementById('f_notes').value,
     owner: document.getElementById('f_owner').value.split(',').map(s=>s.trim()).filter(Boolean),
+    annotations: document.getElementById('f_annos').value.split('\n').map(s=>s.trim()).filter(Boolean),
     revenue: numOrNull('f_revenue'),
     total_cost: numOrNull('f_cost'),
     gross_profit: numOrNull('f_gp'),
@@ -633,6 +649,11 @@ function openEditContact(cid, email, name){
       <div class="field"><label>Email</label><input id="e_c_email" type="email" value="${esc(c.email||'')}"/></div>
       <div class="field"><label>Phone</label><input id="e_c_phone" value="${esc(c.phone||'')}"/></div>
     </div>
+    <div class="row2">
+      <div class="field"><label>Location</label><input id="e_c_loc" value="${esc(c.location||'')}"/></div>
+      <div class="field"><label>Last action date (manual)</label><input id="e_c_lastact" value="${esc((c.last_action||'').slice(0,10))}"/></div>
+    </div>
+    <div class="field"><label>Action notes</label><textarea id="e_c_notes">${esc(c.action_notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveEditContact('${jesc(cid)}','${jesc(c.email||'')}','${jesc(c.name||'')}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Matched by email (or by name if there's no email) — changing both at once can create a second contact instead of updating this one.</p>`;
@@ -646,7 +667,10 @@ async function saveEditContact(cid, origEmail, origName){
   const fields={company_id:cid, company_name:(companyById[cid]||{}).display_name,
     name, email:document.getElementById('e_c_email').value.trim()||null,
     title:document.getElementById('e_c_title').value.trim()||null,
-    phone:document.getElementById('e_c_phone').value.trim()||null};
+    phone:document.getElementById('e_c_phone').value.trim()||null,
+    location:document.getElementById('e_c_loc').value.trim()||null,
+    last_action:document.getElementById('e_c_lastact').value.trim()||null,
+    action_notes:document.getElementById('e_c_notes').value.trim()||null};
   await doSave('upsert_contact', {fields}, (r)=>{
     const rec=r.contact||fields;
     const i=DATA.contacts.findIndex(x=>x.company_id===cid &&
@@ -820,14 +844,18 @@ function openShipment(sid){
   document.getElementById('dbody').innerHTML=`
     <div class="kv"><span class="k">Client</span><span>${esc(s.client_name||'—')}</span></div>
     <div class="kv"><span class="k">Project #</span><span>${esc(s.project_no||'—')}${s.linked_to_project?'':' <span class="muted">(unlinked — vendor-PO keyed)</span>'}</span></div>
-    <div class="kv"><span class="k">Vendor PO</span><span>${esc(s.vendor_po_raw||'—')}</span></div>
-    ${s.open_orders_notes?`<div class="kv"><span class="k">Order notes</span><span>${esc(s.open_orders_notes)}</span></div>`:''}
+    <div class="field"><label>Vendor PO</label><input id="s_po" value="${esc(s.vendor_po_raw||'')}"/></div>
     <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
     <div class="row2">
       <div class="field"><label>Stage</label><select id="s_stage">
         ${STAGES.map(x=>`<option ${s.stage===x?'selected':''}>${x}</option>`).join('')}</select></div>
       <div class="field"><label>Ship date</label><input id="s_date" type="date" value="${esc((s.ship_date||'').slice(0,10))}"/></div>
     </div>
+    <div class="row2">
+      <div class="field"><label>Start date</label><input id="s_start" type="date" value="${esc((s.start_date||'').slice(0,10))}"/></div>
+      <div class="field"><label>ETA</label><input id="s_eta" type="date" value="${esc((s.eta||'').slice(0,10))}"/></div>
+    </div>
+    <div class="field"><label>Order notes</label><textarea id="s_notes">${esc(s.open_orders_notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveShipment('${jesc(sid)}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">${CRM.mode==='embedded'
@@ -838,8 +866,12 @@ function openShipment(sid){
 
 async function saveShipment(sid){
   const fields = {
+    vendor_po_raw: document.getElementById('s_po').value.trim() || null,
     stage: document.getElementById('s_stage').value,
     ship_date: document.getElementById('s_date').value || null,
+    start_date: document.getElementById('s_start').value || null,
+    eta: document.getElementById('s_eta').value || null,
+    open_orders_notes: document.getElementById('s_notes').value.trim() || null,
   };
   await doSave('update_shipment', {shipment_id: sid, fields}, (r)=>{
     const s=DATA.shipments.find(x=>x.shipment_id===sid);
