@@ -10,7 +10,7 @@ description: >
   records, creating drafts in Outlook, and syncing contacts and statuses
   into Outlook.
 metadata:
-  version: "0.1.15"
+  version: "0.1.16"
 ---
 
 # Unrivaled CRM
@@ -120,6 +120,17 @@ plugin does. After confirming a plugin update via `crm_info`, also re-copy
 `skills/crm/mcp` and `skills/crm/view` into `C:\UnrivaledCRM\app\skills\crm\`
 if the update touched either — otherwise the desktop shortcut keeps running
 old code with no indication anything's stale.
+
+## Setup & update instructions
+
+`references/setup-runbook.md` is the full step-by-step production setup
+guide (install, Python fix, moving the store off OneDrive, the backup task,
+Outlook credentials, the visual app, and a troubleshooting section keyed off
+the launch log). If the user asks how to set up, install, update, or
+troubleshoot the CRM on a new or existing machine, read that file and walk
+them through the relevant section rather than improvising steps from
+memory — it's kept current with the shipped version and is more reliable
+than reconstructing setup mechanics from general knowledge.
 
 ## The interactive view
 
