@@ -9,8 +9,9 @@ arrive as updates to this same plugin.
 
 - Navigate every customer: contacts, projects (deals), shipments, receivables.
 - Edit records and have the edits **persist** — company name/location,
-  contact info, vendor details, project status/collection/owners/notes,
-  shipment stages — with every change logged to an audit trail.
+  contact info, vendor details, project status/collection/owners/notes/
+  revenue/cost/gross profit/margin, shipment stages — with every change
+  logged to an audit trail.
 - Add new companies, projects, contacts, and shipments.
 - Click a contact to open a **real Outlook draft** (never auto-sent).
 - Push a company's contacts + CRM status categories natively into Outlook.

@@ -478,10 +478,16 @@ function renderMain(){
 function openProject(pno){
   const p=DATA.projects.find(x=>String(x.project_no)===String(pno)); if(!p) return;
   document.getElementById('dtitle').textContent='Project '+(pno||'');
+  // revenue/total_cost/gross_profit/margin are independent stored values
+  // (each read from its own tracker column, never computed from the
+  // others) -- see pipeline/normalize.py -- so all four are safe to edit
+  // as plain fields, same as everything else here. margin is stored as a
+  // fraction (0.33 == 33%); the field shows/accepts a whole percent and
+  // converts on save.
+  const marginPct = (p.margin==null||isNaN(p.margin)) ? '' : Math.round(p.margin*10000)/100;
   document.getElementById('dbody').innerHTML=`
     <div class="kv"><span class="k">Company</span><span>${esc((companyById[p.company_id]||{}).display_name||p.company_name||'—')}</span></div>
     <div class="kv"><span class="k">Description</span><span>${esc(p.description||'—')}</span></div>
-    <div class="kv"><span class="k">Revenue / Cost</span><span>${money(p.revenue)} / ${money(p.total_cost)}</span></div>
     <div class="kv"><span class="k">Invoice #</span><span>${esc(p.invoice_no||'—')}</span></div>
     <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
     <div class="row2">
@@ -489,6 +495,14 @@ function openProject(pno){
         ${['won','pending','lost'].map(s=>`<option ${p.status===s?'selected':''}>${s}</option>`).join('')}</select></div>
       <div class="field"><label>Collection</label><select id="f_coll">
         ${['','open','partial:50%','paid'].map(s=>`<option value="${s}" ${(p.collection_status||'')===s?'selected':''}>${s||'—'}</option>`).join('')}</select></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Revenue ($)</label><input id="f_revenue" type="number" step="0.01" value="${p.revenue==null?'':esc(p.revenue)}"/></div>
+      <div class="field"><label>Total cost ($)</label><input id="f_cost" type="number" step="0.01" value="${p.total_cost==null?'':esc(p.total_cost)}"/></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Gross profit ($)</label><input id="f_gp" type="number" step="0.01" value="${p.gross_profit==null?'':esc(p.gross_profit)}"/></div>
+      <div class="field"><label>Margin (%)</label><input id="f_margin" type="number" step="0.1" value="${esc(marginPct)}"/></div>
     </div>
     <div class="field"><label>Owner (reps, comma-separated)</label><input id="f_owner" value="${esc((p.owner||[]).join(', '))}"/></div>
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
@@ -502,12 +516,22 @@ function openProject(pno){
   document.getElementById('drawer').classList.add('open');
 }
 
+function numOrNull(id){
+  const v=document.getElementById(id).value;
+  return v===''?null:parseFloat(v);
+}
+
 async function saveProject(pno){
+  const marginRaw = numOrNull('f_margin');
   const fields = {
     status: document.getElementById('f_status').value,
     collection_status: document.getElementById('f_coll').value || null,
     notes: document.getElementById('f_notes').value,
     owner: document.getElementById('f_owner').value.split(',').map(s=>s.trim()).filter(Boolean),
+    revenue: numOrNull('f_revenue'),
+    total_cost: numOrNull('f_cost'),
+    gross_profit: numOrNull('f_gp'),
+    margin: marginRaw==null ? null : marginRaw/100,
   };
   await doSave('update_project', {project_no: pno, fields}, (r)=>{
     const p=DATA.projects.find(x=>String(x.project_no)===String(pno));

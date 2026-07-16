@@ -1,4 +1,4 @@
-# Unrivaled CRM — production setup (v0.1.12, updated 7/16)
+# Unrivaled CRM — production setup (v0.1.13, updated 7/16)
 
 Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `powershell` → Enter). No admin needed.
 
@@ -6,9 +6,9 @@ Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `po
 
 ---
 
-## STEP 1 — Install plugin v0.1.12
+## STEP 1 — Install plugin v0.1.13
 
-Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.12** — anything older than 0.1.4 can never connect, 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed), 0.1.10 adds a store-wide write lock so two writers can't silently overwrite each other's edits (if the store is briefly locked you'll see a clear "try again in a moment" message instead of a lost change), 0.1.11 adds the real visual app (Step 6 below) — **the "visual app talks live via Cowork" claim in older versions of this runbook was wrong and has been retracted**: tested directly and confirmed no Cowork artifact surface can reach the plugin's tools, so the visual app now runs as its own local server instead — and 0.1.12 adds in-app editing for a company's own record (name, location) and for existing contacts (previously you could only add new ones, not fix a name/phone/email on one already there). (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
+Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.13** — anything older than 0.1.4 can never connect, 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed), 0.1.10 adds a store-wide write lock so two writers can't silently overwrite each other's edits (if the store is briefly locked you'll see a clear "try again in a moment" message instead of a lost change), 0.1.11 adds the real visual app (Step 6 below) — **the "visual app talks live via Cowork" claim in older versions of this runbook was wrong and has been retracted**: tested directly and confirmed no Cowork artifact surface can reach the plugin's tools, so the visual app now runs as its own local server instead — 0.1.12 adds in-app editing for a company's own record (name, location) and for existing contacts (previously you could only add new ones, not fix a name/phone/email on one already there), and 0.1.13 adds editing for a project's revenue, cost, gross profit, and margin (previously only status/collection/owner/notes were editable). (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
 
 ## STEP 2 — Real Python with the `mcp` package
 
