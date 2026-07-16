@@ -8,9 +8,10 @@ arrive as updates to this same plugin.
 ## What the CRM does
 
 - Navigate every customer: contacts, projects (deals), shipments, receivables.
-- Edit records and have the edits **persist** — status, collection, owners,
-  notes, shipment stages — with every change logged to an audit trail.
-- Add new projects, contacts, and shipments.
+- Edit records and have the edits **persist** — company name/location,
+  contact info, vendor details, project status/collection/owners/notes,
+  shipment stages — with every change logged to an audit trail.
+- Add new companies, projects, contacts, and shipments.
 - Click a contact to open a **real Outlook draft** (never auto-sent).
 - Push a company's contacts + CRM status categories natively into Outlook.
 - See per-company Outlook activity: last contact, recent threads, meetings.

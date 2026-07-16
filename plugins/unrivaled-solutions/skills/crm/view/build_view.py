@@ -407,6 +407,7 @@ function renderMain(){
     <span class="badge b-${esc(c.role)}">${esc(c.role)}</span>
     ${c.primary_location?`<span class="muted">${esc(c.primary_location)}</span>`:''}
     <span style="margin-left:auto;display:flex;gap:8px">
+      <button class="pill-btn" onclick="openEditCompany('${jesc(c.company_id)}')">Edit company</button>
       <button class="pill-btn" onclick="openNewProject('${jesc(c.company_id)}')">+ New project</button>
       <button class="pill-btn" onclick="openNewContact('${jesc(c.company_id)}')">+ Add contact</button>
       ${c.role==='vendor'?`<button class="pill-btn" onclick="openEditVendor('${jesc(c.company_id)}')">Edit vendor</button>`:''}
@@ -430,10 +431,11 @@ function renderMain(){
   }
 
   h+=`<div class="section"><h2>Contacts (${cts.length})</h2>`;
-  h+= cts.length?`<table><thead><tr><th>Name</th><th>Title</th><th>Email</th><th>Phone</th><th>Last action</th></tr></thead><tbody>`+
+  h+= cts.length?`<table><thead><tr><th>Name</th><th>Title</th><th>Email</th><th>Phone</th><th>Last action</th><th></th></tr></thead><tbody>`+
     cts.map(x=>`<tr><td>${esc(x.name||'—')}</td><td class="muted">${esc(x.title||'')}</td>
       <td class="contact">${x.email?`<a href="#" onclick="draft('${jesc(x.email)}','${jesc(x.name||'')}');return false">${esc(x.email)}</a>`:'—'}</td>
-      <td class="muted">${esc(x.phone||'')}</td><td class="muted">${esc((x.last_action||'').slice(0,10))}</td></tr>`).join('')+
+      <td class="muted">${esc(x.phone||'')}</td><td class="muted">${esc((x.last_action||'').slice(0,10))}</td>
+      <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditContact('${jesc(selected)}','${jesc(x.email||'')}','${jesc(x.name||'')}')">Edit</button></td></tr>`).join('')+
     `</tbody></table>`:'<div class="muted">No contacts.</div>';
   h+=`</div>`;
 
@@ -588,6 +590,48 @@ async function saveNewContact(cid){
   });
 }
 
+/* Edit an existing contact. Identified by (company_id, email) when the
+   contact has an email, else (company_id, name) -- the same match key
+   upsert_contact itself uses, so re-submitting updates in place rather
+   than creating a duplicate as long as at least one of the two is kept
+   the same as the version this drawer was opened with. */
+function openEditContact(cid, email, name){
+  const list = contactsByCo[cid]||[];
+  const c = (email ? list.find(x=>x.email===email) : null) || list.find(x=>x.name===name);
+  if(!c) return;
+  document.getElementById('dtitle').textContent='Edit contact — '+(c.name||'');
+  document.getElementById('dbody').innerHTML=`
+    <div class="row2">
+      <div class="field"><label>Name (required)</label><input id="e_c_name" value="${esc(c.name||'')}"/></div>
+      <div class="field"><label>Title</label><input id="e_c_title" value="${esc(c.title||'')}"/></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Email</label><input id="e_c_email" type="email" value="${esc(c.email||'')}"/></div>
+      <div class="field"><label>Phone</label><input id="e_c_phone" value="${esc(c.phone||'')}"/></div>
+    </div>
+    <button class="btn" id="saveBtn" onclick="saveEditContact('${jesc(cid)}','${jesc(c.email||'')}','${jesc(c.name||'')}')">Save changes</button>
+    <span class="saved" id="savedMsg"></span>
+    <p class="muted" style="margin-top:16px;font-size:12px">Matched by email (or by name if there's no email) — changing both at once can create a second contact instead of updating this one.</p>`;
+  document.getElementById('drawer').classList.add('open');
+}
+
+async function saveEditContact(cid, origEmail, origName){
+  const name=document.getElementById('e_c_name').value.trim();
+  const msg=document.getElementById('savedMsg');
+  if(!name){ msg.textContent='✗ name is required'; msg.className='saved show errc'; return; }
+  const fields={company_id:cid, company_name:(companyById[cid]||{}).display_name,
+    name, email:document.getElementById('e_c_email').value.trim()||null,
+    title:document.getElementById('e_c_title').value.trim()||null,
+    phone:document.getElementById('e_c_phone').value.trim()||null};
+  await doSave('upsert_contact', {fields}, (r)=>{
+    const rec=r.contact||fields;
+    const i=DATA.contacts.findIndex(x=>x.company_id===cid &&
+      ((origEmail && x.email===origEmail) || (!origEmail && x.name===origName)));
+    if(i>=0) DATA.contacts[i]=rec; else DATA.contacts.push(rec);
+    reindex(); renderList(); closeDrawer();
+  });
+}
+
 function openNewShipment(pno){
   document.getElementById('dtitle').textContent='Add shipment — project '+pno;
   document.getElementById('dbody').innerHTML=`
@@ -662,6 +706,38 @@ async function saveNewCompany(role){
       reindex(); renderList(); closeDrawer(); if(c.company_id) select(c.company_id);
     });
   }
+}
+
+/* Edit the company record itself (name, primary location) -- distinct
+   from "Edit vendor", which only touches the separate vendor-detail
+   record (rep/email/phone/offerings/routing). Role is deliberately not
+   editable here: reclassifying customer<->vendor also needs a matching
+   vendor-detail record created/removed, which this simple form can't
+   safely do -- leave that as a chat-driven change. */
+function openEditCompany(cid){
+  const c=companyById[cid]; if(!c) return;
+  document.getElementById('dtitle').textContent='Edit company — '+(c.display_name||cid);
+  document.getElementById('dbody').innerHTML=`
+    <div class="field"><label>Company name (required)</label><input id="e_co_name" value="${esc(c.display_name||'')}"/></div>
+    <div class="field"><label>Primary location</label><input id="e_co_loc" value="${esc(c.primary_location||'')}" placeholder="e.g. Louisville, KY"/></div>
+    <button class="btn" id="saveBtn" onclick="saveEditCompany('${jesc(cid)}')">Save changes</button>
+    <span class="saved" id="savedMsg"></span>
+    <p class="muted" style="margin-top:16px;font-size:12px">Customer/vendor type isn't editable here — ask Claude in chat if a company needs to be reclassified.</p>`;
+  document.getElementById('drawer').classList.add('open');
+}
+
+async function saveEditCompany(cid){
+  const name=document.getElementById('e_co_name').value.trim();
+  const msg=document.getElementById('savedMsg');
+  if(!name){ msg.textContent='✗ company name is required'; msg.className='saved show errc'; return; }
+  const loc=document.getElementById('e_co_loc').value.trim()||null;
+  const fields={display_name:name, primary_location:loc, locations:loc?[loc]:[]};
+  await doSave('update_company', {company_id:cid, fields}, (r)=>{
+    const c=r.company||Object.assign(companyById[cid]||{company_id:cid}, fields);
+    const i=DATA.companies.findIndex(x=>x.company_id===cid);
+    if(i>=0) DATA.companies[i]=c;
+    reindex(); renderList(); closeDrawer();
+  });
 }
 
 function openEditVendor(cid){
