@@ -5,12 +5,13 @@ description: >
   projects, deals, shipments, vendors, or receivables — for example "pull up
   Ace Manufacturing", "what's the status of project 4521", "mark that shipment
   delivered", "add a new project for Meridian Corp", "draft an email to Alex",
-  "what's shipping this week", "who owes us money", or "refresh Outlook
-  activity". It operates the Unrivaled CRM: reading and updating the CRM
-  records, creating drafts in Outlook, and syncing contacts and statuses
-  into Outlook.
+  "what's shipping this week", "who owes us money", "refresh Outlook
+  activity", or "update my CRM app". It operates the Unrivaled CRM: reading
+  and updating the CRM records, creating drafts in Outlook, syncing contacts
+  and statuses into Outlook, and keeping the desktop app copy in sync with
+  the plugin.
 metadata:
-  version: "0.1.18"
+  version: "0.1.19"
 ---
 
 # Unrivaled CRM
@@ -134,10 +135,17 @@ the production store.
 
 The visual app runs from its own stable copy at `C:\UnrivaledCRM\app\`, not
 from the plugin's install path, so it does **not** auto-update when the
-plugin does. After confirming a plugin update via `crm_info`, also re-copy
-`skills/crm/mcp` and `skills/crm/view` into `C:\UnrivaledCRM\app\skills\crm\`
-if the update touched either — otherwise the desktop shortcut keeps running
-old code with no indication anything's stale.
+plugin does — otherwise the desktop shortcut keeps running old code with no
+indication anything's stale.
+
+**If the user says "update my CRM app" (or similar — "sync the desktop app",
+"is my CRM app up to date"):** don't improvise a copy step. Follow
+`references/setup-runbook.md`'s **Step 7** exactly — it calls `crm_info`,
+compares that version against the one baked into
+`C:\UnrivaledCRM\app\skills\crm\mcp\server.py`, and only downloads/mirrors
+the app folders from the marketplace repo if they actually differ. Report
+the before/after version honestly; if the app was already current, say so
+and stop rather than re-running the download anyway.
 
 ## Setup & update instructions
 

@@ -111,11 +111,12 @@ into a plugin's tools, so this runs as its own token-authenticated localhost
 server instead (bound to 127.0.0.1 only; a fresh random token every launch;
 never reachable from the network or from any other page in your browser).
 
-Copy the app files out of the plugin into a stable folder — ask Claude to
-"copy the CRM plugin's skills/crm/mcp and skills/crm/view folders into
-C:\UnrivaledCRM\app\skills\crm\{mcp,view}" (the plugin's own install path
-moves around between updates, so Claude locating it live is more reliable
-than a hardcoded path). Then create a desktop shortcut:
+Copy the app files out into a stable folder — ask Claude to fetch them; it
+downloads the current marketplace repo and mirrors just the `skills/crm/mcp`
+and `skills/crm/view` folders into `C:\UnrivaledCRM\app\skills\crm\`
+(deterministic — the plugin's own install path moves around between updates,
+so a straight download beats hunting for it). See the setup runbook's Step 6
+for the exact command. Then create a desktop shortcut:
 
 ```powershell
 # Save as "Open Unrivaled CRM.bat" on the Desktop
@@ -185,10 +186,12 @@ machine.
   The visual app's copy at `C:\UnrivaledCRM\app\` does NOT auto-update with
   the plugin (it's a stable copy, deliberately outside the plugin's
   ever-changing install path) — after any version bump that touches
-  `skills/crm/mcp/local_server.py`, `server.py`, or `skills/crm/view/`,
-  re-run the copy step from the README's setup section 5, or the desktop
-  shortcut keeps launching old code indefinitely with no warning that it's
-  stale.
+  `skills/crm/mcp/local_server.py`, `server.py`, or `skills/crm/view/`, just
+  ask Claude in a CRM chat to **"update my CRM app"**: it checks the app's
+  baked-in version against the plugin's `server_version` and only re-syncs
+  (download + mirror from the marketplace repo, per setup runbook Step 7) if
+  they actually differ — otherwise the desktop shortcut keeps launching old
+  code indefinitely with no warning that it's stale.
 - **Never ship store data.** Pipeline (`normalize.py`) output must never
   overwrite a live store. Schema changes ship as server migrations (e.g.
   v0.1.5 auto-creates missing entity files, v0.1.9 relocates secrets into

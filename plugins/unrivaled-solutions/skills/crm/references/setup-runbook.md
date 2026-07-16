@@ -1,4 +1,4 @@
-# Unrivaled CRM — production setup (v0.1.17, updated 7/16)
+# Unrivaled CRM — production setup (v0.1.19, updated 7/16)
 
 Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `powershell` → Enter). No admin needed.
 
@@ -6,9 +6,9 @@ Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `po
 
 ---
 
-## STEP 1 — Install plugin v0.1.17
+## STEP 1 — Install plugin v0.1.19
 
-Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.17** — anything older than 0.1.4 can never connect, 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed), 0.1.10 adds a store-wide write lock so two writers can't silently overwrite each other's edits (if the store is briefly locked you'll see a clear "try again in a moment" message instead of a lost change), 0.1.11 adds the real visual app (Step 6 below) — **the "visual app talks live via Cowork" claim in older versions of this runbook was wrong and has been retracted**: tested directly and confirmed no Cowork artifact surface can reach the plugin's tools, so the visual app now runs as its own local server instead — 0.1.12 adds in-app editing for a company's own record (name, location) and for existing contacts (previously you could only add new ones, not fix a name/phone/email on one already there), 0.1.13 adds editing for a project's revenue, cost, gross profit, and margin (previously only status/collection/owner/notes were editable), 0.1.14 hardens the visual app's local server against DNS-rebinding (a Host-header allowlist) and fixes a rare partial-write on a failed vendor creation, 0.1.15 closes every remaining editing gap surfaced by "field is saved but the app never let you type it in" reports — a project's description (the deal name shown in every list — this is what "can't edit project names" meant), location, deal date, client PO #, invoice #, PO-on-file flag, and annotations are now editable, as are a shipment's vendor PO, order notes, start date, and ETA, and a contact's location, action notes, and last-action date — 0.1.16 ships this setup guide inside the plugin itself, so you can ask Claude for it directly instead of needing a separate file from Zeeshan (see the note at the very bottom), and 0.1.17 fixes Step 3b's backup-task command, which mis-parsed in real PowerShell (not cmd.exe) whenever the OneDrive path had a space in it — the old hand-quoted `schtasks /TR "..."` string is replaced with the `Register-ScheduledTask` cmdlet form. (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
+Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.19** — anything older than 0.1.4 can never connect, 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed), 0.1.10 adds a store-wide write lock so two writers can't silently overwrite each other's edits (if the store is briefly locked you'll see a clear "try again in a moment" message instead of a lost change), 0.1.11 adds the real visual app (Step 6 below) — **the "visual app talks live via Cowork" claim in older versions of this runbook was wrong and has been retracted**: tested directly and confirmed no Cowork artifact surface can reach the plugin's tools, so the visual app now runs as its own local server instead — 0.1.12 adds in-app editing for a company's own record (name, location) and for existing contacts (previously you could only add new ones, not fix a name/phone/email on one already there), 0.1.13 adds editing for a project's revenue, cost, gross profit, and margin (previously only status/collection/owner/notes were editable), 0.1.14 hardens the visual app's local server against DNS-rebinding (a Host-header allowlist) and fixes a rare partial-write on a failed vendor creation, 0.1.15 closes every remaining editing gap surfaced by "field is saved but the app never let you type it in" reports — a project's description (the deal name shown in every list — this is what "can't edit project names" meant), location, deal date, client PO #, invoice #, PO-on-file flag, and annotations are now editable, as are a shipment's vendor PO, order notes, start date, and ETA, and a contact's location, action notes, and last-action date — 0.1.16 ships this setup guide inside the plugin itself, so you can ask Claude for it directly instead of needing a separate file from Zeeshan (see the note at the very bottom), 0.1.17 fixes Step 3b's backup-task command, which mis-parsed in real PowerShell (not cmd.exe) whenever the OneDrive path had a space in it — the old hand-quoted `schtasks /TR "..."` string is replaced with the `Register-ScheduledTask` cmdlet form, 0.1.18 makes invoices/customer orders editable (payment status, pay date, payment notes, client PO#), makes a project's own number editable (renaming one now cascades automatically to every shipment and invoice that references it), and adds the ability to delete a single project within a customer record — reversibly: it and its shipments/invoices are hidden, never destroyed, and `restore_project` brings them back — and 0.1.19 replaces the old "ask Claude to locate the plugin's install folder and copy it" method for the desktop app (Step 6) with a deterministic download-from-GitHub-and-mirror procedure, and adds a one-line way to re-run it after every future update (Step 7, "update my CRM app"). (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
 
 ## STEP 2 — Real Python with the `mcp` package
 
@@ -110,10 +110,30 @@ back into a plugin's tools, so this runs as its own token-authenticated
 localhost server instead (127.0.0.1 only; fresh random token every launch;
 not reachable from the network or from any other browser tab).
 
-In the same Claude chat, ask: **"copy the CRM plugin's skills/crm/mcp and
-skills/crm/view folders into C:\UnrivaledCRM\app\skills\crm\mcp and
-...\view"** — the plugin's actual install folder moves around between
-updates, so have Claude locate it live rather than typing a path by hand.
+In the same Claude chat, ask Claude to fetch the app code. Have it run this —
+it downloads the current marketplace repo and mirrors only the two folders
+that make up the app (nothing in your store is touched):
+
+```powershell
+$tmpZip = "$env:TEMP\unrivaled-marketplace.zip"
+$tmpExtract = "$env:TEMP\unrivaled-marketplace-extract"
+Remove-Item -Recurse -Force $tmpExtract -ErrorAction SilentlyContinue
+Invoke-WebRequest -Uri "https://github.com/Kyojuro26/zameer-marketplace/archive/refs/heads/main.zip" -OutFile $tmpZip -UseBasicParsing
+Expand-Archive -Path $tmpZip -DestinationPath $tmpExtract -Force
+
+$src = (Get-ChildItem $tmpExtract)[0].FullName
+robocopy "$src\plugins\unrivaled-solutions\skills\crm\mcp"  "C:\UnrivaledCRM\app\skills\crm\mcp"  /MIR /XD __pycache__
+robocopy "$src\plugins\unrivaled-solutions\skills\crm\view" "C:\UnrivaledCRM\app\skills\crm\view" /MIR /XD __pycache__
+
+Remove-Item -Force $tmpZip
+Remove-Item -Recurse -Force $tmpExtract
+```
+
+(This replaces the old "ask Claude to locate the plugin's install folder and
+copy it" method — that relied on a cache path that moves around between
+updates and was never fully reliable on Windows. Downloading straight from
+the marketplace repo is deterministic: it's the exact same code Settings →
+Capabilities just pulled.)
 
 **Expect:** `C:\UnrivaledCRM\app\skills\crm\mcp\local_server.py` and
 `C:\UnrivaledCRM\app\skills\crm\view\build_view.py` both exist afterward.
@@ -141,11 +161,46 @@ close that window and reopen from the shortcut rather than using the
 browser's back button.
 
 **After any future plugin update:** this copy at `C:\UnrivaledCRM\app\`
-does **not** auto-update — re-run the copy step above if the update
-touched `skills/crm/mcp` or `skills/crm/view`, or the shortcut keeps
-launching old code with no warning it's stale. You can ask Claude in chat
-to do this refresh directly — see this file's "Setup & update instructions"
-pointer in the CRM skill.
+does **not** auto-update — see Step 7 below for the one-line way to refresh
+it, instead of re-running the download manually every time.
+
+## STEP 7 — Keeping the desktop app in sync ("update my CRM app")
+
+The plugin (what Claude uses in chat) and the desktop app (the local server
+behind the desktop shortcut) are two separate copies of the same code, by
+design — see Step 6. Updating the plugin in Settings → Capabilities does
+**not** touch the app copy; it goes stale until refreshed.
+
+Whenever a new version has shipped, just ask Claude in any CRM chat:
+**"update my CRM app."** Claude does the rest — no need to remember the
+script above or type anything at the prompt yourself:
+
+1. Calls `crm_info` to read the plugin's current `server_version`.
+2. Reads the version baked into the desktop app's own copy:
+   ```powershell
+   $appVersion = (Select-String -Path "C:\UnrivaledCRM\app\skills\crm\mcp\server.py" -Pattern 'SERVER_VERSION = "(.+)"').Matches.Groups[1].Value
+   ```
+3. If the two already match, it tells you there's nothing to do and stops —
+   no download, no unnecessary changes.
+4. If they don't match, it runs the same download-and-mirror script from
+   Step 6 to bring the app copy current.
+5. Re-reads `$appVersion` afterward and confirms it now matches the
+   plugin's `server_version` — that's the real proof of success, not
+   whether the robocopy command "ran without error" (robocopy's own exit
+   codes are a bitmask where several nonzero values still mean success, so
+   that alone isn't a reliable check).
+
+**If `C:\UnrivaledCRM\app` doesn't exist yet**, that's first-time setup, not
+an update — do Step 6 instead.
+
+**If the visual app is open when this runs**, close and reopen it from the
+desktop shortcut afterward. The running process holds the old code in
+memory until restarted — the files being newer on disk doesn't change that
+until you do.
+
+**Only `skills/crm/mcp` and `skills/crm/view` are ever touched.** Your
+actual data lives in a completely separate folder (`C:\UnrivaledCRM\store`)
+that this procedure never goes near.
 
 ---
 
