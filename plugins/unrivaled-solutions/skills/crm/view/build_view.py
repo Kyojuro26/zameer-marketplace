@@ -887,7 +887,7 @@ async function draft(email,name){
   const first=(name||'').split(' ')[0]||'there';
   const subject=encodeURIComponent('Following up — Unrivaled Solutions');
   const body=encodeURIComponent(`Hi ${first},\n\n`);
-  window.open(`mailto:${email}?subject=${subject}&body=${body}`,'_blank');
+  window.open(`mailto:${encodeURIComponent(email)}?subject=${subject}&body=${body}`,'_blank');
 }
 
 document.getElementById('q').addEventListener('input',e=>{query=e.target.value.trim();renderList();});
@@ -944,7 +944,11 @@ def render_html(store_dir, token=""):
     blob = (json.dumps(data)
             .replace("<", "\\u003c").replace(">", "\\u003e")
             .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
-    html = TEMPLATE.replace("__DATA__", blob).replace("__BRIDGE_TOKEN__", token)
+    # Substitute the token FIRST (its only marker is in the template's own JS at
+    # `const BRIDGE_TOKEN = '__BRIDGE_TOKEN__'`), THEN splice the data blob. If the
+    # order were reversed, a stored value literally equal to "__BRIDGE_TOKEN__"
+    # (e.g. a hostile email subject) would get rewritten to the live token. (v0.1.14)
+    html = TEMPLATE.replace("__BRIDGE_TOKEN__", token).replace("__DATA__", blob)
     counts = {"companies": len(data["companies"]), "projects": len(data["projects"]),
               "shipments": len(data["shipments"])}
     return html, counts

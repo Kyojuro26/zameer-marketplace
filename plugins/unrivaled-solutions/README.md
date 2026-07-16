@@ -24,7 +24,7 @@ arrive as updates to this same plugin.
 | Component | What it is |
 |---|---|
 | `crm` skill | Teaches Claude to operate the CRM conversationally |
-| `unrivaled-crm` MCP server | The only reader/writer of your CRM records (14 tools, interface v0.1) |
+| `unrivaled-crm` MCP server | The only reader/writer of your CRM records (23 tools, interface v0.1) |
 | Visual app (`local_server.py`) | Same records, in a real local web app — see setup step 5 |
 
 ## Setup (one time, ~10 minutes)

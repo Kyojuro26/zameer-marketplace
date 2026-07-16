@@ -103,7 +103,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.13"
+SERVER_VERSION = "0.1.14"
 
 
 class StoreError(Exception):
@@ -701,6 +701,15 @@ def create_vendor(fields: dict) -> dict:
             cid = fields.get("company_id") or _slug(name)
             if not cid:
                 raise StoreError("could not derive a company_id from display_name")
+            # Check the vendor detail record FIRST, before mutating companies.json.
+            # Ordering matters: if we flip a company's role / append a company row
+            # and only then discover the vendor already exists, the raise leaves a
+            # stray or mutated company record committed to disk while the caller is
+            # told the op failed (partial write). Validate everything that can abort
+            # up front, then perform both writes. (Hardened v0.1.14.)
+            vendors = STORE.load("vendors")
+            if any(v["company_id"] == cid for v in vendors):
+                raise StoreError(f"vendor '{cid}' already exists")
             companies = STORE.load("companies")
             comp = next((c for c in companies if c["company_id"] == cid), None)
             if comp is None:
@@ -711,9 +720,6 @@ def create_vendor(fields: dict) -> dict:
             else:
                 comp["role"] = "vendor"
             STORE.save("companies", companies)
-            vendors = STORE.load("vendors")
-            if any(v["company_id"] == cid for v in vendors):
-                raise StoreError(f"vendor '{cid}' already exists")
             record = {k: None for k in VENDOR_FIELDS}
             record.update({"company_id": cid, "display_name": name, "archived": False,
                            "po_routing_source": fields.get("po_routing_source") or "manual"})

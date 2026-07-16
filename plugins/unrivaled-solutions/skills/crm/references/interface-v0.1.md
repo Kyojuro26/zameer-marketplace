@@ -23,7 +23,12 @@ Every response carries `ok` and `interface_version`. Failures return
 | `get_vendor` | `ref` (id or name) | vendor with offerings + PO/invoice routing |
 | `find_contacts` | `company?`, `query?` | contacts + count |
 | `list_invoices` | `payment_status?` (paid\|open\|partial), `company?` | the receivables ledger (CLIENT Invoices table); invoices also attached to `get_company` |
-| `crm_info` | — | version, store path, record counts, enriched-company count |
+| `crm_info` | — | version, store path, record counts, archived- and enriched-company counts |
+
+Reads that scan companies (`list_companies`, `list_projects`, `list_shipments`,
+`list_invoices`, `find_contacts`) exclude **archived** (soft-deleted) companies
+and their records by default; pass `include_archived=true` to see them.
+`get_company` always returns the record (archived or not) so it can be restored.
 
 ## Enrichment overlay (Phase 4)
 
@@ -45,6 +50,16 @@ it via `set_enrichment`. The store never talks to Outlook for reads itself.
 | `update_company` | `company_id`, `fields` | display_name, role, domains, locations |
 | `create_project` | `fields` | requires unique `project_no` + existing `company_id` |
 | `create_shipment` | `project_no`, `fields` | `shipment_id` auto-derived `<project_no>-L<n>`; defaults stage=Ordered |
+| `create_company` | `fields` | add a customer or vendor; requires `display_name`, `role` defaults customer; `company_id` derived from name unless supplied, must be unique |
+| `create_vendor` | `fields` | add a vendor: creates/reuses the company (role=vendor) + a vendor detail record (rep, email, phone, offerings, PO/invoice routing) |
+| `update_vendor` | `company_id`, `fields` | edit vendor detail |
+| `archive_company` | `company_id` | **soft-delete** a customer/vendor — hidden from the CRM, nothing destroyed; its projects/contacts/shipments/invoices are preserved |
+| `restore_company` | `company_id` | un-archive a previously deleted customer/vendor, bringing it and its records back |
+
+**Delete = archive (reversible).** There is no hard-delete tool. Deleting a
+customer or vendor sets `archived=true` (+ `archived_at`, logged); the record and
+everything under it stay in the store and reappear on `restore_company`. The
+audit trail is never rewritten.
 
 **Validation:** unknown fields rejected; `status` ∈ won|pending|lost;
 `stage` ∈ Ordered|Shipped|Delivered|Installed|On Hold|Cancelled;

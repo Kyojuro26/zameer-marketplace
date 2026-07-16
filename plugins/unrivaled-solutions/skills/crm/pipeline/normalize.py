@@ -265,7 +265,36 @@ def col(hm, *names):
 
 # ---------------------------------------------------------------- pipeline
 
-def run(workbook, outdir):
+def _guard_live_store(outdir, force):
+    """Refuse to overwrite a store that already holds user data / edits.
+
+    normalize.py rewrites every entity file wholesale; pointed at the live
+    production store it would destroy every edit made since migration. A
+    non-empty changelog.jsonl (edits are logged there) or an already-populated
+    companies.json is the signal that this is a real store, not an empty output
+    directory. A brand-new store whose files are just "[]" (2 bytes) does not
+    trip this. Pass force=True only for a throwaway/scratch target. (v0.1.14)
+    """
+    if force:
+        return
+    signals = []
+    changelog = os.path.join(outdir, "changelog.jsonl")
+    companies = os.path.join(outdir, "companies.json")
+    if os.path.exists(changelog) and os.path.getsize(changelog) > 0:
+        signals.append("changelog.jsonl (edit history present)")
+    if os.path.exists(companies) and os.path.getsize(companies) > 2:
+        signals.append("companies.json (existing records present)")
+    if signals:
+        raise SystemExit(
+            f"REFUSING to write into what looks like a LIVE store at {outdir!r}:\n"
+            "  - " + "\n  - ".join(signals) + "\n\n"
+            "normalize.py rewrites every entity file wholesale and would destroy "
+            "any edits made since migration. If you are certain this directory is "
+            "a throwaway/scratch target, re-run with --force.")
+
+
+def run(workbook, outdir, force=False):
+    _guard_live_store(outdir, force)
     wb = openpyxl.load_workbook(workbook, data_only=True, read_only=True)
     companies = OrderedDict()     # company_id -> record
     contacts = []
@@ -361,15 +390,31 @@ def run(workbook, outdir):
             }
             # flag financial cells that silently failed to parse (e.g. margin "P")
             for label, ci in (("revenue", c_rev), ("total_cost", c_cost),
-                              ("margin", c_marg)):
+                              ("gross_profit", c_gp), ("margin", c_marg)):
                 raw = g(ci)
                 if raw is not None and num(raw) is None:
                     review.append({"type": "non_numeric_financial", "field": label,
                                    "project_no": pno, "sheet": sheet,
                                    "value": str(raw)[:40]})
             if pno and pno in projects:
-                review.append({"type": "duplicate_project_no", "project_no": pno, "sheet": sheet})
-                projects[f"{pno}#{year}"] = rec
+                # Duplicate project number in the source workbook (same number
+                # reused across sheets/years). Keep the FIRST occurrence under the
+                # bare `pno` so existing shipment/invoice references still resolve,
+                # and store later occurrences under a distinct, addressable id
+                # (project_no rewritten to match) so update_project/get_project can
+                # target each one instead of two records silently colliding on the
+                # same identity. (v0.1.14)
+                dup_base = f"{pno}#{year}" if year else f"{pno}#dup"
+                dup_id, _n = dup_base, 2
+                while dup_id in projects:   # 3+ reuses in the same year: stay unique
+                    dup_id, _n = f"{dup_base}-{_n}", _n + 1
+                rec["project_no"] = dup_id
+                review.append({"type": "duplicate_project_no", "project_no": pno,
+                               "stored_as": dup_id, "sheet": sheet,
+                               "detail": ("Reuse of a project number from an earlier "
+                                          "row; stored under a distinct id so both are "
+                                          "individually editable. Confirm which is current.")})
+                projects[dup_id] = rec
             elif pno:
                 projects[pno] = rec
             else:
@@ -693,8 +738,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--workbook", required=True)
     ap.add_argument("--out", default="./store")
+    ap.add_argument("--force", action="store_true",
+                    help="allow writing into a non-empty store (DESTROYS existing "
+                         "records/edits) — only for throwaway/scratch targets")
     a = ap.parse_args()
-    s = run(a.workbook, a.out)
+    s = run(a.workbook, a.out, force=a.force)
     print("Normalization complete →", a.out)
     for k, v in s.items():
         print(f"  {k}: {v}")

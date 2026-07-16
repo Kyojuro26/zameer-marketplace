@@ -29,6 +29,11 @@ the shipped plugin as an unauthenticated CSRF hole -- see git history):
     (served from this same process), so it doesn't need CORS, and omitting
     it means the browser's own Same-Origin Policy blocks any other page
     from reading a response even if it somehow guessed the token.
+  - Host-header allowlist (v0.1.14): every request whose Host is not a
+    loopback literal (127.0.0.1/localhost/::1) is rejected with 403 before
+    anything is served. This defeats DNS rebinding, where a page served from
+    an attacker domain rebound to 127.0.0.1 would otherwise reach GET / and
+    read the baked-in token. Binding to 127.0.0.1 alone does not stop that.
 """
 
 import argparse
@@ -72,7 +77,19 @@ class Handler(BaseHTTPRequestHandler):
     def _authed(self):
         return secrets.compare_digest(self.headers.get("X-Bridge-Token", ""), TOKEN)
 
+    def _host_ok(self):
+        # Anti-DNS-rebinding: only answer when the Host is a loopback literal.
+        # A rebound page served from e.g. evil.com:8765 (resolved to 127.0.0.1)
+        # would carry Host: evil.com and be rejected here BEFORE GET / hands out
+        # the app + baked-in token. Binding to 127.0.0.1 alone does not stop a
+        # rebound Host; this check does. (v0.1.14)
+        host = self.headers.get("Host", "")
+        hostname = host.rsplit(":", 1)[0].strip("[]") if host else ""
+        return hostname in ("127.0.0.1", "localhost", "::1")
+
     def do_GET(self):
+        if not self._host_ok():
+            return self._send(403, {"ok": False, "error": "forbidden host"})
         if self.path in ("/", "/index.html"):
             html, counts = build_view.render_html(str(STORE_DIR), token=TOKEN)
             print(f"[local-server] served app -- {counts['companies']} companies, "
@@ -85,6 +102,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
+        if not self._host_ok():
+            return self._send(403, {"ok": False, "error": "forbidden host"})
         if self.path != "/call":
             return self._send(404, {"ok": False, "error": "POST /call only"})
         if not self._authed():
