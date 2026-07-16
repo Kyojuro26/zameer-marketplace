@@ -76,13 +76,23 @@ PROJECT_FIELDS = {
     "project_no", "company_id", "company_name", "owner", "date", "description",
     "location", "annotations", "status", "po_flag", "client_po_no", "invoice_no",
     "collection_status", "revenue", "total_cost", "gross_profit", "margin",
-    "notes", "year",
+    "notes", "year", "archived", "archived_at",
 }
 SHIPMENT_FIELDS = {
     "shipment_id", "project_no", "all_project_nos", "vendor_po_raw", "ship_date",
     "stage", "company_id", "client_name", "linked_to_project",
     "open_orders_notes", "start_date", "vendor_id", "eta",
 }
+# Full invoice/customer-order record shape, as produced by pipeline/normalize.py.
+# Most of these come straight from the source billing documents (the tracker's
+# CLIENT Invoices table) and are deliberately NOT editable here -- only the
+# fields a person would actually need to correct or update post-ingestion are.
+INVOICE_FIELDS = {
+    "invoice_no", "client_po_raw", "invoice_date", "payment_status",
+    "payment_status_raw", "pay_date", "client_name", "company_id",
+    "payment_notes", "vendor_notes", "project_no", "sheet_row",
+}
+INVOICE_EDITABLE_FIELDS = {"payment_status", "pay_date", "payment_notes", "client_po_raw"}
 CONTACT_FIELDS = {
     "company_id", "company_name", "name", "email", "phone", "title", "location",
     "action_notes", "last_action",
@@ -103,7 +113,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.17"
+SERVER_VERSION = "0.1.18"
 
 
 class StoreError(Exception):
@@ -303,6 +313,9 @@ def _validate(fields, allowed, entity):
     if "collection_status" in fields and fields["collection_status"] is not None \
             and not COLLECTION_RE.match(str(fields["collection_status"])):
         raise StoreError("collection_status must be paid | open | partial[:detail]")
+    if "payment_status" in fields and fields["payment_status"] is not None \
+            and not COLLECTION_RE.match(str(fields["payment_status"])):
+        raise StoreError("payment_status must be paid | open | partial[:detail]")
 
 
 def _require_company(company_id):
@@ -314,6 +327,18 @@ def _require_company(company_id):
 def _archived_ids():
     """Set of company_ids currently archived (soft-deleted)."""
     return {c["company_id"] for c in STORE.load("companies") if c.get("archived")}
+
+
+def _archived_project_nos():
+    """Set of project_no (as str) currently archived (soft-deleted)."""
+    return {str(p["project_no"]) for p in STORE.load("projects") if p.get("archived")}
+
+
+def _shipment_project_nos(s):
+    """A shipment's linked project numbers, as strings -- all_project_nos when
+    present, else its own project_no. Mirrors the lookup in get_project."""
+    nos = s.get("all_project_nos") or ([s.get("project_no")] if s.get("project_no") else [])
+    return {str(n) for n in nos if n}
 
 
 def _err(e):
@@ -336,9 +361,15 @@ def get_company(ref: str) -> dict:
         return _err(f"no unique company match for '{ref}'")
     cid = c["company_id"]
     contacts = [x for x in STORE.load("contacts") if x["company_id"] == cid]
-    projects = [x for x in STORE.load("projects") if x["company_id"] == cid]
-    shipments = [x for x in STORE.load("shipments") if x["company_id"] == cid]
-    invoices = [x for x in STORE.load("invoices") if x.get("company_id") == cid]
+    projects = [x for x in STORE.load("projects")
+                if x["company_id"] == cid and not x.get("archived")]
+    arch_pnos = _archived_project_nos()
+    shipments = [x for x in STORE.load("shipments")
+                 if x["company_id"] == cid
+                 and not (_shipment_project_nos(x) & arch_pnos)]
+    invoices = [x for x in STORE.load("invoices")
+                if x.get("company_id") == cid
+                and str(x.get("project_no")) not in arch_pnos]
     flags = [x for x in STORE.load("needs_review")
              if cid in (x.get("company_ids") or []) or x.get("company_id") == cid]
     return {"ok": True, "interface_version": VERSION, "company": c,
@@ -393,7 +424,7 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
     out = STORE.load("projects")
     if not include_archived:
         arch = _archived_ids()
-        out = [p for p in out if p.get("company_id") not in arch]
+        out = [p for p in out if p.get("company_id") not in arch and not p.get("archived")]
     if status:
         out = [p for p in out if p.get("status") == status]
     if owner:
@@ -416,7 +447,9 @@ def list_shipments(stage: str = None, company: str = None, overdue: bool = None,
     out = STORE.load("shipments")
     if not include_archived:
         arch = _archived_ids()
-        out = [s for s in out if s.get("company_id") not in arch]
+        arch_pnos = _archived_project_nos()
+        out = [s for s in out if s.get("company_id") not in arch
+               and not (_shipment_project_nos(s) & arch_pnos)]
     if stage:
         out = [s for s in out if s.get("stage") == stage]
     if company:
@@ -458,7 +491,9 @@ def list_invoices(payment_status: str = None, company: str = None,
     out = STORE.load("invoices")
     if not include_archived:
         arch = _archived_ids()
-        out = [i for i in out if i.get("company_id") not in arch]
+        arch_pnos = _archived_project_nos()
+        out = [i for i in out if i.get("company_id") not in arch
+               and str(i.get("project_no")) not in arch_pnos]
     if payment_status:
         out = [i for i in out
                if str(i.get("payment_status") or "").startswith(payment_status)]
@@ -515,6 +550,65 @@ def update_project(project_no: str, fields: dict) -> dict:
             STORE.save("projects", projects)
             STORE.log("update", "project", str(project_no), fields)
             return {"ok": True, "interface_version": VERSION, "project": target[0]}
+    except StoreError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def rename_project(old_project_no: str, new_project_no: str) -> dict:
+    """Change a project's number/key. Updates every shipment and invoice that
+    references the old number so nothing gets silently orphaned -- a plain
+    field edit can't do this safely, since project_no is a lookup key other
+    records point at, not just a display value. Fails if new_project_no is
+    empty or already used by a different project. (Ingestion-time
+    needs_review entries referencing the old number are left as-is -- they're
+    a historical note about the original migration, not a live pointer.)"""
+    try:
+        with STORE.write_lock():
+            new_pn = str(new_project_no).strip() if new_project_no is not None else ""
+            if not new_pn:
+                raise StoreError("new_project_no cannot be empty")
+            old_pn = str(old_project_no)
+            projects = STORE.load("projects")
+            target = [p for p in projects if str(p["project_no"]) == old_pn]
+            if not target:
+                return _err(f"project '{old_project_no}' not found")
+            if new_pn != old_pn and any(str(p["project_no"]) == new_pn for p in projects):
+                raise StoreError(f"project '{new_pn}' already exists")
+            target[0]["project_no"] = new_pn
+            STORE.save("projects", projects)
+
+            shipments = STORE.load("shipments")
+            touched_shipments = 0
+            for s in shipments:
+                changed = False
+                if str(s.get("project_no")) == old_pn:
+                    s["project_no"] = new_pn
+                    changed = True
+                all_pnos = s.get("all_project_nos") or []
+                if any(str(n) == old_pn for n in all_pnos):
+                    s["all_project_nos"] = [new_pn if str(n) == old_pn else n
+                                             for n in all_pnos]
+                    changed = True
+                touched_shipments += 1 if changed else 0
+            if touched_shipments:
+                STORE.save("shipments", shipments)
+
+            invoices = STORE.load("invoices")
+            touched_invoices = 0
+            for i in invoices:
+                if str(i.get("project_no")) == old_pn:
+                    i["project_no"] = new_pn
+                    touched_invoices += 1
+            if touched_invoices:
+                STORE.save("invoices", invoices)
+
+            STORE.log("rename", "project", old_pn,
+                      {"new_project_no": new_pn, "shipments_updated": touched_shipments,
+                       "invoices_updated": touched_invoices})
+            return {"ok": True, "interface_version": VERSION, "project": target[0],
+                    "shipments_updated": touched_shipments,
+                    "invoices_updated": touched_invoices}
     except StoreError as e:
         return _err(e)
 
@@ -605,7 +699,7 @@ def create_project(fields: dict) -> dict:
             if any(str(p["project_no"]) == str(pn) for p in projects):
                 raise StoreError(f"project '{pn}' already exists")
             record = {k: None for k in PROJECT_FIELDS}
-            record.update({"owner": [], "annotations": [], "po_flag": False})
+            record.update({"owner": [], "annotations": [], "po_flag": False, "archived": False})
             record.update(fields)
             projects.append(record)
             STORE.save("projects", projects)
@@ -752,6 +846,30 @@ def update_vendor(company_id: str, fields: dict) -> dict:
         return _err(e)
 
 
+@mcp.tool()
+def update_invoice(company_id: str, invoice_no: str, fields: dict) -> dict:
+    """Edit an invoice / customer order: payment_status (paid|open|
+    partial[:detail]), pay_date, payment_notes, client_po_raw. Matched by
+    (company_id, invoice_no) -- invoice numbers aren't guaranteed unique
+    across companies. invoice_date, the linked project_no, and the invoice's
+    own identifying fields are not editable here; they come from the
+    original billing documents."""
+    try:
+        with STORE.write_lock():
+            _validate(fields, INVOICE_EDITABLE_FIELDS, "invoice")
+            invoices = STORE.load("invoices")
+            target = [i for i in invoices if i.get("company_id") == company_id
+                      and str(i.get("invoice_no")) == str(invoice_no)]
+            if not target:
+                return _err(f"invoice '{invoice_no}' for company '{company_id}' not found")
+            target[0].update(fields)
+            STORE.save("invoices", invoices)
+            STORE.log("update", "invoice", f"{company_id}:{invoice_no}", fields)
+            return {"ok": True, "interface_version": VERSION, "invoice": target[0]}
+    except StoreError as e:
+        return _err(e)
+
+
 def _set_archived(company_id: str, archived: bool) -> dict:
     """Soft-delete/restore a company (customer or vendor). Nothing is destroyed:
     the record is flagged and hidden from default reads; its projects, contacts,
@@ -793,6 +911,46 @@ def restore_company(company_id: str) -> dict:
     """Un-archive a previously deleted customer or vendor, bringing it and all
     its records back into the CRM."""
     return _set_archived(company_id, False)
+
+
+def _set_project_archived(project_no: str, archived: bool) -> dict:
+    """Soft-delete/restore a single project. Nothing is destroyed: the project
+    record is flagged and hidden from default reads, and so are its shipments
+    and invoices (matched by their own project_no/all_project_nos fields) --
+    they're left completely unmodified on disk and reappear the moment the
+    project is restored."""
+    try:
+        with STORE.write_lock():
+            projects = STORE.load("projects")
+            target = [p for p in projects if str(p["project_no"]) == str(project_no)]
+            if not target:
+                return _err(f"project '{project_no}' not found")
+            target[0]["archived"] = archived
+            target[0]["archived_at"] = (
+                datetime.now(timezone.utc).isoformat() if archived else None)
+            STORE.save("projects", projects)
+            STORE.log("archive" if archived else "restore", "project", str(project_no),
+                      {"archived": archived})
+            return {"ok": True, "interface_version": VERSION, "project": target[0]}
+    except StoreError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def archive_project(project_no: str) -> dict:
+    """Soft-delete a single project within a customer record: it, its
+    shipments, and its invoices disappear from the CRM but nothing is
+    destroyed -- restore with restore_project. Use this for deleting a
+    project (as opposed to archive_company, which deletes the whole
+    customer/vendor)."""
+    return _set_project_archived(project_no, True)
+
+
+@mcp.tool()
+def restore_project(project_no: str) -> dict:
+    """Un-archive a previously deleted project, bringing it and its
+    shipments/invoices back into the CRM."""
+    return _set_project_archived(project_no, False)
 
 
 @mcp.tool()

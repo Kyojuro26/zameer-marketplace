@@ -10,12 +10,18 @@ arrive as updates to this same plugin.
 - Navigate every customer: contacts, projects (deals), shipments, receivables.
 - Edit records and have the edits **persist** — company name/location,
   full contact details (incl. location, action notes, last-action date),
-  vendor details, and every project field (description, status, collection,
+  vendor details, every project field (description, status, collection,
   owners, notes, annotations, location, dates, PO/invoice numbers,
-  revenue/cost/gross profit/margin) and shipment field (vendor PO, stage,
-  ship/start/ETA dates, order notes) — with every change logged to an audit
-  trail.
+  revenue/cost/gross profit/margin), shipment field (vendor PO, stage,
+  ship/start/ETA dates, order notes), and invoice / customer order field
+  (payment status, pay date, payment notes, client PO#) — with every change
+  logged to an audit trail.
+- Rename a project's number and every shipment/invoice that references it
+  updates with it — atomically, so nothing gets orphaned.
 - Add new companies, projects, contacts, and shipments.
+- Delete a single project within a customer record (and, along with it, its
+  shipments and invoices) — reversibly, like company/vendor delete: hidden,
+  never destroyed, restorable.
 - Click a contact to open a **real Outlook draft** (never auto-sent).
 - Push a company's contacts + CRM status categories natively into Outlook.
 - See per-company Outlook activity: last contact, recent threads, meetings.
@@ -27,7 +33,7 @@ arrive as updates to this same plugin.
 | Component | What it is |
 |---|---|
 | `crm` skill | Teaches Claude to operate the CRM conversationally |
-| `unrivaled-crm` MCP server | The only reader/writer of your CRM records (23 tools, interface v0.1) |
+| `unrivaled-crm` MCP server | The only reader/writer of your CRM records (27 tools, interface v0.1) |
 | Visual app (`local_server.py`) | Same records, in a real local web app — see setup step 5 |
 
 ## Setup (one time, ~10 minutes)

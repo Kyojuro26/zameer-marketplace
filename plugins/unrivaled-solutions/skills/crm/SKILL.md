@@ -10,7 +10,7 @@ description: >
   records, creating drafts in Outlook, and syncing contacts and statuses
   into Outlook.
 metadata:
-  version: "0.1.17"
+  version: "0.1.18"
 ---
 
 # Unrivaled CRM
@@ -56,6 +56,17 @@ Writes are validated and logged; report failures honestly:
   owner reps, notes, revenue).
 - Advance a shipment → `update_shipment` (stage: Ordered → Shipped →
   Delivered → Installed, plus On Hold / Cancelled; ship_date, eta).
+- Update an invoice / customer order → `update_invoice` (matched by
+  `company_id` + `invoice_no`): `payment_status` (paid|open|partial[:detail]),
+  `pay_date`, `payment_notes`, `client_po_raw`. The invoice date, linked
+  project number, and other identifying fields aren't editable here — they
+  come from the original billing documents.
+- Rename a project's number → `rename_project(old_project_no,
+  new_project_no)`. This is NOT a plain field edit: `project_no` is a lookup
+  key that shipments and invoices point at, so a rename must atomically
+  cascade to every shipment (`project_no`/`all_project_nos`) and invoice
+  (`project_no`) that references it, which `rename_project` does in one
+  write-locked operation. Fails if the new number is empty or already in use.
 - New records → `create_project` (needs a unique project number and an
   existing company), `create_shipment` (attaches to a project),
   `upsert_contact` (deduped by email — safe to re-run).
@@ -68,6 +79,13 @@ Writes are validated and logged; report failures honestly:
   but nothing is destroyed, and its projects/contacts/shipments/invoices are
   preserved. There is no hard delete. Confirm with the user before archiving,
   and tell them it can be restored.
+- **Deleting a single project within a customer record →
+  `archive_project`** (and `restore_project` to undo). Same reversible-archive
+  pattern as company delete — the project, and any shipment/invoice linked to
+  it (by `project_no`/`all_project_nos`), are hidden from reads (`get_company`,
+  `list_projects`, `list_shipments`, `list_invoices`) but nothing is deleted
+  on disk; restoring the project brings them all back. Confirm with the user
+  before archiving.
 
 ## Outlook actions
 

@@ -243,6 +243,22 @@ function embeddedCall(tool, args){   // demo fallback — session-only mutation
     const v = vendorById[args.company_id] || {company_id:args.company_id};
     return {ok:true, vendor:Object.assign({}, v, args.fields)};
   }
+  if (tool === 'update_invoice'){
+    const inv = (DATA.invoices||[]).find(x=>x.company_id===args.company_id && String(x.invoice_no)===String(args.invoice_no));
+    if(!inv) return {ok:false, error:'invoice not found'};
+    return {ok:true, invoice:Object.assign({}, inv, args.fields)};
+  }
+  if (tool === 'rename_project'){
+    if(DATA.projects.some(p=>String(p.project_no)===String(args.new_project_no) && String(p.project_no)!==String(args.old_project_no)))
+      return {ok:false, error:"project '"+args.new_project_no+"' already exists"};
+    const p = DATA.projects.find(x=>String(x.project_no)===String(args.old_project_no));
+    if(!p) return {ok:false, error:'project not found'};
+    return {ok:true, project:Object.assign({}, p, {project_no:args.new_project_no}),
+      shipments_updated:0, invoices_updated:0};
+  }
+  if (tool === 'archive_project' || tool === 'restore_project'){
+    return {ok:true, project:{project_no:args.project_no, archived: tool==='archive_project'}};
+  }
   if (tool === 'create_project'){
     if(!f.project_no) return {ok:false, error:'project_no is required'};
     if(DATA.projects.some(p=>String(p.project_no)===String(f.project_no)))
@@ -453,13 +469,14 @@ function renderMain(){
   const invs=invoicesByCo[selected]||[];
   if(invs.length){
     h+=`<div class="section"><h2>Invoices / customer orders (${invs.length})</h2>
-      <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th>Invoiced</th><th>Status</th><th>Paid on</th><th>Notes</th></tr></thead><tbody>`+
+      <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th>Invoiced</th><th>Status</th><th>Paid on</th><th>Notes</th><th></th></tr></thead><tbody>`+
       invs.map(v=>{const st=(v.payment_status||'');const cls=st==='paid'?'b-won':(st.startsWith('partial')?'b-pending':'b-lost');
         return `<tr><td><b>${esc(v.invoice_no||'—')}</b></td><td class="muted">${esc(v.client_po_raw||'')}</td>
         <td class="muted">${esc((v.invoice_date||'').slice(0,10))}</td>
         <td><span class="badge ${cls}">${esc(st||'—')}</span></td>
         <td class="muted">${esc((v.pay_date||'').slice(0,10))}</td>
-        <td class="muted" style="max-width:340px">${esc((v.payment_notes||'').slice(0,90))}</td></tr>`;}).join('')+
+        <td class="muted" style="max-width:340px">${esc((v.payment_notes||'').slice(0,90))}</td>
+        <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('')+
       `</tbody></table></div>`;
   }
 
@@ -487,6 +504,8 @@ function openProject(pno){
   const marginPct = (p.margin==null||isNaN(p.margin)) ? '' : Math.round(p.margin*10000)/100;
   document.getElementById('dbody').innerHTML=`
     <div class="kv"><span class="k">Company</span><span>${esc((companyById[p.company_id]||{}).display_name||p.company_name||'—')}</span></div>
+    <div class="field"><label>Project #</label><input id="f_pno" value="${esc(p.project_no||'')}"/>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">Changing this updates every shipment and invoice linked to it — safe, but not instant to undo.</p></div>
     <div class="field"><label>Description</label><input id="f_desc" value="${esc(p.description||'')}"/></div>
     <div class="row2">
       <div class="field"><label>Location</label><input id="f_loc" value="${esc(p.location||'')}"/></div>
@@ -517,6 +536,7 @@ function openProject(pno){
     <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc((p.annotations||[]).join('\n'))}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}')">Save changes</button>
     <button class="btn ghost" onclick="openNewShipment('${jesc(pno)}')" style="margin-left:8px">+ Add shipment</button>
+    <button class="pill-btn" style="background:var(--red-soft);color:var(--red);margin-left:8px" onclick="deleteProject('${jesc(pno)}')">Delete project</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px" id="drawerNote"></p>`;
   document.getElementById('drawerNote').textContent = CRM.mode==='embedded'
@@ -531,6 +551,7 @@ function numOrNull(id){
 }
 
 async function saveProject(pno){
+  const newPno = document.getElementById('f_pno').value.trim();
   const marginRaw = numOrNull('f_margin');
   const fields = {
     description: document.getElementById('f_desc').value.trim() || null,
@@ -549,10 +570,61 @@ async function saveProject(pno){
     gross_profit: numOrNull('f_gp'),
     margin: marginRaw==null ? null : marginRaw/100,
   };
+  let renamed = false;
+  if(newPno && newPno !== pno){
+    const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
+    btn.disabled=true; msg.className='saved';
+    const rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno});
+    if(!rr || !rr.ok){
+      msg.textContent='✗ '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';
+      btn.disabled=false;
+      return;
+    }
+    // Mirror the rename across local state before the follow-up field save,
+    // so update_project below targets the record under its new key and the
+    // shipments/invoices sections re-render pointing at the right project.
+    const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
+    if(p) p.project_no = newPno;
+    DATA.shipments.forEach(s=>{
+      if(String(s.project_no)===String(pno)) s.project_no=newPno;
+      if(Array.isArray(s.all_project_nos))
+        s.all_project_nos = s.all_project_nos.map(n=>String(n)===String(pno)?newPno:n);
+    });
+    DATA.invoices.forEach(i=>{ if(String(i.project_no)===String(pno)) i.project_no=newPno; });
+    reindex();
+    pno = newPno;
+    renamed = true;
+  }
   await doSave('update_project', {project_no: pno, fields}, (r)=>{
     const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
     Object.assign(p, r.project || fields);
   });
+  // A rename changes the project_no baked into this drawer's own button
+  // handlers (Delete, + Add shipment) -- reopen so they point at the new
+  // number. Only done on rename: reopening on every ordinary save would
+  // wipe the "Saved" flash (it replaces the #savedMsg node doSave just set).
+  if(renamed) openProject(pno);
+}
+
+async function deleteProject(pno){
+  const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
+  if(!confirm(`Delete project ${pno}${p&&p.description?' ('+p.description+')':''}? It and its shipments/invoices will be archived (hidden from the CRM) and can be restored later — nothing is permanently destroyed.`)) return;
+  const r=await CRM.call('archive_project', {project_no:pno});
+  if(r&&r.ok){
+    DATA.projects=DATA.projects.filter(x=>String(x.project_no)!==String(pno));
+    DATA.shipments=DATA.shipments.filter(x=>!(_shipmentProjectNos(x).has(String(pno))));
+    DATA.invoices=DATA.invoices.filter(x=>String(x.project_no)!==String(pno));
+    reindex(); kpis(); renderList(); closeDrawer();
+    if(selected) renderMain();
+  } else {
+    alert('Delete failed: '+((r&&r.error)||'unknown error'));
+  }
+}
+
+function _shipmentProjectNos(s){
+  const nos = (s.all_project_nos && s.all_project_nos.length) ? s.all_project_nos
+    : (s.project_no ? [s.project_no] : []);
+  return new Set(nos.map(String));
 }
 
 /* -------------------------------------------------------- create drawers -- */
@@ -818,6 +890,45 @@ async function saveEditVendor(cid){
     const v=r.vendor||Object.assign(vendorById[cid]||{company_id:cid},fields);
     const i=(DATA.vendors||[]).findIndex(x=>x.company_id===cid);
     if(i>=0) DATA.vendors[i]=v; else (DATA.vendors=DATA.vendors||[]).push(v);
+    reindex(); closeDrawer();
+  });
+}
+
+/* Edit an invoice / customer order. Only payment_status/pay_date/
+   payment_notes/client_po_raw are editable -- everything else (invoice #,
+   invoice date, the linked project) comes from the original billing
+   documents and isn't safe to hand-edit here. Matched by (company_id,
+   invoice_no), same key server-side. */
+function openEditInvoice(cid, invoiceNo){
+  const v=(invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNo));
+  if(!v) return;
+  document.getElementById('dtitle').textContent='Edit invoice — '+(v.invoice_no||'');
+  document.getElementById('dbody').innerHTML=`
+    <div class="kv"><span class="k">Invoice date</span><span>${esc((v.invoice_date||'—').slice(0,10))}</span></div>
+    <div class="kv"><span class="k">Project #</span><span>${esc(v.project_no||'—')}</span></div>
+    <div class="row2">
+      <div class="field"><label>Status</label><select id="e_iv_status">
+        ${['open','partial:50%','paid'].map(s=>`<option value="${s}" ${(v.payment_status||'')===s?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field"><label>Paid on</label><input id="e_iv_paydate" type="date" value="${esc((v.pay_date||'').slice(0,10))}"/></div>
+    </div>
+    <div class="field"><label>Client PO / order</label><input id="e_iv_po" value="${esc(v.client_po_raw||'')}"/></div>
+    <div class="field"><label>Notes</label><textarea id="e_iv_notes">${esc(v.payment_notes||'')}</textarea></div>
+    <button class="btn" id="saveBtn" onclick="saveEditInvoice('${jesc(cid)}','${jesc(v.invoice_no||'')}')">Save changes</button>
+    <span class="saved" id="savedMsg"></span>`;
+  document.getElementById('drawer').classList.add('open');
+}
+
+async function saveEditInvoice(cid, invoiceNo){
+  const fields={
+    payment_status: document.getElementById('e_iv_status').value || null,
+    pay_date: document.getElementById('e_iv_paydate').value || null,
+    client_po_raw: document.getElementById('e_iv_po').value.trim() || null,
+    payment_notes: document.getElementById('e_iv_notes').value.trim() || null,
+  };
+  await doSave('update_invoice', {company_id:cid, invoice_no:invoiceNo, fields}, (r)=>{
+    const rec=r.invoice||Object.assign({}, (invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNo)), fields);
+    const i=DATA.invoices.findIndex(x=>x.company_id===cid && String(x.invoice_no)===String(invoiceNo));
+    if(i>=0) DATA.invoices[i]=rec;
     reindex(); closeDrawer();
   });
 }

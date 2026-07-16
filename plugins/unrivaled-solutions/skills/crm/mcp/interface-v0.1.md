@@ -53,18 +53,22 @@ it via `set_enrichment`. The store never talks to Outlook for reads itself.
 | `create_company` | `fields` | add a customer or vendor; requires `display_name`, `role` defaults customer; `company_id` derived from name unless supplied, must be unique |
 | `create_vendor` | `fields` | add a vendor: creates/reuses the company (role=vendor) + a vendor detail record (rep, email, phone, offerings, PO/invoice routing) |
 | `update_vendor` | `company_id`, `fields` | edit vendor detail |
+| `update_invoice` | `company_id`, `invoice_no`, `fields` | edit an invoice / customer order: `payment_status`, `pay_date`, `payment_notes`, `client_po_raw`. Matched by (company_id, invoice_no) — invoice numbers aren't guaranteed unique across companies. `invoice_date`/`project_no` and other identifying fields are not editable — they come from the original billing documents. |
+| `rename_project` | `old_project_no`, `new_project_no` | change a project's number/key, cascading the update to every shipment (`project_no`/`all_project_nos`) and invoice (`project_no`) that references it — atomic, one write-locked operation. Fails if the new number is empty or already used by a different project. |
 | `archive_company` | `company_id` | **soft-delete** a customer/vendor — hidden from the CRM, nothing destroyed; its projects/contacts/shipments/invoices are preserved |
 | `restore_company` | `company_id` | un-archive a previously deleted customer/vendor, bringing it and its records back |
+| `archive_project` | `project_no` | **soft-delete** a single project within a customer record — hidden from the CRM (`get_company`, `list_projects`, `list_shipments`, `list_invoices`), along with any shipment/invoice linked to it (`project_no`/`all_project_nos`); nothing destroyed |
+| `restore_project` | `project_no` | un-archive a previously deleted project, bringing it and its linked shipments/invoices back |
 
 **Delete = archive (reversible).** There is no hard-delete tool. Deleting a
-customer or vendor sets `archived=true` (+ `archived_at`, logged); the record and
-everything under it stay in the store and reappear on `restore_company`. The
-audit trail is never rewritten.
+customer, vendor, or single project sets `archived=true` (+ `archived_at`,
+logged); the record and everything under it stay in the store and reappear on
+`restore_company`/`restore_project`. The audit trail is never rewritten.
 
 **Validation:** unknown fields rejected; `status` ∈ won|pending|lost;
 `stage` ∈ Ordered|Shipped|Delivered|Installed|On Hold|Cancelled;
-`collection_status` ∈ paid|open|partial[:detail]; referential integrity
-enforced (project→company, shipment→project).
+`collection_status` / `payment_status` ∈ paid|open|partial[:detail]; referential
+integrity enforced (project→company, shipment→project).
 
 **Write mechanics:** atomic temp-file + `os.replace`; every mutation appended
 to `store/changelog.jsonl` with UTC timestamp, op, entity, key, fields.
