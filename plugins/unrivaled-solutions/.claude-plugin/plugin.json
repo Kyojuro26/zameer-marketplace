@@ -1,6 +1,6 @@
 {
   "name": "unrivaled-solutions",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "Unrivaled Solutions operations plugin \u2014 an Outlook-based CRM over your sales tracker data: navigate companies, projects and shipments, add and delete customers and vendors, edit records that persist, and click a contact to start a real Outlook draft. (PO automation, sales engine, and bank reconciliation ship as later updates.)",
   "author": {
     "name": "Zameer"

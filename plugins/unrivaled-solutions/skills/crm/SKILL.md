@@ -10,7 +10,7 @@ description: >
   records, creating drafts in Outlook, and syncing contacts and statuses
   into Outlook.
 metadata:
-  version: "0.1.16"
+  version: "0.1.17"
 ---
 
 # Unrivaled CRM
