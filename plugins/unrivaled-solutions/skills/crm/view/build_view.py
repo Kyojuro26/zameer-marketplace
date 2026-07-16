@@ -6,8 +6,12 @@
 Wired to the Unrivaled CRM MCP (interface v0.1). The app picks a backend at
 startup, in order:
 
-  1. cowork   — window.cowork.callMcpTool -> the plugin's CRM MCP (production)
-  2. http     — the local dev bridge (mcp/dev_bridge.py) on 127.0.0.1:8765
+  1. http     — mcp/local_server.py, a token-authenticated localhost server
+                (production: this is what "Open Unrivaled CRM" launches)
+  2. cowork   — window.cowork.callMcpTool, if a Cowork artifact ever exposes
+                it with this plugin's tools allowlisted (not currently
+                reachable through any tested Cowork surface as of 2026-07-16
+                — kept as a fallback in case that changes)
   3. embedded — the data baked into this file; edits are session-only (demo)
 
 In modes 1–2 every save persists through the MCP's validated write path and
@@ -24,7 +28,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 <!-- Defense in depth: no plugins, no <base> hijack, no framing; block any
      javascript:/external script that slips past output encoding. Inline
      script/style are still permitted (this file is self-contained). -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src http://127.0.0.1:8765; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"/>
 <title>Unrivaled CRM</title>
 <style>
   :root{
@@ -149,7 +153,8 @@ const TOOL_PREFIX_CANDIDATES = [
 ];
 let TOOL_PREFIX = null;
 let SERVER_VERSION = null;
-const BRIDGE = 'http://127.0.0.1:8765';
+const BRIDGE = '';  // same-origin: the local app server serves this page itself
+const BRIDGE_TOKEN = '__BRIDGE_TOKEN__';  // per-launch secret; local_server.py fills this in
 
 const CRM = {
   mode: 'embedded',
@@ -179,8 +184,9 @@ const CRM = {
     else {
       try{
         const c = new AbortController(); setTimeout(()=>c.abort(), 1200);
-        const r = await fetch(BRIDGE + '/health', {signal: c.signal});
-        if ((await r.json()).ok) this.mode = 'http';
+        const r = await fetch(BRIDGE + '/health', {signal: c.signal,
+          headers:{'X-Bridge-Token': BRIDGE_TOKEN}});
+        if (r.ok && (await r.json()).ok) this.mode = 'http';
       }catch(e){ /* stay embedded */ }
     }
     setModePill();
@@ -194,8 +200,9 @@ const CRM = {
     }
     if (this.mode === 'http'){
       const r = await fetch(BRIDGE + '/call', {method:'POST',
-        headers:{'Content-Type':'application/json'},
+        headers:{'Content-Type':'application/json', 'X-Bridge-Token': BRIDGE_TOKEN},
         body: JSON.stringify({tool, args: args || {}})});
+      if (r.status === 401) return {ok:false, error:'bridge auth rejected — reopen the app from its desktop shortcut'};
       return await r.json();
     }
     return embeddedCall(tool, args || {});
@@ -281,7 +288,7 @@ function setModePill(){
   const el = document.getElementById('modePill');
   el.textContent = {
     cowork:   'Live · edits persist (CRM MCP' + (SERVER_VERSION ? ' v' + SERVER_VERSION : '') + ')',
-    http:     'Live · edits persist (dev bridge)',
+    http:     'Live · edits persist (local app)',
     embedded: 'Demo · edits last this browser session only',
   }[CRM.mode];
   el.classList.toggle('live', CRM.mode !== 'embedded');
@@ -795,15 +802,15 @@ CRM.detect();
 </html>
 """
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--store", default="../store")
-    ap.add_argument("--out", default="./unrivaled-crm.html")
-    a = ap.parse_args()
+def render_html(store_dir, token=""):
+    """Build the self-contained HTML app for the given store, embedding
+    `token` as the bridge auth secret (empty string if none -- the app will
+    then fail bridge auth and fall back to demo/cowork detection, never
+    silently talk to an unauthenticated bridge). Returns (html, counts)."""
     data = {}
     problems = []
     for name in ["companies", "contacts", "projects", "shipments", "invoices", "vendors"]:
-        path = os.path.join(a.store, f"{name}.json")
+        path = os.path.join(store_dir, f"{name}.json")
         # Degrade per-file: a missing or corrupt store file (OneDrive
         # conflicted copy, half-written temp) must not kill the whole build.
         try:
@@ -812,13 +819,15 @@ def main():
         except FileNotFoundError:
             data[name] = []
             if name != "invoices":  # invoices.json is server-created; absence is normal
-                problems.append(f"{name}.json missing — built with 0 {name}")
+                problems.append(f"{name}.json missing -- built with 0 {name}")
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as ex:
             data[name] = []
-            problems.append(f"{name}.json unreadable ({type(ex).__name__}) — built with 0 {name}")
-    if not data.get("companies"):
+            problems.append(f"{name}.json unreadable ({type(ex).__name__}) -- built with 0 {name}")
+    # A validly-empty companies.json (brand-new store, everything archived)
+    # is fine -- only refuse to build over an actually missing/corrupt file.
+    if any(p.startswith("companies.json") for p in problems):
         raise SystemExit(
-            "companies.json missing or unreadable — refusing to build an empty "
+            "companies.json missing or unreadable -- refusing to build an empty "
             "view over a broken store. Fix the store file and rebuild.\n"
             + "\n".join(problems))
     for p in problems:
@@ -834,13 +843,24 @@ def main():
     # would break out of the script element. Neutralize them.
     blob = (json.dumps(data)
             .replace("<", "\\u003c").replace(">", "\\u003e")
-            .replace(" ", "\\u2028").replace(" ", "\\u2029"))
-    html = TEMPLATE.replace("__DATA__", blob)
+            .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+    html = TEMPLATE.replace("__DATA__", blob).replace("__BRIDGE_TOKEN__", token)
+    counts = {"companies": len(data["companies"]), "projects": len(data["projects"]),
+              "shipments": len(data["shipments"])}
+    return html, counts
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--store", default="../store")
+    ap.add_argument("--out", default="./unrivaled-crm.html")
+    a = ap.parse_args()
+    html, counts = render_html(a.store)
     with open(a.out, "w", encoding="utf-8") as f:
         f.write(html)
     kb = round(len(html) / 1024)
-    print(f"Wrote {a.out} ({kb} KB) — {len(data['companies'])} companies, "
-          f"{len(data['projects'])} projects, {len(data['shipments'])} shipments")
+    print(f"Wrote {a.out} ({kb} KB) -- {counts['companies']} companies, "
+          f"{counts['projects']} projects, {counts['shipments']} shipments")
 
 if __name__ == "__main__":
     main()

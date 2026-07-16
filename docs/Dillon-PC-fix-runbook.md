@@ -1,4 +1,4 @@
-# Unrivaled CRM — production setup (v0.1.10, updated 7/15)
+# Unrivaled CRM — production setup (v0.1.11, updated 7/16)
 
 Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `powershell` → Enter). No admin needed.
 
@@ -6,9 +6,9 @@ Run on Dillon's PC, logged in as his user, in **PowerShell** (Start → type `po
 
 ---
 
-## STEP 1 — Install plugin v0.1.10
+## STEP 1 — Install plugin v0.1.11
 
-Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.10** — anything older than 0.1.4 can never connect, 0.1.8 is the first where the visual CRM app talks live to the server, 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed), and 0.1.10 adds a store-wide write lock so two open Cowork windows can't silently overwrite each other's edits (if the store is briefly locked you'll see a clear "try again in a moment" message instead of a lost change). (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
+Update `unrivaled-solutions` from the zameer-marketplace (or install the `.plugin` file from Zeeshan). In Claude: **Settings → Capabilities**. Verify the version shows **0.1.11** — anything older than 0.1.4 can never connect, 0.1.9 moves the Outlook token cache + config into a `.secrets` subfolder (auto-migrated from the old location on first launch — no action needed), 0.1.10 adds a store-wide write lock so two writers can't silently overwrite each other's edits (if the store is briefly locked you'll see a clear "try again in a moment" message instead of a lost change), and 0.1.11 adds the real visual app (Step 6 below) — **the "visual app talks live via Cowork" claim in older versions of this runbook was wrong and has been retracted**: tested directly and confirmed no Cowork artifact surface can reach the plugin's tools, so the visual app now runs as its own local server instead. (To confirm what's actually running later, ask Claude "crm info" — the reply includes `server_version`.)
 
 ## STEP 2 — Real Python with the `mcp` package
 
@@ -96,6 +96,49 @@ Get-Content "$store\changelog.jsonl" -Tail 5
 ```
 
 **Expect:** a fresh timestamped entry. Reads + writes = done.
+
+## STEP 6 — The visual app (recommended, ~2 minutes)
+
+The interactive CRM view is a real local web app now, not something opened
+through a Cowork chat — Cowork has no way for a rendered artifact to call
+back into a plugin's tools, so this runs as its own token-authenticated
+localhost server instead (127.0.0.1 only; fresh random token every launch;
+not reachable from the network or from any other browser tab).
+
+In the same Claude chat, ask: **"copy the CRM plugin's skills/crm/mcp and
+skills/crm/view folders into C:\UnrivaledCRM\app\skills\crm\mcp and
+...\view"** — the plugin's actual install folder moves around between
+updates, so have Claude locate it live rather than typing a path by hand.
+
+**Expect:** `C:\UnrivaledCRM\app\skills\crm\mcp\local_server.py` and
+`C:\UnrivaledCRM\app\skills\crm\view\build_view.py` both exist afterward.
+
+Then create the desktop shortcut:
+
+```powershell
+@"
+@echo off
+cd /d "C:\UnrivaledCRM\app\skills\crm\mcp"
+python3 local_server.py
+pause
+"@ | Set-Content -Path "$env:USERPROFILE\Desktop\Open Unrivaled CRM.bat" -Encoding Ascii
+```
+
+Double-click **"Open Unrivaled CRM"** on the Desktop. It reads the same
+`~\.unrivaled-crm-store` pointer as everything else and opens your default
+browser automatically.
+
+**Expect:** the header reads **"Live · edits persist (local app)"**, not
+"Demo." Click into a real company and confirm the data matches what "pull
+up a customer" showed in Step 4. Leave the console window open while using
+the app — closing it stops the server. If the header ever says "Demo,"
+close that window and reopen from the shortcut rather than using the
+browser's back button.
+
+**After any future plugin update:** this copy at `C:\UnrivaledCRM\app\`
+does **not** auto-update — re-run the copy step above if the update
+touched `skills/crm/mcp` or `skills/crm/view`, or the shortcut keeps
+launching old code with no warning it's stale.
 
 ---
 

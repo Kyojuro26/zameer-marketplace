@@ -23,6 +23,7 @@ arrive as updates to this same plugin.
 |---|---|
 | `crm` skill | Teaches Claude to operate the CRM conversationally |
 | `unrivaled-crm` MCP server | The only reader/writer of your CRM records (14 tools, interface v0.1) |
+| Visual app (`local_server.py`) | Same records, in a real local web app — see setup step 5 |
 
 ## Setup (one time, ~10 minutes)
 
@@ -92,6 +93,37 @@ compose link.
 Claude's connector settings (read-only) so Claude can refresh last-contact
 dates, threads, and meetings per company.
 
+**5. The visual app (recommended, one-time setup, ~2 minutes).** The
+interactive CRM view is a real local application, not a Cowork artifact —
+Cowork does not currently expose a way for a rendered artifact to call back
+into a plugin's tools, so this runs as its own token-authenticated localhost
+server instead (bound to 127.0.0.1 only; a fresh random token every launch;
+never reachable from the network or from any other page in your browser).
+
+Copy the app files out of the plugin into a stable folder — ask Claude to
+"copy the CRM plugin's skills/crm/mcp and skills/crm/view folders into
+C:\UnrivaledCRM\app\skills\crm\{mcp,view}" (the plugin's own install path
+moves around between updates, so Claude locating it live is more reliable
+than a hardcoded path). Then create a desktop shortcut:
+
+```powershell
+# Save as "Open Unrivaled CRM.bat" on the Desktop
+@"
+@echo off
+cd /d "C:\UnrivaledCRM\app\skills\crm\mcp"
+python3 local_server.py
+pause
+"@ | Set-Content -Path "$env:USERPROFILE\Desktop\Open Unrivaled CRM.bat" -Encoding Ascii
+```
+
+Double-click it whenever you want the CRM open — it reads the same store
+pointer file as everything else and opens your browser automatically. The
+header shows **"Live · edits persist (local app)"** when it's working.
+Leave the console window open while you use the app; closing it shuts the
+server down. If the header ever says "Demo" instead, close and reopen from
+the shortcut rather than the browser's back button — that means it didn't
+find a live backend on that load.
+
 ## Usage
 
 Just talk to Claude:
@@ -101,7 +133,10 @@ Just talk to Claude:
 - "Add a new project for Meridian Corp — racking install, $12k, rep D"
 - "Draft an email to Alex Rivera"
 - "Sync Meridian Corp into my Outlook"
-- "Open the CRM" — the visual app
+
+Or use the visual app directly — double-click "Open Unrivaled CRM" on the
+desktop (see setup step 5). Both talk to the same store; use whichever's
+convenient.
 
 ## Configuration files (no env vars — see Dev/prod protocol)
 
@@ -115,9 +150,16 @@ Just talk to Claude:
 Your data stays yours (a folder you own; nothing hard-coded). Drafts only —
 nothing is ever sent on your behalf. Outlook data is never deleted. Anything
 the system isn't sure about is flagged for your review, never guessed. If two
-Cowork windows edit the CRM at the same moment, the store is locked for the
-instant it takes to save — you'll see a "try again in a moment" message
-instead of one edit silently overwriting the other.
+Cowork windows (or a Cowork window and the visual app) edit the CRM at the
+same moment, the store is locked for the instant it takes to save — you'll
+see a "try again in a moment" message instead of one edit silently
+overwriting the other.
+
+The visual app's local server binds to 127.0.0.1 only (never reachable from
+your network), requires a fresh random token every launch that only that
+browser tab knows, and doesn't allow cross-origin requests — another tab or
+site open in your browser cannot call it even though it's running on your
+machine.
 
 
 ## Dev/prod protocol (2026-07-14)
@@ -129,6 +171,13 @@ instead of one edit silently overwriting the other.
 - **Code flows one way:** edit build -> rsync into zameer-marketplace clone
   (publish.sh exclusions) -> bump `plugin.json` version -> push `main` ->
   Dillon updates in Settings -> verify with "crm info" (`server_version`).
+  The visual app's copy at `C:\UnrivaledCRM\app\` does NOT auto-update with
+  the plugin (it's a stable copy, deliberately outside the plugin's
+  ever-changing install path) — after any version bump that touches
+  `skills/crm/mcp/local_server.py`, `server.py`, or `skills/crm/view/`,
+  re-run the copy step from the README's setup section 5, or the desktop
+  shortcut keeps launching old code indefinitely with no warning that it's
+  stale.
 - **Never ship store data.** Pipeline (`normalize.py`) output must never
   overwrite a live store. Schema changes ship as server migrations (e.g.
   v0.1.5 auto-creates missing entity files, v0.1.9 relocates secrets into
