@@ -11,7 +11,7 @@ description: >
   and statuses into Outlook, and keeping the desktop app copy in sync with
   the plugin.
 metadata:
-  version: "0.1.19"
+  version: "0.1.20"
 ---
 
 # Unrivaled CRM

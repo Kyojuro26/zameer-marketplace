@@ -2,7 +2,9 @@
 """Microsoft Graph write layer for the Unrivaled CRM MCP (Phase 5).
 
 Gate passed 2026-07-02 (graph_write_spike.py green on the sandbox tenant):
-Contacts.ReadWrite + MailboxSettings.ReadWrite + Mail.ReadWrite.
+Contacts.ReadWrite + MailboxSettings.ReadWrite + Mail.ReadWrite. v0.1.20
+adds User.Read — needed for the /me confirmation call in graph_login.py,
+which 403'd without it even though sign-in itself had already succeeded.
 
 Guardrails (crm-hybrid-build-plan.md Phase 5):
 - DRAFTS ONLY — nothing here can send mail.
@@ -99,6 +101,7 @@ def _migrate_legacy_secret(store_root, filename):
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = [
+    "https://graph.microsoft.com/User.Read",
     "https://graph.microsoft.com/Contacts.ReadWrite",
     "https://graph.microsoft.com/MailboxSettings.ReadWrite",
     "https://graph.microsoft.com/Mail.ReadWrite",
@@ -191,7 +194,20 @@ class GraphAuth:
 
     def login_device_flow(self, on_code):
         """Interactive: blocks until the user completes device sign-in.
-        on_code(message) receives the 'go to ... enter CODE' instruction."""
+        on_code(message) receives the 'go to ... enter CODE' instruction.
+
+        Clears any previously-cached account(s) first. This integration only
+        ever supports one signed-in mailbox at a time, and MSAL's token cache
+        has no concept of "most recently used" -- token_silent() just takes
+        get_accounts()[0], in whatever order the cache happens to store them.
+        Without this, signing in with the wrong account (e.g. an admin
+        account with no real mailbox) and then correcting it would silently
+        leave the wrong account as the one silent refresh keeps using,
+        with no error to signal it. A fresh interactive sign-in should fully
+        replace whatever was cached before, not add to it.
+        """
+        for acct in self.app.get_accounts():
+            self.app.remove_account(acct)
         flow = self.app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             raise GraphError(f"device flow failed to start: {flow}")
