@@ -23,6 +23,11 @@ arrive as updates to this same plugin.
   shipments and invoices) — reversibly, like company/vendor delete: hidden,
   never destroyed, restorable.
 - Click a contact to open a **real Outlook draft** (never auto-sent).
+- Reply directly to a thread you see in the CRM — a real reply draft on
+  that exact message (correct recipient(s), original quoted), not a blank
+  new email, via a "Reply" button next to each thread. Still draft-only,
+  never auto-sent. Only available on threads pulled in since this shipped;
+  re-run enrichment once to light it up on older ones.
 - Push a company's contacts + CRM status categories natively into Outlook.
 - See per-company Outlook activity: last contact, recent threads, meetings.
 - An interactive visual app (single HTML file) with search, drill-down,
@@ -102,7 +107,11 @@ compose link.
 
 **4. Outlook activity (optional).** Connect the Microsoft 365 connector in
 Claude's connector settings (read-only) so Claude can refresh last-contact
-dates, threads, and meetings per company.
+dates, threads, and meetings per company. **This must be the mailbox that
+actually holds the correspondence** — connect it on the machine/account
+that's really talking to customers (production: Dillon's PC/mailbox), never
+a different one, or the wrong person's email ends up attached to a customer
+record. If in doubt, ask Claude "who am I signed in as" before refreshing.
 
 **5. The visual app (recommended, one-time setup, ~2 minutes).** The
 interactive CRM view is a real local application, not a Cowork artifact —

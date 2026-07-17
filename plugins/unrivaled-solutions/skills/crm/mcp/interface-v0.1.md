@@ -34,7 +34,7 @@ and their records by default; pass `include_archived=true` to see them.
 
 | Tool | Args | Notes |
 |---|---|---|
-| `set_enrichment` | `company_id`, `data` | persists Outlook read-signal: `last_contact`, `threads[]` (subject/with/date/webLink), `meetings[]`, `source`; `refreshed_at` auto-set. Stored in `enrichment.json` as a non-destructive overlay — core records never touched. Attached to `get_company` responses. |
+| `set_enrichment` | `company_id`, `data` | persists Outlook read-signal: `last_contact`, `threads[]` (subject/with/date/webLink/message_id — the last field is what `draft_reply` targets; older or unenriched-since threads simply won't have it), `meetings[]`, `source`; `refreshed_at` auto-set. Stored in `enrichment.json` as a non-destructive overlay — core records never touched. Attached to `get_company` responses. |
 
 The **runner** is the CRM skill: it queries the read-only Outlook MCP
 (email/calendar search per contact email), computes the signal, and persists
@@ -81,6 +81,7 @@ dropped by any write.
 | Tool | Args | Notes |
 |---|---|---|
 | `draft_email` | `contact_email`, `subject?`, `body?` | creates a REAL Outlook draft (never sends); returns `webLink`. Contact keyed by email (the store's stable contact key). |
+| `draft_reply` | `company_id`, `message_id`, `comment?`, `reply_all?` | creates a REAL Outlook draft reply to one specific message (never sends) -- Graph auto-fills the correct recipient(s) and quotes the original, unlike `draft_email`'s blank new message. `message_id` comes from that company's `enrichment.threads[].message_id` (only present on threads enriched after this feature shipped). Returns `webLink`. `reply_all` uses createReplyAll instead of createReply. |
 | `sync_outlook` | `company_id`, `dry_run?` | upserts the company's contacts natively into Outlook + tags CRM status categories (from its projects). Idempotent; never deletes; non-CRM categories preserved. `dry_run` returns the plan without writing. |
 
 **Auth:** MSAL device-code with a persistent token cache

@@ -397,9 +397,10 @@ function enrichmentSection(id){
   h += `<div class="kv"><span class="k">Last contact</span><span>${e.last_contact ? esc(String(e.last_contact).slice(0,10)) : '<span class="muted">none found</span>'}</span></div>`;
   const th = e.threads || [];
   if (th.length){
-    h += `<table><thead><tr><th>Recent thread</th><th>With</th><th>Date</th></tr></thead><tbody>` +
+    h += `<table><thead><tr><th>Recent thread</th><th>With</th><th>Date</th><th></th></tr></thead><tbody>` +
       th.slice(0,5).map(t=>`<tr><td>${t.webLink?`<a href="${esc(safeUrl(t.webLink))}" target="_blank" rel="noopener">${esc(t.subject||'(no subject)')}</a>`:esc(t.subject||'(no subject)')}</td>
-        <td class="muted">${esc(t.with||'')}</td><td class="muted">${esc(String(t.date||'').slice(0,10))}</td></tr>`).join('') + `</tbody></table>`;
+        <td class="muted">${esc(t.with||'')}</td><td class="muted">${esc(String(t.date||'').slice(0,10))}</td>
+        <td>${t.message_id?`<button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="replyToThread('${jesc(id)}','${jesc(t.message_id)}')">Reply</button>`:''}</td></tr>`).join('') + `</tbody></table>`;
   } else {
     h += `<div class="muted">No recent email threads.</div>`;
   }
@@ -1031,6 +1032,30 @@ async function draft(email,name){
   const subject=encodeURIComponent('Following up — Unrivaled Solutions');
   const body=encodeURIComponent(`Hi ${first},\n\n`);
   window.open(`mailto:${encodeURIComponent(email)}?subject=${subject}&body=${body}`,'_blank');
+}
+
+async function replyToThread(companyId, messageId){
+  // Creates a REAL Outlook draft reply via draft_reply and opens it (never
+  // sends) -- Graph fills in the correct recipient(s) and quotes the
+  // original message, so this is a genuine reply, not a blank new email.
+  // The Reply button only ever renders when a thread carries a message_id
+  // (see enrichmentSection), and enrichmentSection itself is skipped
+  // entirely in demo mode, so this never fires there in normal use --
+  // the mode check below is just defensive.
+  if (CRM.mode === 'embedded'){
+    alert('Reply drafts need the live app, not demo mode.');
+    return;
+  }
+  try{
+    const r = await CRM.call('draft_reply', {company_id: companyId, message_id: messageId});
+    if (r && r.ok && r.draft && r.draft.webLink){
+      window.open(safeUrl(r.draft.webLink), '_blank');
+      return;
+    }
+    alert('Could not create reply draft: ' + ((r && r.error) || 'unknown error'));
+  }catch(e){
+    alert('Could not create reply draft: ' + e.message);
+  }
 }
 
 document.getElementById('q').addEventListener('input',e=>{query=e.target.value.trim();renderList();});

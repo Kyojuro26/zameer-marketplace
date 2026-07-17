@@ -6,12 +6,13 @@ description: >
   Ace Manufacturing", "what's the status of project 4521", "mark that shipment
   delivered", "add a new project for Meridian Corp", "draft an email to Alex",
   "what's shipping this week", "who owes us money", "refresh Outlook
-  activity", or "update my CRM app". It operates the Unrivaled CRM: reading
-  and updating the CRM records, creating drafts in Outlook, syncing contacts
-  and statuses into Outlook, and keeping the desktop app copy in sync with
-  the plugin.
+  activity", "reply to that thread", or "update my CRM app". It operates the
+  Unrivaled CRM: reading and updating the CRM records, creating drafts in
+  Outlook (including real reply drafts on existing threads), syncing
+  contacts and statuses into Outlook, and keeping the desktop app copy in
+  sync with the plugin.
 metadata:
-  version: "0.1.20"
+  version: "0.1.21"
 ---
 
 # Unrivaled CRM
@@ -23,8 +24,9 @@ thing that reads or writes them. Full tool reference:
 
 ## Core rules
 
-- **Never send email.** `draft_email` creates drafts only; the user reviews
-  and sends. Do not attempt to send through any other tool either.
+- **Never send email.** `draft_email` and `draft_reply` create drafts only;
+  the user reviews and sends. Do not attempt to send through any other tool
+  either.
 - **Never delete Outlook data.** The tools cannot; do not try elsewhere.
 - **Never guess.** Anything uncertain is flagged `needs_review` by the
   system — surface those flags to the user, don't resolve them silently.
@@ -95,6 +97,16 @@ Writes are validated and logged; report failures honestly:
   reports Outlook isn't configured, fall back to suggesting a mailto/compose
   link and tell the user Outlook drafts need one-time setup (see plugin
   README).
+- **Reply to a thread already surfaced in the CRM** → `draft_reply(company_id,
+  message_id, comment?, reply_all?)`. Unlike `draft_email`, this is a genuine
+  reply, not a blank new message — Graph auto-fills the correct recipient(s)
+  and quotes the original — because it targets a specific message by its
+  Graph id. That id only exists on threads pulled in by enrichment (a
+  company's `get_company` → `enrichment.threads[].message_id`); if a thread
+  predates this feature or hasn't been enriched since, it has no
+  `message_id` and can't be replied to until the company is re-enriched.
+  Returns a `webLink` — give it to the user to open and finish/send in
+  Outlook. Still drafts-only, same as `draft_email` — never sends.
 - **Push a company into Outlook** → `sync_outlook(company_id)`: upserts its
   contacts natively and tags them with CRM status categories. Run with
   `dry_run=true` first and show the plan when the user hasn't explicitly
@@ -107,9 +119,16 @@ to…", "refresh Outlook activity"):
 
 1. Query the connected Microsoft 365 / Outlook connector (read-only):
    search email by each store contact's address (sender and recipient),
-   and calendar events mentioning the company or its contacts.
+   and calendar events mentioning the company or its contacts. **This must
+   run from a session whose Microsoft 365 connector is actually signed into
+   the mailbox that holds the real correspondence** (production: Dillon's
+   PC) — a connector signed into anyone else's mailbox would attach the
+   wrong person's email to a customer record. Check with `get_me` if
+   there's any doubt whose mailbox is connected before writing anything.
 2. Compute: `last_contact` (newest message date), up to 5 recent `threads`
-   (subject, with, date, webLink), upcoming/recent `meetings`.
+   (subject, with, date, webLink, **and `message_id`** — the search result's
+   own `id` field, needed for `draft_reply`; it's already there, no extra
+   call required), upcoming/recent `meetings`.
 3. Persist via `set_enrichment(company_id, data)` with an honest `source`.
    If nothing was found, write empty results — never invent activity.
 

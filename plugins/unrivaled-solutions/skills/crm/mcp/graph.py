@@ -304,6 +304,20 @@ class GraphClient:
             raise GraphError("Graph returned a non-draft message; aborting")
         return {"id": d["id"], "webLink": d.get("webLink"), "isDraft": True}
 
+    def reply_draft(self, message_id, comment="", reply_all=False):
+        """Create a real DRAFT reply to an existing message -- a genuine
+        reply, not a blank new email: Graph auto-populates the correct
+        recipient(s) and quotes the original message. `comment` (if given)
+        becomes the reply's own text, above the quote. Never sends -- same
+        guardrail and paranoia check as create_draft. reply_all=True uses
+        createReplyAll instead of createReply."""
+        action = "createReplyAll" if reply_all else "createReply"
+        d = self._call("POST", f"/me/messages/{message_id}/{action}",
+                       json={"comment": comment} if comment else {})
+        if d.get("isDraft") is False:  # paranoia: refuse anything not a draft
+            raise GraphError("Graph returned a non-draft message; aborting")
+        return {"id": d["id"], "webLink": d.get("webLink"), "isDraft": True}
+
 
 def from_env(store_root):
     """Build (auth, client) from env, or raise GraphError with the fallback

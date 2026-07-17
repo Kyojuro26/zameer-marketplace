@@ -113,7 +113,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.20"
+SERVER_VERSION = "0.1.21"
 
 
 class StoreError(Exception):
@@ -1018,6 +1018,34 @@ def draft_email(contact_email: str, subject: str = None, body: str = None) -> di
                   {"draft_id": draft["id"], "subject": subject or "(default)"})
         return {"ok": True, "interface_version": VERSION, "draft": draft,
                 "contact": {"name": contact.get("name"), "email": contact["email"]}}
+    except StoreError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def draft_reply(company_id: str, message_id: str, comment: str = None,
+                 reply_all: bool = False) -> dict:
+    """Create a REAL Outlook draft that replies to one specific message from
+    a company's enrichment threads (never sends) -- a genuine reply, not a
+    blank new email: Graph auto-populates the correct recipient(s) and
+    quotes the original message. message_id comes from that company's
+    enrichment data (get_company's enrichment.threads[].message_id -- only
+    present on threads captured after this feature shipped; re-run
+    enrichment to backfill older ones). Returns the draft's webLink for
+    one-click open. reply_all=True replies to everyone on the original
+    thread instead of just the sender."""
+    try:
+        _require_company(company_id)
+        _g, client = _graph()
+        try:
+            draft = client.reply_draft(message_id, comment=comment or "",
+                                       reply_all=reply_all)
+        except Exception as e:
+            return _err(e)
+        STORE.log("outlook_reply_draft", "company", company_id,
+                  {"draft_id": draft["id"], "message_id": message_id,
+                   "reply_all": reply_all})
+        return {"ok": True, "interface_version": VERSION, "draft": draft}
     except StoreError as e:
         return _err(e)
 
