@@ -26,6 +26,7 @@ Usage:
 import argparse
 import json
 import re
+import sys
 from collections import defaultdict
 from datetime import datetime, date
 from pathlib import Path
@@ -182,15 +183,28 @@ def main():
     a = ap.parse_args()
 
     store = Path(a.store)
-    S = {n: json.load(open(store / f"{n}.json"))
-         for n in ["companies", "contacts", "projects", "shipments", "vendors"]}
+    # Explicit encodings: the store is written as UTF-8 with ensure_ascii=False,
+    # and Windows' default locale codec (cp1252) can't read it back. utf-8-sig
+    # also survives a BOM from any hand-edit in Notepad.
+    S = {}
+    for n in ["companies", "contacts", "projects", "shipments", "vendors"]:
+        try:
+            with open(store / f"{n}.json", encoding="utf-8-sig") as f:
+                S[n] = json.load(f)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            sys.exit(f"FATAL: {n}.json is unreadable ({e}) — fix or restore it, "
+                     f"then re-run the audit")
     edited = set()
     clog = store / "changelog.jsonl"
     if clog.exists():
-        for line in open(clog):
-            e = json.loads(line)
-            if e.get("op") in ("update", "create"):
-                edited.add((e["entity"], str(e["key"])))
+        with open(clog, encoding="utf-8-sig") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # one torn line must not kill the audit
+                if e.get("op") in ("update", "create"):
+                    edited.add((e["entity"], str(e["key"])))
 
     deals, open_orders, invoices = extract(a.workbook)
     F = defaultdict(list)  # findings by category
@@ -336,8 +350,9 @@ def main():
     }
     counts = {k: len(v) for k, v in sorted(F.items())}
 
-    json.dump({"summary": summary, "counts": counts, "findings": F},
-              open(a.json, "w"), indent=1, default=str)
+    with open(a.json, "w", encoding="utf-8") as f:
+        json.dump({"summary": summary, "counts": counts, "findings": F},
+                  f, indent=1, default=str)
 
     L = ["# Workbook ↔ CRM Audit", "",
          f"_Generated {datetime.now():%Y-%m-%d %H:%M}. Semantics per Zeeshan "
@@ -355,7 +370,9 @@ def main():
         if len(v) > 200:
             L.append(f"- …and {len(v) - 200} more (see JSON)")
         L.append("")
-    open(a.out, "w").write("\n".join(L))
+    # utf-8 explicitly: the report contains ↔/… and cp1252 can't encode them
+    with open(a.out, "w", encoding="utf-8") as f:
+        f.write("\n".join(L))
     print(json.dumps({"summary": summary, "counts": counts}, indent=1, default=str))
 
 

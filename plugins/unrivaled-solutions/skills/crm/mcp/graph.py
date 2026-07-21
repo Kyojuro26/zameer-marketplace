@@ -236,7 +236,17 @@ class GraphClient:
             raise GraphError("delete operations are not permitted")
         headers = {"Authorization": f"Bearer {self.token_provider()}",
                    "Content-Type": "application/json"}
-        r = self.http.request(method, f"{GRAPH}{path}", headers=headers, **kw)
+        # timeout: a firewall/proxy that black-holes the connection must fail
+        # the tool call with a readable error, not hang the chat/Save forever.
+        # requests exceptions subclass OSError, so this also converts DNS/
+        # connection failures into the GraphError the tool layer expects.
+        kw.setdefault("timeout", 30)
+        try:
+            r = self.http.request(method, f"{GRAPH}{path}", headers=headers, **kw)
+        except OSError as e:
+            raise GraphError(
+                f"{method} {path} failed before a response arrived "
+                f"({type(e).__name__}: {e}) — check the network/proxy and retry")
         if not r.ok:
             raise GraphError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:300]}")
         return r.json() if r.text else {}

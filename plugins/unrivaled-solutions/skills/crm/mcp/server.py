@@ -20,6 +20,7 @@ Contract rules (crm-hybrid-build-plan.md):
 
 import argparse
 import contextlib
+import functools
 import json
 import os
 import re
@@ -113,7 +114,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.21"
+SERVER_VERSION = "0.1.22"
 
 
 class StoreError(Exception):
@@ -140,6 +141,18 @@ class Store:
             missing = []
         if missing:
             raise StoreError(f"store at {root} is missing: {missing}")
+        # Sweep atomic-write temp files orphaned by a hard kill mid-write
+        # (power loss, force-quit): nothing else ever removes them, and the
+        # OneDrive backup mirrors them forever. Age-gated one hour so another
+        # live server's in-flight temp (lifetime: milliseconds) is never hit.
+        cutoff = time.time() - 3600
+        for tmpf in self.root.glob(".~*.tmp"):
+            try:
+                if tmpf.stat().st_mtime < cutoff:
+                    tmpf.unlink()
+                    _launch_log(f"swept orphaned temp file {tmpf.name}")
+            except OSError:
+                pass
 
     def load(self, entity):
         return self._read_json(self.root / ENTITY_FILES[entity], [])
@@ -246,10 +259,21 @@ class Store:
                 except OSError:
                     age = 0  # vanished between the failed create and stat; retry
                 if age > LOCK_STALE_SECONDS:
+                    # Takeover must have exactly one winner. A bare unlink()
+                    # here let two waiters both see the same stale lock, A
+                    # unlink+recreate, then B unlink A's FRESH lock — two
+                    # holders. os.replace is atomic: the second waiter's
+                    # rename finds lock_path gone and just re-enters the
+                    # O_CREAT|O_EXCL race. Re-stat right before taking over
+                    # so a lock refreshed since the age check isn't stolen.
+                    grave = lock_path.with_name(
+                        f"{LOCK_FILENAME}.stale-{os.getpid()}")
                     try:
-                        lock_path.unlink()
+                        if time.time() - lock_path.stat().st_mtime > LOCK_STALE_SECONDS:
+                            os.replace(lock_path, grave)
+                            grave.unlink()
                     except OSError:
-                        pass
+                        pass  # lost the takeover race; compete for the create
                     continue
                 if time.time() >= deadline:
                     raise StoreError(
@@ -308,6 +332,9 @@ def _validate(fields, allowed, entity):
     if "status" in fields and fields["status"] is not None \
             and fields["status"] not in PROJECT_STATUSES:
         raise StoreError(f"status must be one of {sorted(PROJECT_STATUSES)}")
+    if "role" in fields and fields["role"] is not None \
+            and fields["role"] not in COMPANY_ROLES:
+        raise StoreError(f"role must be one of {sorted(COMPANY_ROLES)}")
     if "stage" in fields and fields["stage"] not in SHIPMENT_STAGES:
         raise StoreError(f"stage must be one of {sorted(SHIPMENT_STAGES)}")
     if "collection_status" in fields and fields["collection_status"] is not None \
@@ -344,6 +371,20 @@ def _shipment_project_nos(s):
 def _err(e):
     return {"ok": False, "error": str(e), "interface_version": VERSION}
 
+
+def _store_errors(fn):
+    """Read tools don't take the write lock, but they can still hit a corrupt
+    entity file (OneDrive conflicted copy). Convert StoreError into the same
+    {ok:false, error} payload the write tools return, instead of letting a
+    raw exception cross the MCP wire."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except StoreError as e:
+            return _err(e)
+    return wrapper
+
 # ------------------------------------------------------------------ mcp
 
 mcp = FastMCP("unrivaled-crm")
@@ -352,6 +393,7 @@ mcp = FastMCP("unrivaled-crm")
 
 
 @mcp.tool()
+@_store_errors
 def get_company(ref: str) -> dict:
     """Company by id or name, with nested contacts, projects, open shipments,
     and any needs_review flags."""
@@ -380,6 +422,7 @@ def get_company(ref: str) -> dict:
 
 
 @mcp.tool()
+@_store_errors
 def list_companies(role: str = None, query: str = None,
                    include_archived: bool = False) -> dict:
     """Companies, optionally filtered by role (customer|vendor) and/or a
@@ -398,6 +441,7 @@ def list_companies(role: str = None, query: str = None,
 
 
 @mcp.tool()
+@_store_errors
 def get_project(project_no: str) -> dict:
     """Project card with its shipments, company, and contacts."""
     pr = [p for p in STORE.load("projects") if str(p["project_no"]) == str(project_no)]
@@ -416,6 +460,7 @@ def get_project(project_no: str) -> dict:
 
 
 @mcp.tool()
+@_store_errors
 def list_projects(status: str = None, owner: str = None, year: int = None,
                   collection_status: str = None, include_archived: bool = False) -> dict:
     """Project cards filtered by status (won|pending|lost), owner initial,
@@ -439,6 +484,7 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
 
 
 @mcp.tool()
+@_store_errors
 def list_shipments(stage: str = None, company: str = None, overdue: bool = None,
                    include_archived: bool = False) -> dict:
     """Shipment legs, filtered by stage, company (id or name), and/or
@@ -467,6 +513,7 @@ def list_shipments(stage: str = None, company: str = None, overdue: bool = None,
 
 
 @mcp.tool()
+@_store_errors
 def get_vendor(ref: str) -> dict:
     """Vendor by id or name, with offerings and PO/invoice routing."""
     vendors = STORE.load("vendors")
@@ -482,6 +529,7 @@ def get_vendor(ref: str) -> dict:
 
 
 @mcp.tool()
+@_store_errors
 def list_invoices(payment_status: str = None, company: str = None,
                   include_archived: bool = False) -> dict:
     """Client invoices / customer orders (the receivables ledger from the
@@ -507,6 +555,7 @@ def list_invoices(payment_status: str = None, company: str = None,
 
 
 @mcp.tool()
+@_store_errors
 def find_contacts(company: str = None, query: str = None,
                   include_archived: bool = False) -> dict:
     """Contacts, filtered by company (id or name) and/or a substring of
