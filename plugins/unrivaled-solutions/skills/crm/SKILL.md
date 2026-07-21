@@ -12,7 +12,7 @@ description: >
   contacts and statuses into Outlook, and keeping the desktop app copy in
   sync with the plugin.
 metadata:
-  version: "0.1.21"
+  version: "0.1.22"
 ---
 
 # Unrivaled CRM
