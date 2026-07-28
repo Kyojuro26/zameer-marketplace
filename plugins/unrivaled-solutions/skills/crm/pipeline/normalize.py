@@ -31,6 +31,13 @@ except ImportError:
 REP_TAG_RE = re.compile(r"\s*\(([^)]{1,12})\)\s*$")   # trailing "(D)", "(Ervin)"
 INV_RE = re.compile(r"INV[\s#-]*(\d+)", re.IGNORECASE)
 PCT_RE = re.compile(r"(\d{1,3})\s*%")
+# A commission/rep-split rate mentioned in the same cell as a "NN%" number is
+# NOT a percent-of-invoice-paid figure -- e.g. "Paid, 10% comm to D" reads a
+# payment percentage out of a commission rate if PCT_RE is trusted blindly.
+# Dillon 2026-07 feedback: this was misreading commission % as percent
+# invoiced. Never guess which the number means -- flag it for review instead
+# of assigning it as collection/payment status.
+COMMISSION_RE = re.compile(r"\bcomm(?:ission)?\b", re.IGNORECASE)
 PAID_RE = re.compile(r"\bpaid\b", re.IGNORECASE)
 LEADING_NUMS_RE = re.compile(r"^\s*(\d{2,6})(?:\s*(?:and|&|,|/)\s*(\d{2,6}))*")
 ONE_NUM_RE = re.compile(r"\d{2,6}")
@@ -224,6 +231,13 @@ def parse_project_key(raw):
 
     if PAID_RE.search(s):
         out["collection_status"] = "paid"
+    elif COMMISSION_RE.search(s):
+        # A percentage here is a commission/rep-split rate, not percent paid --
+        # never guess; flag it so a person confirms the real collection status.
+        out["review"] = (out["review"] + "; " if out["review"] else "") + \
+            f"commission % present, collection_status left unset: {s!r}"
+        if inv:
+            out["collection_status"] = "open"
     else:
         pct = PCT_RE.search(s)
         if pct:
@@ -594,6 +608,14 @@ def run(workbook, outdir, force=False):
         blob = f"{status_raw or ''} {pay_notes or ''}"
         if re.search(r"\bpaid\b", blob, re.IGNORECASE):
             payment_status = "paid"
+        elif COMMISSION_RE.search(blob):
+            # Same guard as parse_project_key: a "NN%" next to a commission
+            # mention is a rep-split rate, not percent of the invoice paid --
+            # never guess. Leave it open and flag it for a person to confirm.
+            payment_status = "open"
+            review.append({"type": "commission_percent_ignored", "invoice_no": invoice_no,
+                           "detail": f"commission % present, not read as payment_status: {blob!r}",
+                           "sheet_row": rn})
         else:
             pct = PCT_RE.search(blob)
             payment_status = f"partial:{pct.group(1)}%" if pct else "open"

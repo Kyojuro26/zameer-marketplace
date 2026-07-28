@@ -91,30 +91,41 @@ SHIPMENT_FIELDS = {
 INVOICE_FIELDS = {
     "invoice_no", "client_po_raw", "invoice_date", "payment_status",
     "payment_status_raw", "pay_date", "client_name", "company_id",
-    "payment_notes", "vendor_notes", "project_no", "sheet_row",
+    "payment_notes", "vendor_notes", "project_no", "sheet_row", "due_on",
 }
-INVOICE_EDITABLE_FIELDS = {"payment_status", "pay_date", "payment_notes", "client_po_raw"}
+# due_on is a manual override -- when absent, get_company/list_invoices report
+# an effective_due_on computed as invoice_date + DEFAULT_NET_TERMS_DAYS (Net 30)
+# instead. Editing due_on here sets the override; it never overwrites the
+# underlying invoice_date.
+INVOICE_EDITABLE_FIELDS = {"payment_status", "pay_date", "payment_notes",
+                          "client_po_raw", "due_on"}
+DEFAULT_NET_TERMS_DAYS = 30
 CONTACT_FIELDS = {
     "company_id", "company_name", "name", "email", "phone", "title", "location",
     "action_notes", "last_action",
 }
 COMPANY_FIELDS = {
     "company_id", "display_name", "role", "domains", "locations", "primary_location",
-    "archived", "archived_at",
+    "archived", "archived_at", "notes",
 }
 VENDOR_FIELDS = {
     "company_id", "display_name", "hq_location", "rep", "email", "phone",
-    "offerings", "po_routing", "invoice_routing", "po_routing_source",
+    "offerings", "notes", "po_routing", "invoice_routing", "po_routing_source",
     "archived", "archived_at",
 }
-COMPANY_ROLES = {"customer", "vendor"}
+# "lead" is a prospect that hasn't become real business yet -- it's a plain
+# company record like customer/vendor (same entity, same fields), just a
+# distinct role for the search/filter segment. convert_lead() flips one to
+# "customer" once it closes; there's no lead->vendor path since a vendor
+# relationship isn't something that "converts" the same way.
+COMPANY_ROLES = {"customer", "vendor", "lead"}
 
 LOCK_FILENAME = ".store.lock"
 LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.22"
+SERVER_VERSION = "0.1.23"
 
 
 class StoreError(Exception):
@@ -368,6 +379,44 @@ def _shipment_project_nos(s):
     return {str(n) for n in nos if n}
 
 
+def _parse_date_loose(s):
+    """Best-effort parse of the date-ish strings normalize.py produces
+    (openpyxl datetimes stringified as "2026-03-14 00:00:00", or plain
+    "3/14/2026"/"3/14/26"). Returns None rather than guessing on anything
+    that doesn't cleanly match -- an unknown invoice_date must not silently
+    become a wrong due date."""
+    if not s:
+        return None
+    s = str(s).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _effective_due_on(inv):
+    """due_on if a manual override is on file; else invoice_date plus the
+    default Net terms window. Never mutates the stored record -- this is
+    computed fresh on every read so it reflects DEFAULT_NET_TERMS_DAYS
+    immediately if that ever changes, and a missing/unparseable invoice_date
+    reports None rather than a fabricated date."""
+    if inv.get("due_on"):
+        return inv["due_on"]
+    d = _parse_date_loose(inv.get("invoice_date"))
+    if not d:
+        return None
+    from datetime import timedelta
+    return (d + timedelta(days=DEFAULT_NET_TERMS_DAYS)).strftime("%Y-%m-%d")
+
+
+def _with_due_on(invoices):
+    """Return copies of invoice records enriched with effective_due_on --
+    used only in tool responses, never persisted."""
+    return [dict(i, effective_due_on=_effective_due_on(i)) for i in invoices]
+
+
 def _err(e):
     return {"ok": False, "error": str(e), "interface_version": VERSION}
 
@@ -416,7 +465,7 @@ def get_company(ref: str) -> dict:
              if cid in (x.get("company_ids") or []) or x.get("company_id") == cid]
     return {"ok": True, "interface_version": VERSION, "company": c,
             "contacts": contacts, "projects": projects,
-            "shipments": shipments, "invoices": invoices,
+            "shipments": shipments, "invoices": _with_due_on(invoices),
             "needs_review": flags,
             "enrichment": STORE.load_enrichment().get(cid)}
 
@@ -425,7 +474,7 @@ def get_company(ref: str) -> dict:
 @_store_errors
 def list_companies(role: str = None, query: str = None,
                    include_archived: bool = False) -> dict:
-    """Companies, optionally filtered by role (customer|vendor) and/or a
+    """Companies, optionally filtered by role (customer|vendor|lead) and/or a
     name substring. Archived (soft-deleted) companies are excluded unless
     include_archived=True."""
     out = STORE.load("companies")
@@ -485,11 +534,13 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
 
 @mcp.tool()
 @_store_errors
-def list_shipments(stage: str = None, company: str = None, overdue: bool = None,
-                   include_archived: bool = False) -> dict:
-    """Shipment legs, filtered by stage, company (id or name), and/or
-    overdue (ship_date past but not Delivered/Installed). Legs of archived
-    companies are excluded unless include_archived=True."""
+def list_shipments(stage: str = None, company: str = None, vendor_po: str = None,
+                   overdue: bool = None, include_archived: bool = False) -> dict:
+    """Shipment legs, filtered by stage, company (id or name), vendor_po
+    (exact or substring match against vendor_po_raw -- use this to find
+    which project a vendor's PO number belongs to), and/or overdue (ship_date
+    past but not Delivered/Installed). Legs of archived companies are
+    excluded unless include_archived=True."""
     out = STORE.load("shipments")
     if not include_archived:
         arch = _archived_ids()
@@ -503,6 +554,9 @@ def list_shipments(stage: str = None, company: str = None, overdue: bool = None,
         if not c:
             return _err(f"no unique company match for '{company}'")
         out = [s for s in out if s.get("company_id") == c["company_id"]]
+    if vendor_po:
+        q = str(vendor_po).strip().lower()
+        out = [s for s in out if q in str(s.get("vendor_po_raw") or "").lower()]
     if overdue:
         today = datetime.now().strftime("%Y-%m-%d")
         out = [s for s in out
@@ -531,10 +585,14 @@ def get_vendor(ref: str) -> dict:
 @mcp.tool()
 @_store_errors
 def list_invoices(payment_status: str = None, company: str = None,
+                  invoice_no: str = None, overdue: bool = None,
                   include_archived: bool = False) -> dict:
     """Client invoices / customer orders (the receivables ledger from the
     tracker's CLIENT Invoices table). Filter by payment_status (paid|open|
-    partial) and/or company (id or name). Invoices of archived companies are
+    partial), company (id or name), invoice_no (exact or substring), and/or
+    overdue (effective_due_on has passed and payment_status isn't paid).
+    Every invoice carries effective_due_on: the due_on override if one was
+    set, else invoice_date + Net 30. Invoices of archived companies are
     excluded unless include_archived=True."""
     out = STORE.load("invoices")
     if not include_archived:
@@ -550,6 +608,15 @@ def list_invoices(payment_status: str = None, company: str = None,
         if not c:
             return _err(f"no unique company match for '{company}'")
         out = [i for i in out if i.get("company_id") == c["company_id"]]
+    if invoice_no:
+        q = str(invoice_no).strip().lower()
+        out = [i for i in out if q in str(i.get("invoice_no") or "").lower()]
+    out = _with_due_on(out)
+    if overdue:
+        today = datetime.now().strftime("%Y-%m-%d")
+        out = [i for i in out
+               if i.get("effective_due_on") and i["effective_due_on"] < today
+               and not str(i.get("payment_status") or "").startswith("paid")]
     return {"ok": True, "interface_version": VERSION,
             "count": len(out), "invoices": out}
 
@@ -682,6 +749,37 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
 
 
 @mcp.tool()
+def reassign_shipment(shipment_id: str, new_project_no: str = None) -> dict:
+    """Move a shipment to a different project number -- for when it was
+    logged under the wrong deal. Unlike a plain update_shipment field edit,
+    this validates the target project exists and keeps project_no,
+    all_project_nos, and linked_to_project consistent with each other in one
+    write. Pass new_project_no=None or "" to unlink the shipment entirely
+    (vendor-PO-keyed, no project attached) instead of reassigning it."""
+    try:
+        with STORE.write_lock():
+            shipments = STORE.load("shipments")
+            target = [s for s in shipments if s["shipment_id"] == shipment_id]
+            if not target:
+                return _err(f"shipment '{shipment_id}' not found")
+            new_pn = str(new_project_no).strip() if new_project_no else None
+            if new_pn:
+                projects = STORE.load("projects")
+                if not any(str(p["project_no"]) == new_pn for p in projects):
+                    raise StoreError(f"project '{new_pn}' not found")
+            old_pn = target[0].get("project_no")
+            target[0]["project_no"] = new_pn
+            target[0]["all_project_nos"] = [new_pn] if new_pn else []
+            target[0]["linked_to_project"] = bool(new_pn)
+            STORE.save("shipments", shipments)
+            STORE.log("reassign", "shipment", shipment_id,
+                      {"old_project_no": old_pn, "new_project_no": new_pn})
+            return {"ok": True, "interface_version": VERSION, "shipment": target[0]}
+    except StoreError as e:
+        return _err(e)
+
+
+@mcp.tool()
 def upsert_contact(fields: dict) -> dict:
     """Create or update a contact. Match key: email if present, else
     (company_id, name). company_id must exist."""
@@ -796,8 +894,10 @@ def create_shipment(project_no: str, fields: dict) -> dict:
 
 @mcp.tool()
 def create_company(fields: dict) -> dict:
-    """Add a customer or vendor company. Requires display_name; role defaults
-    to 'customer'. company_id is derived from the name unless supplied, and
+    """Add a customer, vendor, or lead company (pass role="lead" for a
+    prospect that hasn't become real business yet -- convert_lead flips it
+    to a customer once it does). Requires display_name; role defaults to
+    'customer'. company_id is derived from the name unless supplied, and
     must be unique."""
     try:
         with STORE.write_lock():
@@ -919,6 +1019,49 @@ def update_invoice(company_id: str, invoice_no: str, fields: dict) -> dict:
         return _err(e)
 
 
+@mcp.tool()
+def rename_invoice(company_id: str, old_invoice_no: str, new_invoice_no: str) -> dict:
+    """Change an invoice's own number. Like rename_project, this is not a
+    plain field edit: (company_id, invoice_no) is the lookup key
+    update_invoice matches on, and a shipment leg ingested from the CLIENT
+    Invoices table can also carry this invoice_no -- both are updated
+    atomically so nothing stops matching. Fails if new_invoice_no is empty
+    or already used by a different invoice for the same company."""
+    try:
+        with STORE.write_lock():
+            new_no = str(new_invoice_no).strip() if new_invoice_no is not None else ""
+            if not new_no:
+                raise StoreError("new_invoice_no cannot be empty")
+            old_no = str(old_invoice_no)
+            invoices = STORE.load("invoices")
+            target = [i for i in invoices if i.get("company_id") == company_id
+                      and str(i.get("invoice_no")) == old_no]
+            if not target:
+                return _err(f"invoice '{old_invoice_no}' for company '{company_id}' not found")
+            if new_no != old_no and any(
+                    i.get("company_id") == company_id and str(i.get("invoice_no")) == new_no
+                    for i in invoices):
+                raise StoreError(f"invoice '{new_no}' already exists for this company")
+            target[0]["invoice_no"] = new_no
+            STORE.save("invoices", invoices)
+
+            shipments = STORE.load("shipments")
+            touched = 0
+            for s in shipments:
+                if s.get("company_id") == company_id and str(s.get("invoice_no")) == old_no:
+                    s["invoice_no"] = new_no
+                    touched += 1
+            if touched:
+                STORE.save("shipments", shipments)
+
+            STORE.log("rename", "invoice", f"{company_id}:{old_no}",
+                      {"new_invoice_no": new_no, "shipments_updated": touched})
+            return {"ok": True, "interface_version": VERSION, "invoice": target[0],
+                    "shipments_updated": touched}
+    except StoreError as e:
+        return _err(e)
+
+
 def _set_archived(company_id: str, archived: bool) -> dict:
     """Soft-delete/restore a company (customer or vendor). Nothing is destroyed:
     the record is flagged and hidden from default reads; its projects, contacts,
@@ -960,6 +1103,31 @@ def restore_company(company_id: str) -> dict:
     """Un-archive a previously deleted customer or vendor, bringing it and all
     its records back into the CRM."""
     return _set_archived(company_id, False)
+
+
+@mcp.tool()
+def convert_lead(company_id: str) -> dict:
+    """Convert a lead into a customer once it becomes real business. Fails
+    if the company isn't currently role=lead -- use update_company's role
+    field directly for any other role change. There's no lead->vendor
+    conversion; a vendor relationship isn't something that "closes" the
+    same way a sale does."""
+    try:
+        with STORE.write_lock():
+            companies = STORE.load("companies")
+            target = [c for c in companies if c["company_id"] == company_id]
+            if not target:
+                return _err(f"company '{company_id}' not found")
+            if target[0].get("role") != "lead":
+                return _err(f"company '{company_id}' is not currently a lead "
+                            f"(role={target[0].get('role')!r})")
+            target[0]["role"] = "customer"
+            STORE.save("companies", companies)
+            STORE.log("convert", "company", company_id,
+                      {"from": "lead", "to": "customer"})
+            return {"ok": True, "interface_version": VERSION, "company": target[0]}
+    except StoreError as e:
+        return _err(e)
 
 
 def _set_project_archived(project_no: str, archived: bool) -> dict:

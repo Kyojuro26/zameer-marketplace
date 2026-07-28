@@ -69,6 +69,10 @@ TEMPLATE = r"""<!DOCTYPE html>
   .badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;text-transform:capitalize}
   .b-customer{background:var(--accent-soft);color:var(--accent)}
   .b-vendor{background:#eef0f3;color:var(--slate)}
+  .b-lead{background:var(--amber-soft);color:var(--amber)}
+  .due-group{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
+             padding:10px 8px 4px;border-bottom:1px solid var(--line)}
+  .due-group.od{color:var(--red)}
   .b-won{background:var(--green-soft);color:var(--green)}
   .b-pending{background:var(--amber-soft);color:var(--amber)}
   .b-lost{background:var(--red-soft);color:var(--red)}
@@ -122,15 +126,17 @@ TEMPLATE = r"""<!DOCTYPE html>
 <div class="wrap">
   <aside class="sidebar">
     <div class="search">
-      <input id="q" placeholder="Search companies, contacts, projects…" autocomplete="off"/>
+      <input id="q" placeholder="Search companies, contacts, projects, invoice #, vendor PO…" autocomplete="off"/>
       <div class="filters" id="filters">
         <button data-f="all" class="on">All</button>
         <button data-f="customer">Customers</button>
         <button data-f="vendor">Vendors</button>
+        <button data-f="lead">Leads</button>
       </div>
       <div class="addrow" id="addrow" style="display:none;gap:6px;margin-top:8px">
         <button class="pill-btn" style="flex:1" onclick="openNewCompany('customer')">+ Add customer</button>
         <button class="pill-btn" style="flex:1" onclick="openNewCompany('vendor')">+ Add vendor</button>
+        <button class="pill-btn" style="flex:1" onclick="openNewCompany('lead')">+ Add lead</button>
       </div>
     </div>
     <div class="clist" id="clist"></div>
@@ -259,6 +265,29 @@ function embeddedCall(tool, args){   // demo fallback — session-only mutation
   if (tool === 'archive_project' || tool === 'restore_project'){
     return {ok:true, project:{project_no:args.project_no, archived: tool==='archive_project'}};
   }
+  if (tool === 'convert_lead'){
+    const c = companyById[args.company_id];
+    if(!c) return {ok:false, error:'company not found'};
+    if(c.role !== 'lead') return {ok:false, error:'not currently a lead'};
+    return {ok:true, company:Object.assign({}, c, {role:'customer'})};
+  }
+  if (tool === 'reassign_shipment'){
+    const s = DATA.shipments.find(x=>x.shipment_id===args.shipment_id);
+    if(!s) return {ok:false, error:'shipment not found'};
+    const pn = args.new_project_no || null;
+    return {ok:true, shipment:Object.assign({}, s, {project_no:pn,
+      all_project_nos: pn?[pn]:[], linked_to_project: !!pn})};
+  }
+  if (tool === 'rename_invoice'){
+    const list = DATA.invoices||[];
+    if(args.new_invoice_no && list.some(x=>x.company_id===args.company_id
+        && String(x.invoice_no)===String(args.new_invoice_no)
+        && String(x.invoice_no)!==String(args.old_invoice_no)))
+      return {ok:false, error:"invoice '"+args.new_invoice_no+"' already exists for this company"};
+    const v = list.find(x=>x.company_id===args.company_id && String(x.invoice_no)===String(args.old_invoice_no));
+    if(!v) return {ok:false, error:'invoice not found'};
+    return {ok:true, invoice:Object.assign({}, v, {invoice_no:args.new_invoice_no}), shipments_updated:0};
+  }
   if (tool === 'create_project'){
     if(!f.project_no) return {ok:false, error:'project_no is required'};
     if(DATA.projects.some(p=>String(p.project_no)===String(f.project_no)))
@@ -325,6 +354,20 @@ function reindex(){
 }
 const money = (n)=> (n==null||isNaN(n))?'—':'$'+Number(n).toLocaleString(undefined,{maximumFractionDigits:0});
 const pct = (n)=> (n==null||isNaN(n))?'—':(Number(n)*100).toFixed(0)+'%';
+// Due date for an invoice: the live server already computes and sends
+// effective_due_on (due_on override, else invoice_date + Net 30) -- this is
+// only a fallback for embedded/demo mode, where the bootstrap data is the
+// raw stored record with no server-side enrichment.
+const NET_TERMS_DAYS = 30;
+function dueOn(inv){
+  if (inv.effective_due_on) return inv.effective_due_on;
+  if (inv.due_on) return inv.due_on;
+  if (!inv.invoice_date) return null;
+  const d = new Date(inv.invoice_date);
+  if (isNaN(d)) return null;
+  d.setDate(d.getDate() + NET_TERMS_DAYS);
+  return d.toISOString().slice(0,10);
+}
 const esc = (s)=> (s==null?'':String(s)).replace(/[&<>"'`/]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;','/':'&#47;'}[c]));
 // JS-string-literal escaper for values placed inside an inline handler arg,
 // e.g. onclick="fn('${jesc(x)}')". HTML-entity escaping is WRONG there: the
@@ -339,17 +382,24 @@ const safeUrl = (u)=>{ const s=String(u||'').trim(); return /^(https?:|mailto:)/
 let filter='all', selected=null, query='';
 
 function kpis(){
+  // Won/pending/receivables are current-year-only -- a KPI bar showing
+  // last year's closed revenue alongside this year's live pipeline reads
+  // as one inflated number, not two useful ones. Open shipments and the
+  // company count stay all-time: those are current-state counts, not
+  // revenue that should reset at year boundary.
+  const thisYear = new Date().getFullYear();
+  const curProjects = DATA.projects.filter(p=>p.year===thisYear);
   const openShip = DATA.shipments.filter(s=>['Ordered','Shipped','On Hold'].includes(s.stage)).length;
-  const won = DATA.projects.filter(p=>p.status==='won').reduce((a,p)=>a+(p.revenue||0),0);
-  const pend = DATA.projects.filter(p=>p.status==='pending').reduce((a,p)=>a+(p.revenue||0),0);
-  const recv = DATA.projects.filter(p=>{const c=p.collection_status;return c && c!=='paid';})
-                            .reduce((a,p)=>a+(p.revenue||0),0);
+  const won = curProjects.filter(p=>p.status==='won').reduce((a,p)=>a+(p.revenue||0),0);
+  const pend = curProjects.filter(p=>p.status==='pending').reduce((a,p)=>a+(p.revenue||0),0);
+  const recv = curProjects.filter(p=>{const c=p.collection_status;return c && c!=='paid';})
+                          .reduce((a,p)=>a+(p.revenue||0),0);
   document.getElementById('kpis').innerHTML = [
     ['Companies', DATA.companies.length],
     ['Open shipments', openShip],
-    ['Won revenue', money(won)],
-    ['Pending pipeline', money(pend)],
-    ['Open receivables', money(recv)],
+    [`Won revenue (${thisYear})`, money(won)],
+    [`Pending pipeline (${thisYear})`, money(pend)],
+    [`Open receivables (${thisYear})`, money(recv)],
   ].map(([l,n])=>`<div class="kpi"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
 }
 
@@ -360,6 +410,8 @@ function companyMatches(c){
   if((c.display_name||'').toLowerCase().includes(q)) return true;
   if((contactsByCo[c.company_id]||[]).some(x=>(x.name||'').toLowerCase().includes(q)||(x.email||'').toLowerCase().includes(q))) return true;
   if((projectsByCo[c.company_id]||[]).some(p=>(p.project_no||'').includes(q)||(p.description||'').toLowerCase().includes(q))) return true;
+  if((invoicesByCo[c.company_id]||[]).some(v=>String(v.invoice_no||'').toLowerCase().includes(q))) return true;
+  if((shipsByCo[c.company_id]||[]).some(s=>(s.vendor_po_raw||'').toLowerCase().includes(q))) return true;
   return false;
 }
 
@@ -428,6 +480,7 @@ function renderMain(){
       <button class="pill-btn" onclick="openNewProject('${jesc(c.company_id)}')">+ New project</button>
       <button class="pill-btn" onclick="openNewContact('${jesc(c.company_id)}')">+ Add contact</button>
       ${c.role==='vendor'?`<button class="pill-btn" onclick="openEditVendor('${jesc(c.company_id)}')">Edit vendor</button>`:''}
+      ${c.role==='lead'?`<button class="pill-btn" style="background:var(--green-soft);color:var(--green)" onclick="convertLead('${jesc(c.company_id)}')">Convert to customer</button>`:''}
       ${draftAll?`<button class="pill-btn" onclick="draft('${jesc(draftAll.email)}','${jesc(draftAll.name||'')}')">✉ Draft email</button>`:''}
       <button class="pill-btn" style="background:var(--red-soft);color:var(--red)" onclick="deleteCompany('${jesc(c.company_id)}')">Delete</button>
     </span>
@@ -444,7 +497,12 @@ function renderMain(){
       <div class="kv"><span class="k">Offerings</span><span>${esc(v.offerings||'—')}</span></div>
       <div class="kv"><span class="k">Send POs to</span><span>${esc(v.po_routing||'—')}</span></div>
       <div class="kv"><span class="k">Send invoices to</span><span>${esc(v.invoice_routing||'—')}</span></div>
+      ${v.notes?`<div class="kv"><span class="k">Notes</span><span>${esc(v.notes)}</span></div>`:''}
     </div>`;
+  }
+
+  if(c.notes){
+    h+=`<div class="section"><h2>Notes</h2><div style="white-space:pre-wrap">${esc(c.notes)}</div></div>`;
   }
 
   h+=`<div class="section"><h2>Contacts (${cts.length})</h2>`;
@@ -469,15 +527,36 @@ function renderMain(){
 
   const invs=invoicesByCo[selected]||[];
   if(invs.length){
-    h+=`<div class="section"><h2>Invoices / customer orders (${invs.length})</h2>
-      <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th>Invoiced</th><th>Status</th><th>Paid on</th><th>Notes</th><th></th></tr></thead><tbody>`+
-      invs.map(v=>{const st=(v.payment_status||'');const cls=st==='paid'?'b-won':(st.startsWith('partial')?'b-pending':'b-lost');
+    const todayStr = new Date().toISOString().slice(0,10);
+    const soonStr = (()=>{const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10);})();
+    const bucketOf = (v)=>{
+      const st=(v.payment_status||'');
+      if(st.startsWith('paid')) return 'Paid';
+      const d=dueOn(v);
+      if(!d) return 'No due date';
+      if(d<todayStr) return 'Overdue';
+      if(d<=soonStr) return 'Due this week';
+      return 'Due later';
+    };
+    const BUCKET_ORDER=['Overdue','Due this week','Due later','No due date','Paid'];
+    const grouped={}; invs.forEach(v=>{(grouped[bucketOf(v)]=grouped[bucketOf(v)]||[]).push(v);});
+    Object.values(grouped).forEach(list=>list.sort((a,b)=>(dueOn(a)||'9999').localeCompare(dueOn(b)||'9999')));
+    let invRows='';
+    BUCKET_ORDER.forEach(bk=>{
+      const list=grouped[bk]; if(!list||!list.length) return;
+      invRows+=`<tr><td colspan="7" class="due-group${bk==='Overdue'?' od':''}">${esc(bk)} (${list.length})</td></tr>`;
+      invRows+=list.map(v=>{const st=(v.payment_status||'');const cls=st==='paid'?'b-won':(st.startsWith('partial')?'b-pending':'b-lost');
+        const due=dueOn(v); const overdue = bk==='Overdue';
         return `<tr><td><b>${esc(v.invoice_no||'—')}</b></td><td class="muted">${esc(v.client_po_raw||'')}</td>
         <td class="muted">${esc((v.invoice_date||'').slice(0,10))}</td>
         <td><span class="badge ${cls}">${esc(st||'—')}</span></td>
-        <td class="muted">${esc((v.pay_date||'').slice(0,10))}</td>
-        <td class="muted" style="max-width:340px">${esc((v.payment_notes||'').slice(0,90))}</td>
-        <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('')+
+        <td class="${overdue?'':'muted'}" ${overdue?'style="color:var(--red);font-weight:600"':''}>${esc(due||'—')}</td>
+        <td class="muted" style="max-width:280px">${esc((v.payment_notes||'').slice(0,90))}</td>
+        <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('');
+    });
+    h+=`<div class="section"><h2>Invoices / customer orders (${invs.length})</h2>
+      <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th>Invoiced</th><th>Status</th><th>Due on</th><th>Notes</th><th></th></tr></thead><tbody>`+
+      invRows+
       `</tbody></table></div>`;
   }
 
@@ -780,9 +859,10 @@ async function saveNewShipment(pno){
 /* ------------------------------------------- company / vendor create+delete */
 function openNewCompany(role){
   const isV = role==='vendor';
-  document.getElementById('dtitle').textContent = isV ? 'Add vendor' : 'Add customer';
+  const label = isV ? 'vendor' : (role==='lead' ? 'lead' : 'customer');
+  document.getElementById('dtitle').textContent = 'Add ' + label;
   document.getElementById('dbody').innerHTML=`
-    <div class="field"><label>${isV?'Vendor':'Customer'} name (required)</label><input id="c_name"/></div>
+    <div class="field"><label>${label[0].toUpperCase()+label.slice(1)} name (required)</label><input id="c_name"/></div>
     ${isV?`
       <div class="row2">
         <div class="field"><label>Rep / contact</label><input id="c_rep"/></div>
@@ -797,8 +877,9 @@ function openNewCompany(role){
         <div class="field"><label>Send POs to</label><input id="c_po"/></div>
         <div class="field"><label>Send invoices to</label><input id="c_inv"/></div>
       </div>`
-    :`<div class="field"><label>Primary location</label><input id="c_loc" placeholder="e.g. Louisville, KY"/></div>`}
-    <button class="btn" id="saveBtn" onclick="saveNewCompany('${jesc(role)}')">Add ${isV?'vendor':'customer'}</button>
+    :`<div class="field"><label>Primary location</label><input id="c_loc" placeholder="e.g. Louisville, KY"/></div>
+      <div class="field"><label>Notes</label><textarea id="c_notes" placeholder="${role==='lead'?'Where this lead came from, what they need, next step…':'Anything worth remembering'}"></textarea></div>`}
+    <button class="btn" id="saveBtn" onclick="saveNewCompany('${jesc(role)}')">Add ${label}</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Saved to your CRM records; the name must be unique.</p>`;
   document.getElementById('drawer').classList.add('open');
@@ -820,8 +901,9 @@ async function saveNewCompany(role){
       reindex(); renderList(); closeDrawer(); if(v.company_id) select(v.company_id);
     });
   } else {
-    const loc=val('c_loc');
-    const fields={display_name:name, role:'customer', locations:loc?[loc]:[], primary_location:loc};
+    const loc=val('c_loc'), notes=val('c_notes');
+    const fields={display_name:name, role:(role==='lead'?'lead':'customer'),
+      locations:loc?[loc]:[], primary_location:loc, notes};
     await doSave('create_company', {fields}, (r)=>{
       const c=r.company||fields; DATA.companies.push(c);
       reindex(); renderList(); closeDrawer(); if(c.company_id) select(c.company_id);
@@ -841,6 +923,7 @@ function openEditCompany(cid){
   document.getElementById('dbody').innerHTML=`
     <div class="field"><label>Company name (required)</label><input id="e_co_name" value="${esc(c.display_name||'')}"/></div>
     <div class="field"><label>Primary location</label><input id="e_co_loc" value="${esc(c.primary_location||'')}" placeholder="e.g. Louisville, KY"/></div>
+    <div class="field"><label>Notes</label><textarea id="e_co_notes" placeholder="Anything worth remembering about this company">${esc(c.notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveEditCompany('${jesc(cid)}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Customer/vendor type isn't editable here — ask Claude in chat if a company needs to be reclassified.</p>`;
@@ -852,13 +935,28 @@ async function saveEditCompany(cid){
   const msg=document.getElementById('savedMsg');
   if(!name){ msg.textContent='✗ company name is required'; msg.className='saved show errc'; return; }
   const loc=document.getElementById('e_co_loc').value.trim()||null;
-  const fields={display_name:name, primary_location:loc, locations:loc?[loc]:[]};
+  const notes=document.getElementById('e_co_notes').value.trim()||null;
+  const fields={display_name:name, primary_location:loc, locations:loc?[loc]:[], notes};
   await doSave('update_company', {company_id:cid, fields}, (r)=>{
     const c=r.company||Object.assign(companyById[cid]||{company_id:cid}, fields);
     const i=DATA.companies.findIndex(x=>x.company_id===cid);
     if(i>=0) DATA.companies[i]=c;
     reindex(); renderList(); closeDrawer();
   });
+}
+
+async function convertLead(cid){
+  const c=companyById[cid]; if(!c) return;
+  if(!confirm(`Convert ${c.display_name||cid} from a lead to a customer?`)) return;
+  const r=await CRM.call('convert_lead', {company_id:cid});
+  if(r&&r.ok){
+    const updated=r.company||Object.assign(c,{role:'customer'});
+    const i=DATA.companies.findIndex(x=>x.company_id===cid);
+    if(i>=0) DATA.companies[i]=updated;
+    reindex(); renderList(); renderMain();
+  } else {
+    alert('Convert failed: '+((r&&r.error)||'unknown error'));
+  }
 }
 
 function openEditVendor(cid){
@@ -873,11 +971,12 @@ function openEditVendor(cid){
       <div class="field"><label>Email</label><input id="e_email" value="${esc(v.email||'')}"/></div>
       <div class="field"><label>Phone</label><input id="e_phone" value="${esc(v.phone||'')}"/></div>
     </div>
-    <div class="field"><label>Offerings</label><input id="e_offer" value="${esc(v.offerings||'')}"/></div>
+    <div class="field"><label>Offerings <span class="muted" style="text-transform:none;font-weight:400">(products/services this vendor provides)</span></label><input id="e_offer" value="${esc(v.offerings||'')}"/></div>
     <div class="row2">
       <div class="field"><label>Send POs to</label><input id="e_po" value="${esc(v.po_routing||'')}"/></div>
       <div class="field"><label>Send invoices to</label><input id="e_inv" value="${esc(v.invoice_routing||'')}"/></div>
     </div>
+    <div class="field"><label>Notes</label><textarea id="e_notes" placeholder="Anything else worth remembering about this vendor">${esc(v.notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveEditVendor('${jesc(cid)}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>`;
   document.getElementById('drawer').classList.add('open');
@@ -886,7 +985,8 @@ function openEditVendor(cid){
 async function saveEditVendor(cid){
   const val=(id)=>{const el=document.getElementById(id);return el&&el.value.trim()?el.value.trim():null;};
   const fields={rep:val('e_rep'),hq_location:val('e_hq'),email:val('e_email'),
-    phone:val('e_phone'),offerings:val('e_offer'),po_routing:val('e_po'),invoice_routing:val('e_inv')};
+    phone:val('e_phone'),offerings:val('e_offer'),notes:val('e_notes'),
+    po_routing:val('e_po'),invoice_routing:val('e_inv')};
   await doSave('update_vendor', {company_id:cid, fields}, (r)=>{
     const v=r.vendor||Object.assign(vendorById[cid]||{company_id:cid},fields);
     const i=(DATA.vendors||[]).findIndex(x=>x.company_id===cid);
@@ -906,13 +1006,18 @@ function openEditInvoice(cid, invoiceNo){
   document.getElementById('dtitle').textContent='Edit invoice — '+(v.invoice_no||'');
   document.getElementById('dbody').innerHTML=`
     <div class="kv"><span class="k">Invoice date</span><span>${esc((v.invoice_date||'—').slice(0,10))}</span></div>
+    <div class="field"><label>Invoice #</label><input id="e_iv_no" value="${esc(v.invoice_no||'')}"/>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">Changing this also updates any shipment leg logged under this invoice number.</p></div>
     <div class="kv"><span class="k">Project #</span><span>${esc(v.project_no||'—')}</span></div>
     <div class="row2">
       <div class="field"><label>Status</label><select id="e_iv_status">
         ${['open','partial:50%','paid'].map(s=>`<option value="${s}" ${(v.payment_status||'')===s?'selected':''}>${s}</option>`).join('')}</select></div>
       <div class="field"><label>Paid on</label><input id="e_iv_paydate" type="date" value="${esc((v.pay_date||'').slice(0,10))}"/></div>
     </div>
-    <div class="field"><label>Client PO / order</label><input id="e_iv_po" value="${esc(v.client_po_raw||'')}"/></div>
+    <div class="row2">
+      <div class="field"><label>Client PO / order</label><input id="e_iv_po" value="${esc(v.client_po_raw||'')}"/></div>
+      <div class="field"><label>Due on <span class="muted" style="text-transform:none;font-weight:400">(blank = auto Net 30 from invoice date)</span></label><input id="e_iv_due" type="date" value="${esc((v.due_on||'').slice(0,10))}"/></div>
+    </div>
     <div class="field"><label>Notes</label><textarea id="e_iv_notes">${esc(v.payment_notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveEditInvoice('${jesc(cid)}','${jesc(v.invoice_no||'')}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>`;
@@ -920,15 +1025,33 @@ function openEditInvoice(cid, invoiceNo){
 }
 
 async function saveEditInvoice(cid, invoiceNo){
+  const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
+  let invoiceNoNow = invoiceNo;
+  const newNo = document.getElementById('e_iv_no').value.trim();
+  if(newNo && newNo !== invoiceNo){
+    btn.disabled=true; msg.className='saved';
+    const rr = await CRM.call('rename_invoice', {company_id:cid, old_invoice_no:invoiceNo, new_invoice_no:newNo});
+    if(!rr || !rr.ok){
+      msg.textContent='✗ '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';
+      btn.disabled=false;
+      return;
+    }
+    const p=(invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNo));
+    if(p) p.invoice_no=newNo;
+    DATA.shipments.forEach(s=>{ if(s.company_id===cid && String(s.invoice_no)===String(invoiceNo)) s.invoice_no=newNo; });
+    reindex();
+    invoiceNoNow = newNo;
+  }
   const fields={
     payment_status: document.getElementById('e_iv_status').value || null,
     pay_date: document.getElementById('e_iv_paydate').value || null,
     client_po_raw: document.getElementById('e_iv_po').value.trim() || null,
+    due_on: document.getElementById('e_iv_due').value || null,
     payment_notes: document.getElementById('e_iv_notes').value.trim() || null,
   };
-  await doSave('update_invoice', {company_id:cid, invoice_no:invoiceNo, fields}, (r)=>{
-    const rec=r.invoice||Object.assign({}, (invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNo)), fields);
-    const i=DATA.invoices.findIndex(x=>x.company_id===cid && String(x.invoice_no)===String(invoiceNo));
+  await doSave('update_invoice', {company_id:cid, invoice_no:invoiceNoNow, fields}, (r)=>{
+    const rec=r.invoice||Object.assign({}, (invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNoNow)), fields);
+    const i=DATA.invoices.findIndex(x=>x.company_id===cid && String(x.invoice_no)===String(invoiceNoNow));
     if(i>=0) DATA.invoices[i]=rec;
     reindex(); closeDrawer();
   });
@@ -955,7 +1078,8 @@ function openShipment(sid){
   document.getElementById('dtitle').textContent='Shipment '+sid;
   document.getElementById('dbody').innerHTML=`
     <div class="kv"><span class="k">Client</span><span>${esc(s.client_name||'—')}</span></div>
-    <div class="kv"><span class="k">Project #</span><span>${esc(s.project_no||'—')}${s.linked_to_project?'':' <span class="muted">(unlinked — vendor-PO keyed)</span>'}</span></div>
+    <div class="field"><label>Project #</label><input id="s_pno" value="${esc(s.project_no||'')}" placeholder="leave blank to unlink"/>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">${s.linked_to_project?'':'Currently unlinked — vendor-PO keyed. '}Changing this moves the shipment to a different project; the new project # must already exist.</p></div>
     <div class="field"><label>Vendor PO</label><input id="s_po" value="${esc(s.vendor_po_raw||'')}"/></div>
     <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
     <div class="row2">
@@ -977,6 +1101,20 @@ function openShipment(sid){
 }
 
 async function saveShipment(sid){
+  const s=DATA.shipments.find(x=>x.shipment_id===sid);
+  const newPno = document.getElementById('s_pno').value.trim();
+  const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
+  if(s && newPno !== (s.project_no||'')){
+    btn.disabled=true; msg.className='saved';
+    const rr = await CRM.call('reassign_shipment', {shipment_id: sid, new_project_no: newPno || null});
+    if(!rr || !rr.ok){
+      msg.textContent='✗ '+((rr&&rr.error)||'reassign failed'); msg.className='saved show errc';
+      btn.disabled=false;
+      return;
+    }
+    Object.assign(s, rr.shipment);
+    reindex(); renderList();
+  }
   const fields = {
     vendor_po_raw: document.getElementById('s_po').value.trim() || null,
     stage: document.getElementById('s_stage').value,
@@ -986,8 +1124,8 @@ async function saveShipment(sid){
     open_orders_notes: document.getElementById('s_notes').value.trim() || null,
   };
   await doSave('update_shipment', {shipment_id: sid, fields}, (r)=>{
-    const s=DATA.shipments.find(x=>x.shipment_id===sid);
     Object.assign(s, r.shipment || fields);
+    if(selected) renderMain();
   });
 }
 

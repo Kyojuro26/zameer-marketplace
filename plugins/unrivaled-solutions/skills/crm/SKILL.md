@@ -12,7 +12,7 @@ description: >
   contacts and statuses into Outlook, and keeping the desktop app copy in
   sync with the plugin.
 metadata:
-  version: "0.1.22"
+  version: "0.1.23"
 ---
 
 # Unrivaled CRM
@@ -30,8 +30,21 @@ thing that reads or writes them. Full tool reference:
 - **Never delete Outlook data.** The tools cannot; do not try elsewhere.
 - **Never guess.** Anything uncertain is flagged `needs_review` by the
   system — surface those flags to the user, don't resolve them silently.
+  As of v0.1.23 the ingestion pipeline also refuses to read a commission/
+  rep-split percentage as a percent-of-invoice-paid figure — a "NN%" next
+  to the word "commission"/"comm" is left unset and flagged in
+  `needs_review` (`commission_percent_ignored`) instead of silently
+  becoming a `collection_status`/`payment_status`. This only affects a
+  future full re-migration into a fresh store — it doesn't retroactively
+  fix already-migrated records; a payment percentage that was already
+  misread as a commission rate needs a direct correction via
+  `update_project`/`update_invoice`.
 - **Company is the primary unit.** Contacts and projects hang off a
   company; shipments hang off projects.
+- **A lead is a company too.** `role="lead"` is a prospect that hasn't
+  become real business yet — same entity, same fields, as customer/vendor,
+  just a distinct filterable segment. `convert_lead(company_id)` flips one
+  to `customer` once it closes; there's no lead→vendor path.
 
 ## Answering questions (reads)
 
@@ -44,12 +57,23 @@ Use the read tools; they are side-effect-free:
 - "Who owes us" → `list_projects` with `collection_status="open"` and
   `"partial"` (both), plus any project whose collection status isn't paid.
 - Shipments by stage or lateness → `list_shipments` (`overdue=true` for
-  slipped ship dates).
+  slipped ship dates; `vendor_po=` to find which project a vendor's PO
+  number belongs to — the reverse lookup for "how does vendor PO X map to
+  our project #").
+- Invoices by number, or what's coming due → `list_invoices` (`invoice_no=`
+  for exact/substring match; `overdue=true` for past-due, unpaid invoices).
+  Every invoice reports `effective_due_on`: a manual `due_on` override if
+  one was set, else `invoice_date` + Net 30 — never guess a due date when
+  `invoice_date` itself is missing/unparseable, it just comes back `null`.
 - People → `find_contacts`; vendor routing → `get_vendor`.
 
 Project numbers are the user's QuickBooks quote numbers. Shipments are
 keyed by vendor PO numbers, not project numbers — some legitimately have no
 project link (`linked_to_project: false`); that is by design, not an error.
+Every shipment stores both its `vendor_po_raw` and its `project_no` side by
+side, so the vendor-PO-to-project correlation already exists in the data —
+`list_shipments(vendor_po=...)` or the visual app's search box are how you
+look it up.
 
 ## Making changes (writes)
 
@@ -61,22 +85,37 @@ Writes are validated and logged; report failures honestly:
   Delivered → Installed, plus On Hold / Cancelled; ship_date, eta).
 - Update an invoice / customer order → `update_invoice` (matched by
   `company_id` + `invoice_no`): `payment_status` (paid|open|partial[:detail]),
-  `pay_date`, `payment_notes`, `client_po_raw`. The invoice date, linked
-  project number, and other identifying fields aren't editable here — they
-  come from the original billing documents.
+  `pay_date`, `payment_notes`, `client_po_raw`, `due_on` (a manual override —
+  leave unset to keep the auto Net-30-from-invoice-date default). The
+  invoice date, linked project number, and other identifying fields aren't
+  editable here — they come from the original billing documents.
 - Rename a project's number → `rename_project(old_project_no,
   new_project_no)`. This is NOT a plain field edit: `project_no` is a lookup
   key that shipments and invoices point at, so a rename must atomically
   cascade to every shipment (`project_no`/`all_project_nos`) and invoice
   (`project_no`) that references it, which `rename_project` does in one
   write-locked operation. Fails if the new number is empty or already in use.
+- Rename an invoice's own number → `rename_invoice(company_id,
+  old_invoice_no, new_invoice_no)`. Same reasoning as `rename_project`:
+  `invoice_no` is a lookup key `update_invoice` matches on, and a shipment
+  leg ingested from the invoice table can also carry it, so both are updated
+  together. Fails if empty or already used by another invoice for that
+  company.
+- Move a shipment to a different project → `reassign_shipment(shipment_id,
+  new_project_no)`. Not the same as a plain `update_shipment` field edit —
+  this validates the target project exists and keeps `project_no`,
+  `all_project_nos`, and `linked_to_project` consistent. Pass
+  `new_project_no=None`/empty to unlink a shipment entirely (vendor-PO-keyed,
+  no project attached).
 - New records → `create_project` (needs a unique project number and an
   existing company), `create_shipment` (attaches to a project),
   `upsert_contact` (deduped by email — safe to re-run).
-- New customers/vendors → `create_company` (customer or vendor; unique name)
-  and `create_vendor` (a vendor plus its detail record: rep, email, offerings,
-  PO/invoice routing). Company details → `update_company`; vendor detail →
-  `update_vendor`.
+- New customers/vendors/leads → `create_company` (`role`: customer, vendor,
+  or lead; unique name) and `create_vendor` (a vendor plus its detail
+  record: rep, email, offerings, notes, PO/invoice routing). Company details
+  (including a freeform `notes` field) → `update_company`; vendor detail
+  (`offerings` for products/services plus a separate general `notes` field)
+  → `update_vendor`. A lead that closes → `convert_lead(company_id)`.
 - **Deleting a customer or vendor → `archive_company`** (and `restore_company`
   to undo). Delete is a reversible archive: the record is hidden from the CRM
   but nothing is destroyed, and its projects/contacts/shipments/invoices are
