@@ -109,7 +109,7 @@ compose link.
 Claude's connector settings (read-only) so Claude can refresh last-contact
 dates, threads, and meetings per company. **This must be the mailbox that
 actually holds the correspondence** — connect it on the machine/account
-that's really talking to customers (production: Dillon's PC/mailbox), never
+that's really talking to customers (production: the operator's PC/mailbox), never
 a different one, or the wrong person's email ends up attached to a customer
 record. If in doubt, ask Claude "who am I signed in as" before refreshing.
 
@@ -185,13 +185,14 @@ machine.
 
 ## Dev/prod protocol (2026-07-14)
 
-- **Production data = Dillon's store** (`C:\UnrivaledCRM\store`, pointed to by
-  `~\.unrivaled-crm-store`; daily robocopy backup into OneDrive `CRM-Backups`,
-  `/XD .secrets` so the Outlook token never leaves his machine).
+- **Production data = the operator's store** (`C:\UnrivaledCRM\store`, pointed
+  to by `~\.unrivaled-crm-store`; daily robocopy backup into OneDrive
+  `CRM-Backups`, with `/XD .secrets` so the Outlook token never leaves that
+  machine).
   Zeeshan's Mac store is a dev fixture. Data never moves between machines.
 - **Code flows one way:** edit build -> rsync into zameer-marketplace clone
-  (publish.sh exclusions) -> bump `plugin.json` version -> push `main` ->
-  Dillon updates in Settings -> verify with "crm info" (`server_version`).
+  (publish.sh exclusions) -> bump `plugin.json` version -> push `main` -> the
+  operator updates in Settings -> verify with `crm_info` (`server_version`).
   The visual app's copy at `C:\UnrivaledCRM\app\` does NOT auto-update with
   the plugin (it's a stable copy, deliberately outside the plugin's
   ever-changing install path) — after any version bump that touches

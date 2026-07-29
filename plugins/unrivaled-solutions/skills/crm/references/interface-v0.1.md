@@ -6,7 +6,8 @@ call this and pin to this version. Per the build sequence, this contract must
 not break once downstream skills start building against it.
 
 **Run:** `UNRIVALED_CRM_STORE=/path/to/store python3 server.py` (stdio).
-The store path is always a parameter — never hard-coded (Dylan owns his data).
+The store path is always a parameter — never hard-coded (the operator owns
+their data).
 
 Every response carries `ok` and `interface_version`. Failures return
 `{ok: false, error: "..."}` — never exceptions across the wire.

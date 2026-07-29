@@ -12,7 +12,7 @@ description: >
   contacts and statuses into Outlook, and keeping the desktop app copy in
   sync with the plugin.
 metadata:
-  version: "0.1.23"
+  version: "0.1.24"
 ---
 
 # Unrivaled CRM
@@ -160,7 +160,7 @@ to…", "refresh Outlook activity"):
    search email by each store contact's address (sender and recipient),
    and calendar events mentioning the company or its contacts. **This must
    run from a session whose Microsoft 365 connector is actually signed into
-   the mailbox that holds the real correspondence** (production: Dillon's
+   the mailbox that holds the real correspondence** (production: the operator's
    PC) — a connector signed into anyone else's mailbox would attach the
    wrong person's email to a customer record. Check with `get_me` if
    there's any doubt whose mailbox is connected before writing anything.
@@ -178,7 +178,7 @@ Prioritize: `list_projects status="pending"` plus current-year won — enrich
 those companies first, in batches of ~10 per conversation, persisting each
 batch via `set_enrichment` before starting the next. Enrichment must run on
 the machine whose Microsoft 365 connector is signed into the mailbox that
-holds the actual correspondence (production: Dillon's PC). Keep it current
+holds the actual correspondence (production: the operator's PC). Keep it current
 with a weekly scheduled task: "refresh Outlook activity for companies with
 open projects."
 
@@ -187,7 +187,7 @@ open projects."
 `crm_info` returns `server_version`. If a fix or feature seems missing,
 compare that against the marketplace version and update the plugin in
 Settings -> Capabilities. Plugin updates never touch the store; data is safe.
-Production data lives in ONE store (Dillon's PC). Any other machine's store
+Production data lives in ONE store (the operator's PC). Any other machine's store
 is a dev fixture — edits there are throwaway and must never be copied over
 the production store.
 

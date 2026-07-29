@@ -125,7 +125,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.23"
+SERVER_VERSION = "0.1.24"
 
 
 class StoreError(Exception):
@@ -336,10 +336,64 @@ def _review_flags(needs_review, **match):
     return out
 
 
+# Identifier-ish fields that must be stored as strings even when the caller sends
+# a number. A tool caller can perfectly reasonably pass project_no=1234; stored as
+# an int it survives every check here (the duplicate test str()-normalises before
+# comparing) and then breaks the visual app, which calls string methods on it.
+# Coerce once, centrally, at the only door every create/update goes through.
+# Deliberately EXCLUDED, and it matters: revenue, total_cost, gross_profit,
+# margin, sheet_row and especially year are genuinely numeric. Stringifying
+# `year` would silently zero every KPI in the visual app, which tests it with
+# a strict `p.year === thisYear`.
+TEXT_FIELDS = {
+    # identifiers
+    "project_no", "invoice_no", "client_po_no", "client_po_raw", "vendor_po_raw",
+    "shipment_id", "company_id", "vendor_id",
+    # names and free text
+    "company_name", "client_name", "display_name", "description", "name",
+    "email", "phone", "title", "notes", "payment_notes", "vendor_notes",
+    "open_orders_notes", "action_notes", "offerings", "rep", "po_routing",
+    "invoice_routing", "po_routing_source",
+    # locations
+    "location", "primary_location", "hq_location",
+    # dates: stored as ISO strings and read with .slice()/.localeCompare()/
+    # lexical `<` comparisons in the view. A numeric one blanks the detail pane
+    # and, before that, silently mis-buckets an overdue invoice as "due later".
+    "date", "invoice_date", "pay_date", "due_on", "ship_date", "start_date",
+    "eta", "last_action",
+}
+
+
+def _num_to_str(v):
+    """1234 -> '1234', and 1234.0 -> '1234', not '1234.0'.
+
+    JSON-RPC callers and LLMs routinely emit an integer as a float. Persisting
+    "1234.0" as an identifier is worse than the bug this coercion fixes: it
+    displays wrong everywhere and never matches an operator typing "1234", so
+    the duplicate check mints a phantom record instead of rejecting it.
+    """
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _coerce_text(fields):
+    """Stringify numeric values in identifier/text/date fields, in place."""
+    def num(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+    for k, v in list(fields.items()):
+        if k in TEXT_FIELDS and num(v):
+            fields[k] = _num_to_str(v)
+        elif k == "all_project_nos" and isinstance(v, list):
+            fields[k] = [_num_to_str(x) if num(x) else x for x in v]
+
+
 def _validate(fields, allowed, entity):
     unknown = set(fields) - allowed
     if unknown:
         raise StoreError(f"unknown {entity} field(s): {sorted(unknown)}")
+    _coerce_text(fields)
     if "status" in fields and fields["status"] is not None \
             and fields["status"] not in PROJECT_STATUSES:
         raise StoreError(f"status must be one of {sorted(PROJECT_STATUSES)}")
@@ -681,7 +735,11 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
     a historical note about the original migration, not a live pointer.)"""
     try:
         with STORE.write_lock():
-            new_pn = str(new_project_no).strip() if new_project_no is not None else ""
+            # _num_to_str, not str: a caller sending 9999.0 would otherwise
+            # persist "9999.0" and cascade it into every referencing shipment
+            # and invoice. rename_project is the ONLY way to change a
+            # project_no, so this path cannot rely on _validate/_coerce_text.
+            new_pn = _num_to_str(new_project_no).strip() if new_project_no is not None else ""
             if not new_pn:
                 raise StoreError("new_project_no cannot be empty")
             old_pn = str(old_project_no)
@@ -762,7 +820,7 @@ def reassign_shipment(shipment_id: str, new_project_no: str = None) -> dict:
             target = [s for s in shipments if s["shipment_id"] == shipment_id]
             if not target:
                 return _err(f"shipment '{shipment_id}' not found")
-            new_pn = str(new_project_no).strip() if new_project_no else None
+            new_pn = _num_to_str(new_project_no).strip() if new_project_no else None
             if new_pn:
                 projects = STORE.load("projects")
                 if not any(str(p["project_no"]) == new_pn for p in projects):
@@ -872,13 +930,13 @@ def create_shipment(project_no: str, fields: dict) -> dict:
             if not sid:
                 n = 1 + sum(1 for s in shipments
                             if str(s.get("project_no")) == str(project_no))
-                sid = f"{project_no}-L{n}"
+                sid = f"{_num_to_str(project_no)}-L{n}"
             if any(s["shipment_id"] == sid for s in shipments):
                 raise StoreError(f"shipment '{sid}' already exists")
             record = {k: None for k in SHIPMENT_FIELDS}
             record.update({
-                "shipment_id": sid, "project_no": str(project_no),
-                "all_project_nos": [str(project_no)], "stage": "Ordered",
+                "shipment_id": sid, "project_no": _num_to_str(project_no),
+                "all_project_nos": [_num_to_str(project_no)], "stage": "Ordered",
                 "company_id": pr["company_id"], "client_name": pr.get("company_name"),
                 "linked_to_project": True,
             })
@@ -1029,7 +1087,7 @@ def rename_invoice(company_id: str, old_invoice_no: str, new_invoice_no: str) ->
     or already used by a different invoice for the same company."""
     try:
         with STORE.write_lock():
-            new_no = str(new_invoice_no).strip() if new_invoice_no is not None else ""
+            new_no = _num_to_str(new_invoice_no).strip() if new_invoice_no is not None else ""
             if not new_no:
                 raise StoreError("new_invoice_no cannot be empty")
             old_no = str(old_invoice_no)
@@ -1185,6 +1243,10 @@ def set_enrichment(company_id: str, data: dict) -> dict:
                 raise StoreError(f"unknown enrichment field(s): {sorted(unknown)}")
             enrichment = STORE.load_enrichment()
             entry = dict(data)
+            # set_enrichment rolls its own field check and never reaches
+            # _validate, so coerce here too — last_contact is a date string
+            # the view reads as one.
+            _coerce_text(entry)
             entry.setdefault("refreshed_at", datetime.now(timezone.utc).isoformat())
             enrichment[company_id] = entry
             STORE.save_enrichment(enrichment)

@@ -5,14 +5,14 @@ _A one-page technical overview for Unrivaled Solutions' IT. Prepared by Zameer._
 ## Summary
 
 The Unrivaled CRM is a **local, file-based application** that runs on the
-operator's (Dylan's) own PC inside the Claude desktop app. There is **no
+operator's own PC inside the Claude desktop app. There is **no
 database server, no hosted backend, and no third-party service storing the CRM
 data.** Nothing needs to be provisioned, hosted, or opened to the network.
 
 ## How it runs
 
 - It installs as a plugin to the **Claude desktop app** and runs as a local
-  Python subprocess on Dylan's machine.
+  Python subprocess on the operator's machine.
 - **No inbound network ports, no server, no listening service.** It is not
   reachable from the network.
 - Software requirements: Windows + Python 3 (Microsoft Store build), the Claude
@@ -20,8 +20,8 @@ data.** Nothing needs to be provisioned, hosted, or opened to the network.
 
 ## Where the data lives (no database)
 
-- The system of record is a set of **plain JSON files** in a single folder that
-  Dylan owns — recommended location: a plain local folder (e.g.
+- The system of record is a set of **plain JSON files** in a single folder the
+  operator owns — recommended location: a plain local folder (e.g.
   `C:\UnrivaledCRM\store`), deliberately **outside OneDrive** (sync-client
   file locks break the CRM's atomic writes).
 - Files: customers, contacts, projects, shipments, invoices, vendors, plus an
@@ -32,8 +32,8 @@ data.** Nothing needs to be provisioned, hosted, or opened to the network.
   `.secrets` subfolder (`/XD .secrets`) — that's where the Outlook OAuth
   token cache and app credentials live, and they're deliberately never
   written to cloud-synced storage.
-- Data never leaves Dylan's environment. It is **not** stored in any cloud CRM,
-  SaaS, or third-party database.
+- Data never leaves the operator's environment. It is **not** stored in any
+  cloud CRM, SaaS, or third-party database.
 
 ## Data integrity
 
@@ -43,17 +43,18 @@ data.** Nothing needs to be provisioned, hosted, or opened to the network.
 
 ## Microsoft 365 / Outlook access (optional feature)
 
-Two independent, least-privilege integrations — both act only on Dylan's own
-mailbox, on his behalf:
+Two independent, least-privilege integrations — both act only on the operator's
+own mailbox, on their behalf:
 
 **1. Outbound (creating drafts + syncing contacts) — Entra app registration.**
 - **Delegated** Microsoft Graph permissions only: `Mail.ReadWrite`,
   `Contacts.ReadWrite`, `MailboxSettings.ReadWrite`.
 - **No `Mail.Send`** — the app physically cannot send email; it only creates
-  **drafts** that Dylan reviews and sends himself.
+  **drafts** that the operator reviews and sends themselves.
 - Uses the **device-code (public client) flow — no client secret or certificate**
   to store or rotate. Sign-in honors your MFA / conditional access.
-- Acts as the signed-in user on his own mailbox; no org-wide/application access.
+- Acts as the signed-in user on their own mailbox; no org-wide or
+  application-level access.
 
 **2. Inbound (recent activity per customer) — read-only M365 connector.**
 - A separate, **read-only** Microsoft 365 connector (its own admin-consent
@@ -69,14 +70,23 @@ mailbox, on his behalf:
   metadata* (subject, date, participant, a link).
 - **Not stored:** full email bodies, attachments, or any Outlook content — those
   stay in Microsoft 365. No credentials are stored beyond a local, permission-
-  restricted sign-in token cache on Dylan's machine.
+  restricted sign-in token cache on the operator's machine.
 
 ## Software distribution
 
-- The plugin **code** is delivered from a **private GitHub repository**
-  (`Kyojuro26/zameer-marketplace`) that Dylan installs from with read access.
+- The plugin **code** is delivered from a **public GitHub repository**
+  (`Kyojuro26/zameer-marketplace`). The plugin installer fetches over
+  unauthenticated HTTPS, so the repository has to be public; no account, token
+  or access grant is involved in installing it.
+- **Public means code only.** The repository holds the application source and
+  its documentation and nothing else — no customer records, no contact details,
+  no mailbox content, and no credentials. Unrivaled Solutions is named as the
+  client, as it is on this document, but no individual and no business data
+  appears. An automated sweep runs at commit time and again at publish time,
+  and every commit is reviewed on the same basis.
 - The **data folder is never published** to GitHub or bundled in the plugin —
-  code and data are strictly separated.
+  code and data are strictly separated. All business data stays on the
+  operator's machine and in your Microsoft 365 tenant.
 
 ## Security posture, in brief
 

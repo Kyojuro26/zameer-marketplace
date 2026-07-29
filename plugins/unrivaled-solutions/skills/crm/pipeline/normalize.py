@@ -9,7 +9,7 @@ and re-runnable. Anything ambiguous is flagged in needs_review.json, never dropp
 Usage:
     python normalize.py --workbook "US-Sales Tracker-2026 .xlsx" --out ./store
 
-Nothing is hard-coded to Dylan's data: the workbook path and output dir are
+Nothing is hard-coded to the operator's data: the workbook path and output dir are
 parameters, and companies/contacts/vendors are read from the sheet, not baked in.
 """
 
@@ -34,7 +34,7 @@ PCT_RE = re.compile(r"(\d{1,3})\s*%")
 # A commission/rep-split rate mentioned in the same cell as a "NN%" number is
 # NOT a percent-of-invoice-paid figure -- e.g. "Paid, 10% comm to D" reads a
 # payment percentage out of a commission rate if PCT_RE is trusted blindly.
-# Dillon 2026-07 feedback: this was misreading commission % as percent
+# Client feedback 2026-07: this was misreading commission % as percent
 # invoiced. Never guess which the number means -- flag it for review instead
 # of assigning it as collection/payment status.
 COMMISSION_RE = re.compile(r"\bcomm(?:ission)?\b", re.IGNORECASE)
@@ -53,7 +53,7 @@ def clean(v):
 # A parenthetical counts as an OWNER (rep) only if it looks like initials:
 # 1-3 letters, or "X & Y" of initials. Everything else is a note, NOT a rep.
 #
-# Dylan 2026-07-07: "the text in parentheses across records are just notes" and
+# Client feedback 2026-07-07: "the text in parentheses across records are just notes" and
 # a customer must be ONE record regardless of the note that trails its name.
 # So the company identity is the text BEFORE the first '('; every parenthetical
 # group and any trailing free-note is pulled off as owner-tag or note and never
@@ -370,8 +370,10 @@ def run(workbook, outdir, force=False):
             status_val = (clean(g(c_stat)) or "").lower() or None
             rev_val = num(g(c_rev))
             # A row with a customer cell but no project#, status, or revenue is a
-            # stray label/note row ("Legend", "Dillon Action Item", "Follow up/..."),
-            # not a deal — skip it so it never mints a phantom customer.
+            # stray label/note row. In the source workbook these read like
+            # "Legend", a person's name followed by "Action Item", or
+            # "Follow up/...". Not a deal — skip it so it never mints a
+            # phantom customer.
             if cust and not (pno or status_val or (rev_val not in (None, 0, 0.0))):
                 review.append({"type": "label_row_skipped", "sheet": sheet,
                                "customer": str(cust)[:60]})
@@ -673,7 +675,7 @@ def run(workbook, outdir, force=False):
         c["locations"] = list(dict.fromkeys(c["locations"]))[:5]
         c["primary_location"] = c["locations"][0] if c["locations"] else None
 
-    # flag distinct owner tags that aren't confirmed reps -> for Dylan's legend
+    # flag distinct owner tags that aren't confirmed reps -> for the operator's legend
     all_owner_tags = set()
     for p in projects.values():
         all_owner_tags.update(p.get("owner", []))

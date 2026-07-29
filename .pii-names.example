@@ -1,0 +1,13 @@
+# Copy to .pii-names (gitignored, NEVER committed) and fill in.
+#
+# One `grep -E` pattern per line. Every client name, contact name, nickname and
+# misspelling that must not appear anywhere in this PUBLIC repo — in file
+# contents, in filenames, or in directory names. Matching is case-insensitive.
+#
+# Both ./scripts/pii-sweep.sh and the pre-commit hook read this file and refuse
+# to run without it. Blank lines and #-comments are ignored.
+#
+# Examples (delete these, they are placeholders):
+# Firstname|Nickname|Mispeling
+# Lastname
+# AcmeCorp|Acme Corp

@@ -403,21 +403,32 @@ function kpis(){
   ].map(([l,n])=>`<div class="kpi"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
 }
 
+// Search fields can hold numbers as well as strings (a project or invoice number
+// created via the MCP tools is stored with whatever type the caller sent). Always
+// coerce before matching: calling .includes on a number throws and would take the
+// whole company list down with it, not just the search.
+function sv(v){ return v===null||v===undefined ? '' : String(v).toLowerCase(); }
+// Case-preserving sibling of sv(). Use it anywhere a stored field is about to
+// be compared, sorted, or .slice()'d as a string. Same reason: the field may
+// hold a number if it was created through the MCP tools with a numeric value,
+// and .localeCompare / !== against a trimmed input string both misbehave then.
+function st(v){ return v===null||v===undefined ? '' : String(v); }
+
 function companyMatches(c){
   if(filter!=='all' && c.role!==filter) return false;
   if(!query) return true;
   const q=query.toLowerCase();
-  if((c.display_name||'').toLowerCase().includes(q)) return true;
-  if((contactsByCo[c.company_id]||[]).some(x=>(x.name||'').toLowerCase().includes(q)||(x.email||'').toLowerCase().includes(q))) return true;
-  if((projectsByCo[c.company_id]||[]).some(p=>(p.project_no||'').includes(q)||(p.description||'').toLowerCase().includes(q))) return true;
-  if((invoicesByCo[c.company_id]||[]).some(v=>String(v.invoice_no||'').toLowerCase().includes(q))) return true;
-  if((shipsByCo[c.company_id]||[]).some(s=>(s.vendor_po_raw||'').toLowerCase().includes(q))) return true;
+  if(sv(c.display_name).includes(q)) return true;
+  if((contactsByCo[c.company_id]||[]).some(x=>sv(x.name).includes(q)||sv(x.email).includes(q))) return true;
+  if((projectsByCo[c.company_id]||[]).some(p=>sv(p.project_no).includes(q)||sv(p.description).includes(q))) return true;
+  if((invoicesByCo[c.company_id]||[]).some(v=>sv(v.invoice_no).includes(q))) return true;
+  if((shipsByCo[c.company_id]||[]).some(s=>sv(s.vendor_po_raw).includes(q))) return true;
   return false;
 }
 
 function renderList(){
   const items = DATA.companies.filter(companyMatches)
-    .sort((a,b)=>(a.display_name||'').localeCompare(b.display_name||''));
+    .sort((a,b)=>st(a.display_name).localeCompare(st(b.display_name)));
   document.getElementById('clist').innerHTML = items.slice(0,400).map(c=>{
     const np=(projectsByCo[c.company_id]||[]).length, ns=(shipsByCo[c.company_id]||[]).length;
     return `<div class="citem ${c.company_id===selected?'sel':''}" onclick="select('${jesc(c.company_id)}')">
@@ -530,8 +541,8 @@ function renderMain(){
     const todayStr = new Date().toISOString().slice(0,10);
     const soonStr = (()=>{const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10);})();
     const bucketOf = (v)=>{
-      const st=(v.payment_status||'');
-      if(st.startsWith('paid')) return 'Paid';
+      const ps=st(v.payment_status);
+      if(ps.startsWith('paid')) return 'Paid';
       const d=dueOn(v);
       if(!d) return 'No due date';
       if(d<todayStr) return 'Overdue';
@@ -540,16 +551,16 @@ function renderMain(){
     };
     const BUCKET_ORDER=['Overdue','Due this week','Due later','No due date','Paid'];
     const grouped={}; invs.forEach(v=>{(grouped[bucketOf(v)]=grouped[bucketOf(v)]||[]).push(v);});
-    Object.values(grouped).forEach(list=>list.sort((a,b)=>(dueOn(a)||'9999').localeCompare(dueOn(b)||'9999')));
+    Object.values(grouped).forEach(list=>list.sort((a,b)=>(st(dueOn(a))||'9999').localeCompare(st(dueOn(b))||'9999')));
     let invRows='';
     BUCKET_ORDER.forEach(bk=>{
       const list=grouped[bk]; if(!list||!list.length) return;
       invRows+=`<tr><td colspan="7" class="due-group${bk==='Overdue'?' od':''}">${esc(bk)} (${list.length})</td></tr>`;
-      invRows+=list.map(v=>{const st=(v.payment_status||'');const cls=st==='paid'?'b-won':(st.startsWith('partial')?'b-pending':'b-lost');
+      invRows+=list.map(v=>{const ps=st(v.payment_status);const cls=ps==='paid'?'b-won':(ps.startsWith('partial')?'b-pending':'b-lost');
         const due=dueOn(v); const overdue = bk==='Overdue';
         return `<tr><td><b>${esc(v.invoice_no||'—')}</b></td><td class="muted">${esc(v.client_po_raw||'')}</td>
         <td class="muted">${esc((v.invoice_date||'').slice(0,10))}</td>
-        <td><span class="badge ${cls}">${esc(st||'—')}</span></td>
+        <td><span class="badge ${cls}">${esc(ps||'—')}</span></td>
         <td class="${overdue?'':'muted'}" ${overdue?'style="color:var(--red);font-weight:600"':''}>${esc(due||'—')}</td>
         <td class="muted" style="max-width:280px">${esc((v.payment_notes||'').slice(0,90))}</td>
         <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('');
@@ -1104,7 +1115,10 @@ async function saveShipment(sid){
   const s=DATA.shipments.find(x=>x.shipment_id===sid);
   const newPno = document.getElementById('s_pno').value.trim();
   const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
-  if(s && newPno !== (s.project_no||'')){
+  // st(), not (s.project_no||''): newPno is a trimmed input string, so a
+  // numerically-stored project_no would never compare equal and every save
+  // would fire a pointless reassign_shipment.
+  if(s && newPno !== st(s.project_no)){
     btn.disabled=true; msg.className='saved';
     const rr = await CRM.call('reassign_shipment', {shipment_id: sid, new_project_no: newPno || null});
     if(!rr || !rr.ok){
