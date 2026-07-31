@@ -51,7 +51,16 @@ TEMPLATE = r"""<!DOCTYPE html>
   .sidebar{border-right:1px solid var(--line);background:var(--panel);overflow-y:auto}
   .search{padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
   .search input{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-size:13px}
-  .filters{display:flex;gap:6px;margin-top:8px}
+  .filters{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+  .filters button{min-width:56px}
+  .subfilters{margin-top:8px;display:none;flex-direction:column;gap:6px}
+  .sfrow{display:flex;gap:5px;align-items:center}
+  .sfrow .sfl{color:var(--muted);font-size:11px;min-width:64px}
+  .sfrow button{flex:1;padding:4px 6px;border:1px solid var(--line);background:#fff;
+                border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted)}
+  .sfrow button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+  th.sortable{cursor:pointer;user-select:none}
+  th.sortable:hover{color:var(--accent)}
   .filters button{flex:1;padding:6px;border:1px solid var(--line);background:#fff;border-radius:7px;
                   font-size:12px;cursor:pointer;color:var(--muted)}
   .filters button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
@@ -132,6 +141,12 @@ TEMPLATE = r"""<!DOCTYPE html>
         <button data-f="customer">Customers</button>
         <button data-f="vendor">Vendors</button>
         <button data-f="lead">Leads</button>
+        <button data-f="project">Projects</button>
+      </div>
+      <div class="subfilters" id="subfilters">
+        <div class="sfrow" id="sf_status"><span class="sfl">Status</span></div>
+        <div class="sfrow" id="sf_year"><span class="sfl">Year</span></div>
+        <div class="sfrow" id="sf_coll"><span class="sfl">Collection</span></div>
       </div>
       <div class="addrow" id="addrow" style="display:none;gap:6px;margin-top:8px">
         <button class="pill-btn" style="flex:1" onclick="openNewCompany('customer')">+ Add customer</button>
@@ -321,7 +336,9 @@ async function refreshData(){
     if (pr.ok) DATA.projects  = pr.projects;
     if (sh.ok) DATA.shipments = sh.shipments;
     if (iv && iv.ok) DATA.invoices = iv.invoices;
-    reindex(); kpis(); renderList(); if (selected) renderMain();
+    reindex(); kpis(); renderList();
+    if (filter === 'project'){ renderSubfilters(); renderMain(); }
+    else if (selected) renderMain();
   }catch(e){
     console.warn('live refresh failed; keeping embedded data', e);
     const el = document.getElementById('modePill');
@@ -380,6 +397,10 @@ const jesc = (s)=> (s==null?'':String(s)).replace(/[^a-zA-Z0-9_]/g,c=>{
 const safeUrl = (u)=>{ const s=String(u||'').trim(); return /^(https?:|mailto:)/i.test(s) ? s : '#'; };
 
 let filter='all', selected=null, query='';
+// Projects view (own tab): sub-filter + sort state, independent of the
+// company list's own filter/query so switching tabs doesn't lose either.
+let projStatus='all', projYear='all', projColl='all';
+let projSortKey='project_no', projSortDir=1;
 
 function kpis(){
   // Won/pending/receivables are current-year-only -- a KPI bar showing
@@ -426,7 +447,132 @@ function companyMatches(c){
   return false;
 }
 
+// ---- Projects view ---------------------------------------------------------
+// Every stored field is run through sv()/st() before compare or sort: a
+// project_no or year created through the MCP tools can be a JSON number, and
+// .includes()/.localeCompare() on a number throws (the 0.1.24 lesson).
+function projCollBucket(p){
+  const c = sv(p.collection_status);
+  if(!c) return 'none';
+  if(c === 'paid') return 'paid';
+  if(c.startsWith('partial')) return 'partial';
+  return 'open';
+}
+function projectMatches(p){
+  if(projStatus !== 'all' && sv(p.status) !== projStatus) return false;
+  if(projYear !== 'all' && st(p.year) !== projYear) return false;
+  if(projColl !== 'all' && projCollBucket(p) !== projColl) return false;
+  if(!query) return true;
+  const q = query.toLowerCase();
+  if(sv(p.project_no).includes(q)) return true;
+  if(sv(p.description).includes(q)) return true;
+  if(sv(p.client_po_no).includes(q)) return true;
+  if(sv(p.invoice_no).includes(q)) return true;
+  const co = companyById[p.company_id];
+  if(co && sv(co.display_name).includes(q)) return true;
+  if((p.owner||[]).some(o=>sv(o).includes(q))) return true;
+  return false;
+}
+function projCompanyName(p){
+  const co = companyById[p.company_id];
+  return co ? (co.display_name || co.company_id) : (p.company_name || '');
+}
+function filteredProjects(){
+  const rows = (DATA.projects||[]).filter(projectMatches);
+  const num = k => (k==='revenue'||k==='margin'||k==='year');
+  rows.sort((a,b)=>{
+    let r;
+    if(projSortKey === 'company'){
+      r = st(projCompanyName(a)).localeCompare(st(projCompanyName(b)), undefined, {sensitivity:'base'});
+    } else if(num(projSortKey)){
+      const av = a[projSortKey], bv = b[projSortKey];
+      const an = (av==null||isNaN(av)) ? -Infinity : Number(av);
+      const bn = (bv==null||isNaN(bv)) ? -Infinity : Number(bv);
+      r = an - bn;
+    } else {
+      r = st(a[projSortKey]).localeCompare(st(b[projSortKey]), undefined,
+            {numeric:true, sensitivity:'base'});
+    }
+    return r * projSortDir;
+  });
+  return rows;
+}
+function projYears(){
+  const ys = new Set();
+  (DATA.projects||[]).forEach(p=>{ const y = st(p.year); if(y) ys.add(y); });
+  return [...ys].sort((a,b)=>Number(b)-Number(a));
+}
+function sfButtons(rowId, opts, cur, fn){
+  const el = document.getElementById(rowId); if(!el) return;
+  const label = el.querySelector('.sfl');
+  el.innerHTML = '';
+  if(label) el.appendChild(label);
+  opts.forEach(o=>{
+    const b = document.createElement('button');
+    b.textContent = o.label;
+    if(o.value === cur) b.classList.add('on');
+    b.addEventListener('click', ()=>fn(o.value));
+    el.appendChild(b);
+  });
+}
+function renderSubfilters(){
+  sfButtons('sf_status', [{value:'all',label:'All'},{value:'won',label:'Won'},
+      {value:'pending',label:'Pending'},{value:'lost',label:'Lost'}],
+    projStatus, v=>{ projStatus=v; renderSubfilters(); renderList(); renderMain(); });
+  sfButtons('sf_year', [{value:'all',label:'All'}].concat(
+      projYears().map(y=>({value:y,label:y}))),
+    projYear, v=>{ projYear=v; renderSubfilters(); renderList(); renderMain(); });
+  sfButtons('sf_coll', [{value:'all',label:'All'},{value:'open',label:'Open'},
+      {value:'partial',label:'Partial'},{value:'paid',label:'Paid'},
+      {value:'none',label:'—'}],
+    projColl, v=>{ projColl=v; renderSubfilters(); renderList(); renderMain(); });
+}
+function sortProjects(key){
+  if(projSortKey === key) projSortDir = -projSortDir;
+  else { projSortKey = key; projSortDir = 1; }
+  renderMain();
+}
+function renderProjectsMain(){
+  const rows = filteredProjects();
+  const arrow = k => projSortKey===k ? (projSortDir===1?' ▲':' ▼') : '';
+  const th = (k,label,cls) =>
+    `<th class="sortable ${cls||''}" onclick="sortProjects('${jesc(k)}')">${esc(label)}${arrow(k)}</th>`;
+  const totalRev = rows.reduce((a,p)=>a+(Number(p.revenue)||0),0);
+  let h = `<div class="co-head"><h1>Projects</h1>
+    <span class="muted">${rows.length} of ${(DATA.projects||[]).length}</span>
+    <span class="muted">· ${money(totalRev)} revenue</span></div>`;
+  if(!rows.length){
+    return h + '<div class="empty">No projects match these filters.</div>';
+  }
+  h += `<div class="section"><table><thead><tr>
+    ${th('project_no','Project #')}${th('company','Company')}${th('description','Description')}
+    ${th('status','Status')}${th('owner','Owner')}${th('year','Year')}
+    ${th('revenue','Revenue','num')}${th('margin','Margin','num')}
+    ${th('collection_status','Collection')}</tr></thead><tbody>` +
+    rows.map(p=>`<tr class="click" onclick="openProject('${jesc(st(p.project_no))}')">
+      <td><b>${esc(st(p.project_no)||'—')}</b></td>
+      <td>${p.company_id?`<a href="#" onclick="event.stopPropagation();select('${jesc(p.company_id)}');return false">${esc(projCompanyName(p))}</a>`:'<span class="muted">—</span>'}</td>
+      <td>${esc(p.description||'')}</td>
+      <td>${statusBadge(p.status)}</td>
+      <td>${esc((p.owner||[]).join(', '))||'—'}</td>
+      <td class="muted">${esc(st(p.year))}</td>
+      <td class="num">${money(p.revenue)}</td>
+      <td class="num">${pct(p.margin)}</td>
+      <td class="muted">${esc(p.collection_status||'')}</td></tr>`).join('') +
+    `</tbody></table></div>`;
+  return h;
+}
+function renderProjectsList(){
+  const rows = filteredProjects();
+  document.getElementById('clist').innerHTML = rows.slice(0,400).map(p=>`
+    <div class="citem" onclick="openProject('${jesc(st(p.project_no))}')">
+      <div class="cn">${esc(st(p.project_no)||'—')} ${esc((p.description||'').slice(0,40))}</div>
+      <div class="cm"><span>${esc(projCompanyName(p))}</span>${p.status?`<span>· ${esc(p.status)}</span>`:''}</div>
+    </div>`).join('') || '<div class="muted" style="padding:14px">No matches.</div>';
+}
+
 function renderList(){
+  if(filter === 'project'){ renderProjectsList(); return; }
   const items = DATA.companies.filter(companyMatches)
     .sort((a,b)=>st(a.display_name).localeCompare(st(b.display_name)));
   document.getElementById('clist').innerHTML = items.slice(0,400).map(c=>{
@@ -438,7 +584,11 @@ function renderList(){
   }).join('') || '<div class="muted" style="padding:14px">No matches.</div>';
 }
 
-function select(id){ selected=id; renderList(); renderMain(); fetchEnrichment(id); }
+function select(id){
+  selected=id;
+  if(filter === 'project'){ setFilter('all'); fetchEnrichment(id); return; }
+  renderList(); renderMain(); fetchEnrichment(id);
+}
 
 /* Outlook read-signal overlay (Phase 4) — fetched per company when live */
 const ENRICH = {};
@@ -480,6 +630,10 @@ function statusBadge(s){ s=(s||'').toLowerCase(); const cls={won:'b-won',pending
   return s?`<span class="badge ${cls}">${esc(s)}</span>`:''; }
 
 function renderMain(){
+  if(filter === 'project'){
+    document.getElementById('main').innerHTML = renderProjectsMain();
+    return;
+  }
   const c=companyById[selected]; if(!c){return;}
   const cts=contactsByCo[selected]||[], prs=projectsByCo[selected]||[], sps=shipsByCo[selected]||[];
   const draftAll = cts.filter(x=>x.email)[0];
@@ -1210,11 +1364,33 @@ async function replyToThread(companyId, messageId){
   }
 }
 
-document.getElementById('q').addEventListener('input',e=>{query=e.target.value.trim();renderList();});
-document.querySelectorAll('#filters button').forEach(b=>b.addEventListener('click',()=>{
-  document.querySelectorAll('#filters button').forEach(x=>x.classList.remove('on'));
-  b.classList.add('on'); filter=b.dataset.f; renderList();
-}));
+document.getElementById('q').addEventListener('input',e=>{
+  query=e.target.value.trim(); renderList();
+  // The Projects tab owns the main pane, so search has to repaint it too --
+  // renderList() alone only updates the sidebar.
+  if(filter === 'project') renderMain();
+});
+// Single owner of tab state. select() also routes through it, so clicking a
+// company from the Projects table actually lands on that company's page
+// instead of leaving the main pane stuck on the project list.
+function setFilter(f){
+  filter = f;
+  document.querySelectorAll('#filters button').forEach(x=>
+    x.classList.toggle('on', x.dataset.f === f));
+  const sf = document.getElementById('subfilters');
+  const add = document.getElementById('addrow');
+  const isProj = (f === 'project');
+  if(sf) sf.style.display = isProj ? 'flex' : 'none';
+  if(add) add.style.display = isProj ? 'none' : 'flex';
+  if(isProj) renderSubfilters();
+  renderList();
+  if(isProj) renderMain();
+  else if(selected) renderMain();
+  else document.getElementById('main').innerHTML =
+    '<div class="empty">Select a company to begin.</div>';
+}
+document.querySelectorAll('#filters button').forEach(b=>
+  b.addEventListener('click', ()=>setFilter(b.dataset.f)));
 reindex(); kpis(); renderList();
 CRM.detect();
 </script>
