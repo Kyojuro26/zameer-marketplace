@@ -98,7 +98,24 @@ INVOICE_FIELDS = {
 # instead. Editing due_on here sets the override; it never overwrites the
 # underlying invoice_date.
 INVOICE_EDITABLE_FIELDS = {"payment_status", "pay_date", "payment_notes",
-                          "client_po_raw", "due_on"}
+                          "client_po_raw", "due_on",
+                          # Opened up in v0.1.26, when create_invoice made
+                          # hand-entered invoices possible. The old lock was
+                          # justified by "these come from the source billing
+                          # documents" -- true when every invoice arrived via
+                          # normalize.py, but a typo'd invoice_date on an
+                          # invoice a person typed would otherwise be
+                          # permanently uncorrectable, and it silently drives
+                          # the Net-30 effective_due_on.
+                          "invoice_date", "project_no"}
+# Settable at creation. company_id arrives as its own argument, and
+# payment_status_raw / sheet_row are importer provenance -- they record what
+# the source workbook literally said, so a hand-created invoice legitimately
+# has neither. payment_status_raw in particular is the evidence base
+# pipeline/audit_commission_pct.py replays; letting it be written by hand
+# would erode an audit trail that already cannot be reconstructed.
+INVOICE_CREATE_FIELDS = (INVOICE_FIELDS
+                         - {"company_id", "payment_status_raw", "sheet_row"})
 DEFAULT_NET_TERMS_DAYS = 30
 CONTACT_FIELDS = {
     "company_id", "company_name", "name", "email", "phone", "title", "location",
@@ -125,7 +142,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.25"
+SERVER_VERSION = "0.1.26"
 
 
 class StoreError(Exception):
@@ -1056,14 +1073,25 @@ def update_vendor(company_id: str, fields: dict) -> dict:
 @mcp.tool()
 def update_invoice(company_id: str, invoice_no: str, fields: dict) -> dict:
     """Edit an invoice / customer order: payment_status (paid|open|
-    partial[:detail]), pay_date, payment_notes, client_po_raw. Matched by
+    partial[:detail]), pay_date, payment_notes, client_po_raw, due_on, and
+    (since v0.1.26) invoice_date and project_no. Matched by
     (company_id, invoice_no) -- invoice numbers aren't guaranteed unique
-    across companies. invoice_date, the linked project_no, and the invoice's
-    own identifying fields are not editable here; they come from the
-    original billing documents."""
+    across companies. The invoice's own number is not editable here: use
+    rename_invoice, which also updates any shipment leg carrying it.
+    company_id, payment_status_raw and sheet_row stay locked -- the latter two
+    record what the source workbook literally said."""
     try:
         with STORE.write_lock():
             _validate(fields, INVOICE_EDITABLE_FIELDS, "invoice")
+            # project_no became editable in v0.1.26. Same guard as
+            # create_invoice: relinking to a project that doesn't exist would
+            # drop the invoice off every project page with no error anywhere.
+            # An explicit empty value is allowed -- that means "unlink".
+            if fields.get("project_no") not in (None, ""):
+                _pno = _num_to_str(fields["project_no"]).strip()
+                if not any(str(p.get("project_no")) == _pno
+                           for p in STORE.load("projects")):
+                    raise StoreError(f"project '{_pno}' not found")
             invoices = STORE.load("invoices")
             target = [i for i in invoices if i.get("company_id") == company_id
                       and str(i.get("invoice_no")) == str(invoice_no)]
@@ -1073,6 +1101,57 @@ def update_invoice(company_id: str, invoice_no: str, fields: dict) -> dict:
             STORE.save("invoices", invoices)
             STORE.log("update", "invoice", f"{company_id}:{invoice_no}", fields)
             return {"ok": True, "interface_version": VERSION, "invoice": target[0]}
+    except StoreError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def create_invoice(company_id: str, fields: dict) -> dict:
+    """Add a client invoice / customer order by hand, for one that never came
+    through the tracker workbook. fields must include invoice_no; the useful
+    rest are invoice_date, project_no, client_po_raw, payment_status
+    (open|paid|partial[:detail], defaults to open), payment_notes and due_on.
+
+    (company_id, invoice_no) is the identity update_invoice matches on, so a
+    duplicate for the same company is refused -- use rename_invoice to
+    renumber an existing one. A supplied project_no must name a real project;
+    linking an invoice to a project that does not exist would leave it
+    invisible on that project's page with no error anywhere."""
+    try:
+        with STORE.write_lock():
+            _validate(fields, INVOICE_CREATE_FIELDS, "invoice")
+            _require_company(company_id)
+            inv_no = _num_to_str(fields.get("invoice_no") or "").strip()
+            if not inv_no:
+                raise StoreError("invoice_no is required")
+            invoices = STORE.load("invoices")
+            if any(i.get("company_id") == company_id
+                   and str(i.get("invoice_no")) == inv_no for i in invoices):
+                return _err(f"invoice '{inv_no}' already exists for company "
+                            f"'{company_id}' -- use update_invoice to edit it, "
+                            f"or rename_invoice to renumber it")
+            pno = fields.get("project_no")
+            pno = _num_to_str(pno).strip() if pno not in (None, "") else None
+            if pno:
+                projects = STORE.load("projects")
+                if not any(str(p.get("project_no")) == pno for p in projects):
+                    raise StoreError(f"project '{pno}' not found")
+            companies = STORE.load("companies")
+            co = next((c for c in companies if c["company_id"] == company_id), None)
+            record = {k: None for k in INVOICE_FIELDS}
+            record.update(fields)
+            record.update({
+                "invoice_no": inv_no,
+                "company_id": company_id,
+                "project_no": pno,
+                "payment_status": fields.get("payment_status") or "open",
+                "client_name": fields.get("client_name")
+                               or (co.get("display_name") if co else None),
+            })
+            invoices.append(record)
+            STORE.save("invoices", invoices)
+            STORE.log("create", "invoice", f"{company_id}:{inv_no}", record)
+            return {"ok": True, "interface_version": VERSION, "invoice": record}
     except StoreError as e:
         return _err(e)
 

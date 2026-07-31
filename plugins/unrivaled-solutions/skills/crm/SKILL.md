@@ -6,13 +6,14 @@ description: >
   Ace Manufacturing", "what's the status of project 4521", "mark that shipment
   delivered", "add a new project for Meridian Corp", "draft an email to Alex",
   "what's shipping this week", "who owes us money", "refresh Outlook
-  activity", "reply to that thread", or "update my CRM app". It operates the
+  activity", "reply to that thread", "add an invoice", "update my CRM", or
+  "update my CRM app". It operates the
   Unrivaled CRM: reading and updating the CRM records, creating drafts in
   Outlook (including real reply drafts on existing threads), syncing
   contacts and statuses into Outlook, and keeping the desktop app copy in
   sync with the plugin.
 metadata:
-  version: "0.1.25"
+  version: "0.1.26"
 ---
 
 # Unrivaled CRM
@@ -196,14 +197,38 @@ from the plugin's install path, so it does **not** auto-update when the
 plugin does — otherwise the desktop shortcut keeps running old code with no
 indication anything's stale.
 
-**If the user says "update my CRM app" (or similar — "sync the desktop app",
-"is my CRM app up to date"):** don't improvise a copy step. Follow
+**If the user says anything that means "refresh the desktop app" — "update my
+CRM app", "update my CRM", "update the CRM", "refresh my CRM", "sync the
+desktop app", "is my CRM app up to date":** treat all of these as this
+request. Do NOT read a bare "update my CRM" as a request to change CRM
+records — nothing in it names a record to change, and asking which they meant
+beats guessing either way. don't improvise a copy step. Follow
 `references/setup-runbook.md`'s **Step 7** exactly — it calls `crm_info`,
 compares that version against the one baked into
 `C:\UnrivaledCRM\app\skills\crm\mcp\server.py`, and only downloads/mirrors
 the app folders from the marketplace repo if they actually differ. Report
 the before/after version honestly; if the app was already current, say so
 and stop rather than re-running the download anyway.
+
+## Invoices
+
+Invoices normally arrive from the tracker workbook via `pipeline/normalize.py`.
+Since v0.1.26 one can also be entered by hand with `create_invoice` — use it
+for an invoice that was never in the workbook, not to correct one that was
+(`update_invoice` edits; `rename_invoice` renumbers and cascades to any
+shipment leg carrying that number).
+
+`create_invoice` requires `invoice_no` and refuses a duplicate for the same
+customer, since `(company_id, invoice_no)` is the identity everything else
+matches on. A supplied `project_no` must name a real project — an invoice
+linked to one that doesn't exist would vanish from that project's page with no
+error anywhere. `payment_status` defaults to `open`.
+
+`update_invoice` covers payment status, pay date, payment notes, client PO,
+due date, and — since v0.1.26 — invoice date and project link. It will not
+write `payment_status_raw` or `sheet_row`: those record what the source
+workbook literally said, and `payment_status_raw` is the evidence
+`pipeline/audit_commission_pct.py` replays. Never fabricate either.
 
 ## Setup & update instructions
 

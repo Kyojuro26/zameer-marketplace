@@ -264,6 +264,20 @@ function embeddedCall(tool, args){   // demo fallback — session-only mutation
     const v = vendorById[args.company_id] || {company_id:args.company_id};
     return {ok:true, vendor:Object.assign({}, v, args.fields)};
   }
+  if (tool === 'create_invoice'){
+    const no = String((f.invoice_no ?? '')).trim();
+    if(!no) return {ok:false, error:'invoice_no is required'};
+    if((DATA.invoices||[]).some(x=>x.company_id===args.company_id && st(x.invoice_no)===no))
+      return {ok:false, error:"invoice '"+no+"' already exists for this customer"};
+    const pn = String((f.project_no ?? '')).trim();
+    if(pn && !DATA.projects.some(p=>st(p.project_no)===pn))
+      return {ok:false, error:"project '"+pn+"' not found"};
+    const co = companyById[args.company_id] || {};
+    return {ok:true, invoice: Object.assign({}, f, {invoice_no:no,
+      company_id:args.company_id, project_no: pn || null,
+      payment_status: f.payment_status || 'open',
+      client_name: f.client_name || co.display_name || null})};
+  }
   if (tool === 'update_invoice'){
     const inv = (DATA.invoices||[]).find(x=>x.company_id===args.company_id && String(x.invoice_no)===String(args.invoice_no));
     if(!inv) return {ok:false, error:'invoice not found'};
@@ -643,6 +657,7 @@ function renderMain(){
     <span style="margin-left:auto;display:flex;gap:8px">
       <button class="pill-btn" onclick="openEditCompany('${jesc(c.company_id)}')">Edit company</button>
       <button class="pill-btn" onclick="openNewProject('${jesc(c.company_id)}')">+ New project</button>
+      <button class="pill-btn" onclick="openNewInvoice('${jesc(c.company_id)}')">+ New invoice</button>
       <button class="pill-btn" onclick="openNewContact('${jesc(c.company_id)}')">+ Add contact</button>
       ${c.role==='vendor'?`<button class="pill-btn" onclick="openEditVendor('${jesc(c.company_id)}')">Edit vendor</button>`:''}
       ${c.role==='lead'?`<button class="pill-btn" style="background:var(--green-soft);color:var(--green)" onclick="convertLead('${jesc(c.company_id)}')">Convert to customer</button>`:''}
@@ -1165,15 +1180,61 @@ async function saveEditVendor(cid){
    invoice date, the linked project) comes from the original billing
    documents and isn't safe to hand-edit here. Matched by (company_id,
    invoice_no), same key server-side. */
+function openNewInvoice(cid){
+  const co = companyById[cid] || {};
+  document.getElementById('dtitle').textContent = 'New invoice — ' + (co.display_name || cid);
+  document.getElementById('dbody').innerHTML = `
+    <div class="row2">
+      <div class="field"><label>Invoice #</label><input id="n_iv_no" placeholder="required"/></div>
+      <div class="field"><label>Invoice date</label><input id="n_iv_date" type="date"/></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Project # <span class="muted" style="text-transform:none;font-weight:400">(optional)</span></label><input id="n_iv_proj"/></div>
+      <div class="field"><label>Client PO / order</label><input id="n_iv_po"/></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Status</label><select id="n_iv_status">
+        ${['open','partial:50%','paid'].map(x=>`<option value="${x}">${x}</option>`).join('')}</select></div>
+      <div class="field"><label>Due on <span class="muted" style="text-transform:none;font-weight:400">(blank = auto Net 30)</span></label><input id="n_iv_due" type="date"/></div>
+    </div>
+    <div class="field"><label>Notes</label><textarea id="n_iv_notes"></textarea></div>
+    <button class="btn" id="saveBtn" onclick="saveNewInvoice('${jesc(cid)}')">Create invoice</button>
+    <span class="saved" id="savedMsg"></span>`;
+  document.getElementById('drawer').classList.add('open');
+}
+
+async function saveNewInvoice(cid){
+  const fields = {
+    invoice_no: document.getElementById('n_iv_no').value.trim(),
+    invoice_date: document.getElementById('n_iv_date').value || null,
+    project_no: document.getElementById('n_iv_proj').value.trim(),
+    client_po_raw: document.getElementById('n_iv_po').value.trim(),
+    payment_status: document.getElementById('n_iv_status').value,
+    due_on: document.getElementById('n_iv_due').value || null,
+    payment_notes: document.getElementById('n_iv_notes').value.trim(),
+  };
+  if(!fields.invoice_no){
+    const m = document.getElementById('savedMsg');
+    m.textContent = '✗ Invoice # is required'; m.className = 'saved show errc';
+    return;
+  }
+  await doSave('create_invoice', {company_id: cid, fields}, (r)=>{
+    DATA.invoices.push(r.invoice || Object.assign({company_id: cid}, fields));
+    reindex(); kpis(); renderList(); renderMain(); closeDrawer();
+  });
+}
+
 function openEditInvoice(cid, invoiceNo){
   const v=(invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNo));
   if(!v) return;
   document.getElementById('dtitle').textContent='Edit invoice — '+(v.invoice_no||'');
   document.getElementById('dbody').innerHTML=`
-    <div class="kv"><span class="k">Invoice date</span><span>${esc((v.invoice_date||'—').slice(0,10))}</span></div>
-    <div class="field"><label>Invoice #</label><input id="e_iv_no" value="${esc(v.invoice_no||'')}"/>
+    <div class="field"><label>Invoice #</label><input id="e_iv_no" value="${esc(st(v.invoice_no))}"/>
       <p class="muted" style="margin:4px 0 0;font-size:11px">Changing this also updates any shipment leg logged under this invoice number.</p></div>
-    <div class="kv"><span class="k">Project #</span><span>${esc(v.project_no||'—')}</span></div>
+    <div class="row2">
+      <div class="field"><label>Invoice date</label><input id="e_iv_date" type="date" value="${esc(st(v.invoice_date).slice(0,10))}"/></div>
+      <div class="field"><label>Project # <span class="muted" style="text-transform:none;font-weight:400">(blank = unlinked)</span></label><input id="e_iv_proj" value="${esc(st(v.project_no))}"/></div>
+    </div>
     <div class="row2">
       <div class="field"><label>Status</label><select id="e_iv_status">
         ${['open','partial:50%','paid'].map(s=>`<option value="${s}" ${(v.payment_status||'')===s?'selected':''}>${s}</option>`).join('')}</select></div>
@@ -1214,6 +1275,11 @@ async function saveEditInvoice(cid, invoiceNo){
     due_on: document.getElementById('e_iv_due').value || null,
     payment_notes: document.getElementById('e_iv_notes').value.trim() || null,
   };
+  // invoice_date / project_no became editable in v0.1.26. Send project_no
+  // even when blank -- an empty string is a deliberate "unlink", and the
+  // server treats it as such rather than as "no change".
+  fields.invoice_date = document.getElementById('e_iv_date').value || null;
+  fields.project_no = document.getElementById('e_iv_proj').value.trim();
   await doSave('update_invoice', {company_id:cid, invoice_no:invoiceNoNow, fields}, (r)=>{
     const rec=r.invoice||Object.assign({}, (invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNoNow)), fields);
     const i=DATA.invoices.findIndex(x=>x.company_id===cid && String(x.invoice_no)===String(invoiceNoNow));
@@ -1320,6 +1386,23 @@ async function doSave(tool, args, applyLocal){
 
 function closeDrawer(){document.getElementById('drawer').classList.remove('open');}
 
+function draftReady(draft, headline){
+  const el = document.getElementById('draftToast') || (()=>{
+    const d = document.createElement('div');
+    d.id = 'draftToast'; d.className = 'mvp live';
+    d.style.cssText = 'bottom:52px;left:12px;max-width:420px;line-height:1.5';
+    document.body.appendChild(d); return d;
+  })();
+  const link = draft && draft.webLink ? safeUrl(draft.webLink) : null;
+  el.innerHTML = esc(headline) + ' — it\u2019s in your <b>Outlook Drafts</b>. '
+    + 'Switch to Outlook to finish and send.'
+    + (link ? ' <a href="' + esc(link) + '" target="_blank" rel="noopener" '
+              + 'style="color:#9ecbff">Open in browser instead</a>' : '');
+  el.style.display = 'block';
+  clearTimeout(window.__draftToastT);
+  window.__draftToastT = setTimeout(()=>{ el.style.display = 'none'; }, 12000);
+}
+
 async function draft(email,name){
   // Phase 5 live: clicking a contact creates a REAL Outlook draft via the
   // MCP's draft_email and opens it (never sends). Falls back to a compose
@@ -1327,8 +1410,8 @@ async function draft(email,name){
   if (CRM.mode !== 'embedded'){
     try{
       const r = await CRM.call('draft_email', {contact_email: email});
-      if (r && r.ok && r.draft && r.draft.webLink){
-        window.open(safeUrl(r.draft.webLink), '_blank');
+      if (r && r.ok && r.draft){
+        draftReady(r.draft, 'Draft created for ' + (name || email));
         return;
       }
       console.warn('draft_email unavailable; compose-link fallback:', r && r.error);
@@ -1354,8 +1437,8 @@ async function replyToThread(companyId, messageId){
   }
   try{
     const r = await CRM.call('draft_reply', {company_id: companyId, message_id: messageId});
-    if (r && r.ok && r.draft && r.draft.webLink){
-      window.open(safeUrl(r.draft.webLink), '_blank');
+    if (r && r.ok && r.draft){
+      draftReady(r.draft, 'Reply draft created');
       return;
     }
     alert('Could not create reply draft: ' + ((r && r.error) || 'unknown error'));
