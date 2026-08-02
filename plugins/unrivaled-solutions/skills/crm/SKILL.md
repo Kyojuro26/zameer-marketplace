@@ -13,7 +13,7 @@ description: >
   contacts and statuses into Outlook, and keeping the desktop app copy in
   sync with the plugin.
 metadata:
-  version: "0.1.26"
+  version: "0.1.28"
 ---
 
 # Unrivaled CRM
@@ -87,9 +87,14 @@ Writes are validated and logged; report failures honestly:
 - Update an invoice / customer order → `update_invoice` (matched by
   `company_id` + `invoice_no`): `payment_status` (paid|open|partial[:detail]),
   `pay_date`, `payment_notes`, `client_po_raw`, `due_on` (a manual override —
-  leave unset to keep the auto Net-30-from-invoice-date default). The
-  invoice date, linked project number, and other identifying fields aren't
-  editable here — they come from the original billing documents.
+  leave unset to keep the auto Net-30-from-invoice-date default), and since
+  v0.1.26 `invoice_date` and `project_no`. A `project_no` must name a live
+  project — a deleted (archived) one is refused, because an invoice linked to
+  it disappears from every view. `payment_status_raw` and `sheet_row` are not
+  editable: they record what the source workbook literally said, and
+  `payment_status_raw` is the evidence `pipeline/audit_commission_pct.py`
+  replays. The invoice's own number is changed with `rename_invoice`, not
+  here.
 - Rename a project's number → `rename_project(old_project_no,
   new_project_no)`. This is NOT a plain field edit: `project_no` is a lookup
   key that shipments and invoices point at, so a rename must atomically
@@ -110,7 +115,9 @@ Writes are validated and logged; report failures honestly:
   no project attached).
 - New records → `create_project` (needs a unique project number and an
   existing company), `create_shipment` (attaches to a project),
-  `upsert_contact` (deduped by email — safe to re-run).
+  `create_invoice` (a client invoice that never came through the tracker
+  workbook — needs `invoice_no`, unique for that customer), `upsert_contact`
+  (deduped by email — safe to re-run).
 - New customers/vendors/leads → `create_company` (`role`: customer, vendor,
   or lead; unique name) and `create_vendor` (a vendor plus its detail
   record: rep, email, offerings, notes, PO/invoice routing). Company details
@@ -199,10 +206,12 @@ indication anything's stale.
 
 **If the user says anything that means "refresh the desktop app" — "update my
 CRM app", "update my CRM", "update the CRM", "refresh my CRM", "sync the
-desktop app", "is my CRM app up to date":** treat all of these as this
-request. Do NOT read a bare "update my CRM" as a request to change CRM
-records — nothing in it names a record to change, and asking which they meant
-beats guessing either way. don't improvise a copy step. Follow
+desktop app", "is my CRM app up to date" — and names no specific record:**
+treat it as this request. If the same phrasing DOES name a record ("update my
+CRM, Acme paid 9001"), that is a record edit, not an app sync. Note this is
+distinct from updating the *plugin*, which is Settings → Capabilities, and
+from "refresh Outlook activity", which is enrichment. Don't improvise a copy
+step. Follow
 `references/setup-runbook.md`'s **Step 7** exactly — it calls `crm_info`,
 compares that version against the one baked into
 `C:\UnrivaledCRM\app\skills\crm\mcp\server.py`, and only downloads/mirrors

@@ -92,6 +92,13 @@ INVOICE_FIELDS = {
     "invoice_no", "client_po_raw", "invoice_date", "payment_status",
     "payment_status_raw", "pay_date", "client_name", "company_id",
     "payment_notes", "vendor_notes", "project_no", "sheet_row", "due_on",
+    # Provenance, set to "manual" by create_invoice and never by the importer.
+    # A POSITIVE marker: pipeline/audit_commission_pct.py must not infer
+    # hand-entry from a missing payment_status_raw/sheet_row, because an
+    # invoice imported by an older pipeline can also lack those -- and
+    # skipping one of those would hide a real, money-affecting correction
+    # behind a confident "out of scope" claim.
+    "source",
 }
 # due_on is a manual override -- when absent, get_company/list_invoices report
 # an effective_due_on computed as invoice_date + DEFAULT_NET_TERMS_DAYS (Net 30)
@@ -115,7 +122,8 @@ INVOICE_EDITABLE_FIELDS = {"payment_status", "pay_date", "payment_notes",
 # pipeline/audit_commission_pct.py replays; letting it be written by hand
 # would erode an audit trail that already cannot be reconstructed.
 INVOICE_CREATE_FIELDS = (INVOICE_FIELDS
-                         - {"company_id", "payment_status_raw", "sheet_row"})
+                         - {"company_id", "payment_status_raw", "sheet_row",
+                            "source"})
 DEFAULT_NET_TERMS_DAYS = 30
 CONTACT_FIELDS = {
     "company_id", "company_name", "name", "email", "phone", "title", "location",
@@ -142,7 +150,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.26"
+SERVER_VERSION = "0.1.28"
 
 
 class StoreError(Exception):
@@ -394,16 +402,61 @@ def _num_to_str(v):
     return str(v)
 
 
+def _canon(v):
+    """The canonical form of an identifier ENTERING the system.
+
+    Apply to caller input only -- a lookup argument, or a value about to be
+    persisted -- and NEVER to a value read back off disk. Folds the string
+    form of a de-floated number ("7002.0" -> "7002") so an operator or an LLM
+    that types "7002.0" still reaches the record stored as "7002", and so
+    nothing can persist a ".0" key in the first place. pipeline/normalize.py
+    has always done exactly this at its own import boundary.
+
+    Deliberately NOT symmetric with _key, and this is the point. The first
+    unpublished fix attempt folded BOTH sides, which made an archived "4521.0" and a live "4521" the
+    same key: get_company then dropped the live project's invoices as
+    archived, and real receivables vanished with ok:true and no error
+    anywhere. Folding one side leaves a mismatch the operator can see; folding
+    both silently merges two records and loses money. Reproduced both ways
+    before choosing.
+
+    The residual: a project stored as "4521.0" by an older version is not
+    findable by typing "4521". That is a visible "not found", not a silent
+    merge, and normalize.py cannot produce such a key -- project numbers come
+    from a digits-only regex and all three invoice-number sites already strip
+    a trailing ".0".
+    """
+    k = _key(v)
+    return k[:-2] if k.endswith(".0") and k[:-2].lstrip("-").isdigit() else k
+
+
+# The identifier fields _coerce_text canonicalizes on the way in. Deliberately
+# NOT every TEXT_FIELD: a date must keep whatever shape it arrived in (the
+# view's own sanitizer owns that), and client_po_raw/vendor_po_raw are raw
+# operator text where a trailing ".0" could be real.
+ID_FIELDS = {"project_no", "invoice_no"}
+
+
 def _coerce_text(fields):
     """Stringify numeric values in identifier/text/date fields, in place."""
     def num(x):
         return isinstance(x, (int, float)) and not isinstance(x, bool)
 
+    # Stringify only -- deliberately NOT _canon. This is the door every create
+    # AND update goes through, and most identifiers arriving here are LINKS to
+    # an existing record (an invoice's project_no), not new numbers. Folding
+    # them here rewrote a link to the project stored as "4521.0" into a link to
+    # the different project "4521", on a save that only meant to change a
+    # payment status. Canonicalization belongs at the two places an identifier
+    # is genuinely minted -- create_project and create_invoice -- and those
+    # call _canon explicitly.
     for k, v in list(fields.items()):
         if k in TEXT_FIELDS and num(v):
             fields[k] = _num_to_str(v)
-        elif k == "all_project_nos" and isinstance(v, list):
-            fields[k] = [_num_to_str(x) if num(x) else x for x in v]
+        elif k == "all_project_nos":
+            # coerce the SHAPE as well as the members: a scalar here reached
+            # disk and then raised a raw TypeError out of every read.
+            fields[k] = [_num_to_str(x) if num(x) else x for x in _as_list(v)]
 
 
 def _validate(fields, allowed, entity):
@@ -427,6 +480,100 @@ def _validate(fields, allowed, entity):
         raise StoreError("payment_status must be paid | open | partial[:detail]")
 
 
+def _key(v):
+    """The comparison form of an identifier ALREADY IN THE STORE. Exact.
+
+    Every project_no / invoice_no comparison against a value read from disk
+    MUST go through this. v0.1.27's first attempt normalized inside the new
+    link guards but left the archive filters on bare str(), so " 4700 " read
+    as live in one place and archived in another and the invoice vanished
+    anyway. One definition, used everywhere, is the only version of this that
+    stays true.
+
+    This does NOT fold a trailing ".0", and that asymmetry with _canon is the
+    whole design -- see _canon.
+    """
+    if v is None or isinstance(v, bool):
+        return ""          # _num_to_str(None) is the STRING "None" -- truthy,
+                           # and it would match a record whose id is literally
+                           # null as well as one reading "None".
+    return _num_to_str(v).strip()
+
+
+def _resolve(wanted, stored_keys):
+    """The stored key that `wanted` addresses. EXACT match wins.
+
+    Only when nothing matches exactly do we fall back to the canonical form, so
+    a caller who types "7600.0" still reaches the invoice stored as "7600".
+
+    This exists because a lookup argument is NOT necessarily fresh input. The
+    view round-trips stored identifiers straight back as lookup keys --
+    openEditInvoice passes `v.invoice_no` verbatim, saveInvoice passes it on to
+    update_invoice -- so canonicalizing an argument unconditionally addressed a
+    record's numerically-shaped twin instead of the record itself: editing the
+    invoice stored as "7001.0" marked the *other* invoice, "7001", paid and
+    overwrote its notes. Preferring the exact match makes that impossible.
+
+    The fallback cannot merge two records, because it only runs when the exact
+    form matched nothing at all -- it can never take a record away from a key
+    that genuinely exists.
+    """
+    w = _key(wanted)
+    if w in stored_keys:
+        return w
+    c = _canon(wanted)
+    return c if c in stored_keys else w
+
+
+def _project_keys(projects=None):
+    """Every project_no on disk, in stored (exact) form."""
+    return {_key(p.get("project_no"))
+            for p in (projects if projects is not None else STORE.load("projects"))}
+
+
+def _invoice_key(invoices, company_id, wanted):
+    """Resolve `wanted` against the invoice numbers of ONE company."""
+    return _resolve(wanted, {_key(i.get("invoice_no")) for i in invoices
+                             if i.get("company_id") == company_id})
+
+
+def _live_project(pno):
+    """The project a link may point at, or None.
+
+    Archived projects still sit in projects.json -- archive only flags them
+    (_set_project_archived). But every default read drops invoices whose
+    project_no is archived (get_company, list_invoices), so linking to one
+    writes a record that is invisible everywhere while returning ok:true.
+    That is exactly the outcome the link guards exist to prevent, so an
+    archived project is NOT a valid link target.
+    """
+    projects = STORE.load("projects")
+    key = _resolve(pno, _project_keys(projects))
+    if not key:
+        return None
+    for p in projects:
+        if _key(p.get("project_no")) == key and not p.get("archived"):
+            return p
+    return None
+
+
+def _same_invoice(rec, company_id, invoice_key):
+    """Identity test for an invoice, used by every path that looks one up.
+
+    `invoice_key` must ALREADY be a stored-form key -- resolve a caller's
+    argument with _invoice_key() first. Passing a raw argument here is what let
+    a lookup for "7001.0" land on the record stored as "7001".
+
+    (company_id, invoice_no) is the key, but the two sides were once compared
+    with different normalizations -- a candidate through _num_to_str against a
+    stored value through bare str(). A store holding invoice_no as the JSON
+    number 7001.0 then failed the duplicate check and minted a second record
+    for the same receivable, after which marking one paid left the other open.
+    """
+    return (rec.get("company_id") == company_id
+            and _key(rec.get("invoice_no")) == invoice_key)
+
+
 def _require_company(company_id):
     companies = STORE.load("companies")
     if not any(c["company_id"] == company_id for c in companies):
@@ -439,15 +586,46 @@ def _archived_ids():
 
 
 def _archived_project_nos():
-    """Set of project_no (as str) currently archived (soft-deleted)."""
-    return {str(p["project_no"]) for p in STORE.load("projects") if p.get("archived")}
+    """Set of project_no (as str) currently archived (soft-deleted).
+
+    Falsy keys are dropped, and that is load-bearing. _key(None/True/"  ") is
+    "", and an invoice with no project keys to "" too -- so a single archived
+    project with a missing or non-string project_no put "" in this set and
+    every UNLINKED invoice in the store vanished from get_company and
+    list_invoices, across all companies, with ok:true. normalize.py leaves
+    project_no null whenever an invoice has no tracker link, so those are
+    ordinary records, not edge cases. _shipment_project_nos already filtered
+    falsy; this did not.
+    """
+    return {k for p in STORE.load("projects") if p.get("archived")
+            and (k := _key(p.get("project_no")))}
+
+
+def _as_list(v):
+    """A stored list-shaped field, coerced. The Python twin of the view's arr().
+
+    all_project_nos is a list in everything the importer and the tools write,
+    but _coerce_text only validates it WHEN it is already a list, so a scalar
+    or a string passes straight through create_shipment/update_shipment. Then
+    `for n in v` either raises TypeError on an int -- a RAW exception, not
+    {ok:false}, because @_store_errors only catches StoreError, which killed
+    get_company, get_project and list_shipments for the whole store -- or,
+    worse, silently iterates a string's CHARACTERS, so "100" became {"1","0"}
+    and the leg disappeared from its own project.
+    """
+    if isinstance(v, list):
+        return v
+    if v is None or isinstance(v, bool) or v == "":
+        return []
+    return [v]
 
 
 def _shipment_project_nos(s):
     """A shipment's linked project numbers, as strings -- all_project_nos when
     present, else its own project_no. Mirrors the lookup in get_project."""
-    nos = s.get("all_project_nos") or ([s.get("project_no")] if s.get("project_no") else [])
-    return {str(n) for n in nos if n}
+    nos = _as_list(s.get("all_project_nos")) \
+        or ([s.get("project_no")] if s.get("project_no") else [])
+    return {_key(n) for n in nos if n}
 
 
 def _parse_date_loose(s):
@@ -531,7 +709,7 @@ def get_company(ref: str) -> dict:
                  and not (_shipment_project_nos(x) & arch_pnos)]
     invoices = [x for x in STORE.load("invoices")
                 if x.get("company_id") == cid
-                and str(x.get("project_no")) not in arch_pnos]
+                and _key(x.get("project_no")) not in arch_pnos]
     flags = [x for x in STORE.load("needs_review")
              if cid in (x.get("company_ids") or []) or x.get("company_id") == cid]
     return {"ok": True, "interface_version": VERSION, "company": c,
@@ -564,12 +742,14 @@ def list_companies(role: str = None, query: str = None,
 @_store_errors
 def get_project(project_no: str) -> dict:
     """Project card with its shipments, company, and contacts."""
-    pr = [p for p in STORE.load("projects") if str(p["project_no"]) == str(project_no)]
+    projects = STORE.load("projects")
+    want = _resolve(project_no, _project_keys(projects))
+    pr = [p for p in projects if _key(p.get("project_no")) == want] if want else []
     if not pr:
         return _err(f"project '{project_no}' not found")
     p = pr[0]
     shipments = [s for s in STORE.load("shipments")
-                 if str(project_no) in [str(n) for n in (s.get("all_project_nos") or [s.get("project_no")])]]
+                 if want in _shipment_project_nos(s)]
     companies = STORE.load("companies")
     company = next((c for c in companies if c["company_id"] == p["company_id"]), None)
     contacts = [c for c in STORE.load("contacts") if c["company_id"] == p["company_id"]]
@@ -670,7 +850,7 @@ def list_invoices(payment_status: str = None, company: str = None,
         arch = _archived_ids()
         arch_pnos = _archived_project_nos()
         out = [i for i in out if i.get("company_id") not in arch
-               and str(i.get("project_no")) not in arch_pnos]
+               and _key(i.get("project_no")) not in arch_pnos]
     if payment_status:
         out = [i for i in out
                if str(i.get("payment_status") or "").startswith(payment_status)]
@@ -730,12 +910,14 @@ def update_project(project_no: str, fields: dict) -> dict:
             if "company_id" in fields:
                 _require_company(fields["company_id"])
             projects = STORE.load("projects")
-            target = [p for p in projects if str(p["project_no"]) == str(project_no)]
+            want = _resolve(project_no, _project_keys(projects))
+            target = [p for p in projects
+                      if _key(p.get("project_no")) == want] if want else []
             if not target:
                 return _err(f"project '{project_no}' not found")
             target[0].update(fields)
             STORE.save("projects", projects)
-            STORE.log("update", "project", str(project_no), fields)
+            STORE.log("update", "project", want, fields)
             return {"ok": True, "interface_version": VERSION, "project": target[0]}
     except StoreError as e:
         return _err(e)
@@ -752,19 +934,27 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
     a historical note about the original migration, not a live pointer.)"""
     try:
         with STORE.write_lock():
-            # _num_to_str, not str: a caller sending 9999.0 would otherwise
-            # persist "9999.0" and cascade it into every referencing shipment
-            # and invoice. rename_project is the ONLY way to change a
-            # project_no, so this path cannot rely on _validate/_coerce_text.
-            new_pn = _num_to_str(new_project_no).strip() if new_project_no is not None else ""
+            # _canon, not str: a caller sending 9999.0 would otherwise persist
+            # "9999.0" and cascade it into every referencing shipment and
+            # invoice. rename_project is the ONLY way to change a project_no,
+            # so this path cannot rely on _validate/_coerce_text.
+            new_pn = _canon(new_project_no)
             if not new_pn:
                 raise StoreError("new_project_no cannot be empty")
-            old_pn = str(old_project_no)
             projects = STORE.load("projects")
-            target = [p for p in projects if str(p["project_no"]) == old_pn]
+            old_pn = _resolve(old_project_no, _project_keys(projects))
+            if not old_pn:
+                # Without this an empty old number matches every project whose
+                # own key is falsy (_key(None/True/"  ") is ""), and the
+                # cascades below then repoint EVERY unlinked invoice and
+                # shipment in the store -- across all companies -- onto the new
+                # number. rename_invoice guards this; this one did not.
+                raise StoreError("old_project_no cannot be empty")
+            target = [p for p in projects if _key(p.get("project_no")) == old_pn]
             if not target:
                 return _err(f"project '{old_project_no}' not found")
-            if new_pn != old_pn and any(str(p["project_no"]) == new_pn for p in projects):
+            if new_pn != old_pn and any(_key(p.get("project_no")) == new_pn
+                                        for p in projects):
                 raise StoreError(f"project '{new_pn}' already exists")
             target[0]["project_no"] = new_pn
             STORE.save("projects", projects)
@@ -773,12 +963,12 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
             touched_shipments = 0
             for s in shipments:
                 changed = False
-                if str(s.get("project_no")) == old_pn:
+                if _key(s.get("project_no")) == old_pn:
                     s["project_no"] = new_pn
                     changed = True
-                all_pnos = s.get("all_project_nos") or []
-                if any(str(n) == old_pn for n in all_pnos):
-                    s["all_project_nos"] = [new_pn if str(n) == old_pn else n
+                all_pnos = _as_list(s.get("all_project_nos"))
+                if any(_key(n) == old_pn for n in all_pnos):
+                    s["all_project_nos"] = [new_pn if _key(n) == old_pn else n
                                              for n in all_pnos]
                     changed = True
                 touched_shipments += 1 if changed else 0
@@ -788,7 +978,7 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
             invoices = STORE.load("invoices")
             touched_invoices = 0
             for i in invoices:
-                if str(i.get("project_no")) == old_pn:
+                if _key(i.get("project_no")) == old_pn:
                     i["project_no"] = new_pn
                     touched_invoices += 1
             if touched_invoices:
@@ -807,12 +997,32 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
 @mcp.tool()
 def update_shipment(shipment_id: str, fields: dict) -> dict:
     """Edit a shipment leg — advance stage (Ordered|Shipped|Delivered|Installed|
-    On Hold|Cancelled), set ship_date/eta/notes."""
+    On Hold|Cancelled), set ship_date/eta/notes.
+
+    Cannot re-link the leg to another project: pass project_no/all_project_nos
+    to reassign_shipment, which validates the target and keeps project_no,
+    all_project_nos and linked_to_project consistent in one write."""
     try:
         with STORE.write_lock():
-            _validate(fields, SHIPMENT_FIELDS - {"shipment_id"}, "shipment")
+            # The link fields are refused here rather than silently accepted.
+            # SHIPMENT_FIELDS contains them, so this tool used to write them
+            # with NO liveness check at all -- the one door left open after
+            # create_shipment and reassign_shipment were both hardened. It
+            # could park a leg on an archived project (invisible everywhere,
+            # ok:true), put a ".0" key on disk, or store project_no as a
+            # boolean. The docstring and interface-v0.1.md already described
+            # this tool as stage/dates only; prose is not a guard.
+            link_fields = {"project_no", "all_project_nos", "linked_to_project"}
+            offered = link_fields & set(fields)
+            if offered:
+                raise StoreError(
+                    f"update_shipment cannot change {sorted(offered)} -- use "
+                    f"reassign_shipment, which checks the target project still "
+                    f"exists and keeps the leg's links consistent")
+            _validate(fields, SHIPMENT_FIELDS - {"shipment_id"} - link_fields,
+                      "shipment")
             shipments = STORE.load("shipments")
-            target = [s for s in shipments if s["shipment_id"] == shipment_id]
+            target = [s for s in shipments if s.get("shipment_id") == shipment_id]
             if not target:
                 return _err(f"shipment '{shipment_id}' not found")
             target[0].update(fields)
@@ -837,11 +1047,17 @@ def reassign_shipment(shipment_id: str, new_project_no: str = None) -> dict:
             target = [s for s in shipments if s["shipment_id"] == shipment_id]
             if not target:
                 return _err(f"shipment '{shipment_id}' not found")
-            new_pn = _num_to_str(new_project_no).strip() if new_project_no else None
+            # _resolve, not _key: _key left a caller's "4521.0" un-canonicalized
+            # while _live_project validated it against the project stored as
+            # "4521". The leg then persisted "4521.0", was invisible on the
+            # project page, and stopped being counted by the -L<n> counter --
+            # so "+ Add shipment" failed permanently on a duplicate id.
+            new_pn = _resolve(new_project_no, _project_keys()) or None
             if new_pn:
-                projects = STORE.load("projects")
-                if not any(str(p["project_no"]) == new_pn for p in projects):
-                    raise StoreError(f"project '{new_pn}' not found")
+                if not _live_project(new_pn):
+                    raise StoreError(f"project '{new_pn}' not found, or has "
+                                     f"been deleted -- a shipment linked to it "
+                                     f"would not appear anywhere")
             old_pn = target[0].get("project_no")
             target[0]["project_no"] = new_pn
             target[0]["all_project_nos"] = [new_pn] if new_pn else []
@@ -913,12 +1129,23 @@ def create_project(fields: dict) -> dict:
     try:
         with STORE.write_lock():
             _validate(fields, PROJECT_FIELDS, "project")
-            pn = fields.get("project_no")
-            if not pn or not fields.get("company_id"):
+            # A MINT: this is one of only two places a project/invoice number is
+            # created rather than looked up, so it canonicalizes explicitly.
+            # _coerce_text deliberately does not (it also runs on updates, where
+            # an identifier is a LINK and folding it silently relinks records).
+            # The bool test comes first: _coerce_text skips bools, so a True
+            # would survive as a project whose _key is "" -- which poisons the
+            # archived-key set and the rename cascades.
+            if isinstance(fields.get("project_no"), bool) \
+                    or not fields.get("project_no") or not fields.get("company_id"):
                 raise StoreError("create_project needs project_no and company_id")
+            pn = _canon(fields["project_no"])
+            if not pn:
+                raise StoreError("create_project needs project_no and company_id")
+            fields["project_no"] = pn
             _require_company(fields["company_id"])
             projects = STORE.load("projects")
-            if any(str(p["project_no"]) == str(pn) for p in projects):
+            if any(_key(p.get("project_no")) == pn for p in projects):
                 raise StoreError(f"project '{pn}' already exists")
             record = {k: None for k in PROJECT_FIELDS}
             record.update({"owner": [], "annotations": [], "po_flag": False, "archived": False})
@@ -939,25 +1166,46 @@ def create_shipment(project_no: str, fields: dict) -> dict:
         with STORE.write_lock():
             _validate(fields, SHIPMENT_FIELDS, "shipment")
             projects = STORE.load("projects")
-            pr = next((p for p in projects if str(p["project_no"]) == str(project_no)), None)
+            pr = _live_project(project_no)
             if not pr:
-                raise StoreError(f"project '{project_no}' not found")
+                raise StoreError(f"project '{project_no}' not found, or has "
+                                 f"been deleted -- a shipment linked to it "
+                                 f"would not appear anywhere")
+            # The project's OWN stored key, so the leg links to it exactly.
+            # v0.1.27 validated through _live_project (which normalizes) but
+            # persisted the raw argument, so " 4521 " stored padded and the leg
+            # was invisible on the project page.
+            pno = _key(pr.get("project_no"))
             shipments = STORE.load("shipments")
             sid = fields.get("shipment_id")
             if not sid:
-                n = 1 + sum(1 for s in shipments
-                            if str(s.get("project_no")) == str(project_no))
-                sid = f"{_num_to_str(project_no)}-L{n}"
-            if any(s["shipment_id"] == sid for s in shipments):
+                # Find the first FREE suffix, don't count current links. The id
+                # is a permanent global key but the count is a moving target:
+                # reassigning 100-L1 to another project drops the count back to
+                # 0, so the next "+ Add shipment" on project 100 re-derived
+                # "100-L1", collided with the leg that still carries that id,
+                # and the button stayed dead forever with no in-app way out.
+                taken = {s.get("shipment_id") for s in shipments}
+                n = 1
+                while f"{pno}-L{n}" in taken:
+                    n += 1
+                sid = f"{pno}-L{n}"
+            if any(s.get("shipment_id") == sid for s in shipments):
                 raise StoreError(f"shipment '{sid}' already exists")
             record = {k: None for k in SHIPMENT_FIELDS}
+            # Caller fields FIRST, then the authoritative identity -- the same
+            # order create_invoice uses. Reversed, `fields` won: a caller could
+            # pass project_no/all_project_nos/company_id/shipment_id and
+            # overwrite the very values the _live_project guard above had just
+            # validated, in the same call. That put legs on archived projects,
+            # on other companies, and ".0" keys on disk, all with ok:true.
+            record.update(fields)
             record.update({
-                "shipment_id": sid, "project_no": _num_to_str(project_no),
-                "all_project_nos": [_num_to_str(project_no)], "stage": "Ordered",
+                "shipment_id": sid, "project_no": pno,
+                "all_project_nos": [pno], "stage": fields.get("stage") or "Ordered",
                 "company_id": pr["company_id"], "client_name": pr.get("company_name"),
                 "linked_to_project": True,
             })
-            record.update(fields)
             _validate({"stage": record["stage"]}, SHIPMENT_FIELDS, "shipment")
             shipments.append(record)
             STORE.save("shipments", shipments)
@@ -1083,23 +1331,73 @@ def update_invoice(company_id: str, invoice_no: str, fields: dict) -> dict:
     try:
         with STORE.write_lock():
             _validate(fields, INVOICE_EDITABLE_FIELDS, "invoice")
-            # project_no became editable in v0.1.26. Same guard as
-            # create_invoice: relinking to a project that doesn't exist would
-            # drop the invoice off every project page with no error anywhere.
-            # An explicit empty value is allowed -- that means "unlink".
-            if fields.get("project_no") not in (None, ""):
-                _pno = _num_to_str(fields["project_no"]).strip()
-                if not any(str(p.get("project_no")) == _pno
-                           for p in STORE.load("projects")):
-                    raise StoreError(f"project '{_pno}' not found")
+            # project_no became editable in v0.1.26. Normalize into `fields`,
+            # not just into the check -- validating a stripped value while
+            # persisting the raw one stored " 4521 ", which no exact-string
+            # lookup downstream ever matches again (archive filters,
+            # rename_project's cascade, the audit all silently skipped it).
+            _pno = ""
+            if "project_no" in fields:
+                # _resolve, not _canon. The drawer re-sends project_no verbatim
+                # on every save, so this argument is usually a value that came
+                # OFF disk. Canonicalizing it rewrote a link to the project
+                # stored as "4521.0" into a link to the different project
+                # "4521" -- a silent relink on a save that only meant to change
+                # the payment status.
+                # Keep the RAW exact form too. An echo is an echo: if the
+                # value the drawer sent back is byte-identical to what is
+                # stored, this is not a relink no matter how it resolves.
+                # Comparing a RESOLVED value against an EXACT stored one
+                # made an unchanged ".0" link read as a change -- so the
+                # liveness check fired on a project the operator never
+                # touched and refused to mark the invoice paid.
+                _raw_pno = _key(fields["project_no"])
+                _pno = _resolve(fields["project_no"], _project_keys())
             invoices = STORE.load("invoices")
-            target = [i for i in invoices if i.get("company_id") == company_id
-                      and str(i.get("invoice_no")) == str(invoice_no)]
+            inv_key = _invoice_key(invoices, company_id, invoice_no)
+            if not inv_key:
+                # "" matches every record whose invoice_no is null, so an empty
+                # argument would mark an unnumbered invoice paid. create_invoice
+                # and rename_invoice both guard this.
+                return _err("invoice_no cannot be empty")
+            target = [i for i in invoices
+                      if _same_invoice(i, company_id, inv_key)]
             if not target:
                 return _err(f"invoice '{invoice_no}' for company '{company_id}' not found")
+            if len(target) > 1:
+                # A store written before the v0.1.27 identity fix can already
+                # hold two records answering to one number (e.g. 7001.0 and
+                # "7001"). Editing target[0] would mark one paid and leave the
+                # other open, reporting ok:true either way -- the exact failure
+                # the identity fix exists to prevent. Refuse and name them.
+                return _err(f"{len(target)} invoices share number '{invoice_no}' "
+                            f"for company '{company_id}' (sheet_rows: "
+                            f"{[t.get('sheet_row') for t in target]}). Nothing "
+                            f"here can tell them apart, so this needs the "
+                            f"duplicate resolved in the store directly -- "
+                            f"rename_invoice refuses for the same reason and "
+                            f"is not a way around this.")
+            # Liveness is enforced only on an ACTUAL relink. The edit drawer
+            # re-sends project_no on every save, so checking any value present
+            # made "mark this paid" fail whenever the invoice's existing
+            # project happened to be archived -- an error naming a field the
+            # operator never touched.
+            _stored_pno = _key(target[0].get("project_no"))
+            _echoed = "project_no" in fields and _raw_pno == _stored_pno
+            if _echoed:
+                # leave the stored spelling exactly as it is
+                fields["project_no"] = target[0].get("project_no")
+            elif "project_no" in fields:
+                fields["project_no"] = _pno or None   # one form of "unlinked"
+            if _pno and not _echoed and _pno != _stored_pno:
+                if not _live_project(_pno):
+                    raise StoreError(f"project '{_pno}' not found, or has been "
+                                     f"deleted -- an invoice linked to it "
+                                     f"would not appear anywhere")
             target[0].update(fields)
             STORE.save("invoices", invoices)
-            STORE.log("update", "invoice", f"{company_id}:{invoice_no}", fields)
+            STORE.log("update", "invoice",
+                      f"{company_id}:{inv_key}", fields)
             return {"ok": True, "interface_version": VERSION, "invoice": target[0]}
     except StoreError as e:
         return _err(e)
@@ -1121,21 +1419,19 @@ def create_invoice(company_id: str, fields: dict) -> dict:
         with STORE.write_lock():
             _validate(fields, INVOICE_CREATE_FIELDS, "invoice")
             _require_company(company_id)
-            inv_no = _num_to_str(fields.get("invoice_no") or "").strip()
+            inv_no = _canon(fields.get("invoice_no"))
             if not inv_no:
                 raise StoreError("invoice_no is required")
             invoices = STORE.load("invoices")
-            if any(i.get("company_id") == company_id
-                   and str(i.get("invoice_no")) == inv_no for i in invoices):
+            if any(_same_invoice(i, company_id, inv_no) for i in invoices):
                 return _err(f"invoice '{inv_no}' already exists for company "
                             f"'{company_id}' -- use update_invoice to edit it, "
                             f"or rename_invoice to renumber it")
-            pno = fields.get("project_no")
-            pno = _num_to_str(pno).strip() if pno not in (None, "") else None
-            if pno:
-                projects = STORE.load("projects")
-                if not any(str(p.get("project_no")) == pno for p in projects):
-                    raise StoreError(f"project '{pno}' not found")
+            pno = _resolve(fields.get("project_no"), _project_keys()) or None
+            if pno and not _live_project(pno):
+                raise StoreError(f"project '{pno}' not found, or has been "
+                                 f"deleted -- an invoice linked to it would "
+                                 f"not appear anywhere")
             companies = STORE.load("companies")
             co = next((c for c in companies if c["company_id"] == company_id), None)
             record = {k: None for k in INVOICE_FIELDS}
@@ -1145,6 +1441,7 @@ def create_invoice(company_id: str, fields: dict) -> dict:
                 "company_id": company_id,
                 "project_no": pno,
                 "payment_status": fields.get("payment_status") or "open",
+                "source": "manual",
                 "client_name": fields.get("client_name")
                                or (co.get("display_name") if co else None),
             })
@@ -1166,17 +1463,38 @@ def rename_invoice(company_id: str, old_invoice_no: str, new_invoice_no: str) ->
     or already used by a different invoice for the same company."""
     try:
         with STORE.write_lock():
-            new_no = _num_to_str(new_invoice_no).strip() if new_invoice_no is not None else ""
+            # new_no is MINTED, so it is canonicalized -- that is what keeps a
+            # ".0" key off disk. old_no is a LOOKUP, so it is resolved against
+            # what is actually stored, exact form first.
+            new_no = _canon(new_invoice_no)
             if not new_no:
                 raise StoreError("new_invoice_no cannot be empty")
-            old_no = str(old_invoice_no)
             invoices = STORE.load("invoices")
-            target = [i for i in invoices if i.get("company_id") == company_id
-                      and str(i.get("invoice_no")) == old_no]
+            old_no = _invoice_key(invoices, company_id, old_invoice_no)
+            if not old_no:
+                # Without this, old_no == "" matches every record whose
+                # invoice_no is null (_key(None) is ""), and the cascade below
+                # then repoints every unnumbered shipment leg in the company.
+                raise StoreError("old_invoice_no cannot be empty")
+            target = [i for i in invoices
+                      if _same_invoice(i, company_id, old_no)]
             if not target:
                 return _err(f"invoice '{old_invoice_no}' for company '{company_id}' not found")
+            if len(target) > 1:
+                # update_invoice refuses a duplicate pair and tells the
+                # operator to renumber one with rename_invoice. Doing that
+                # unguarded renamed an ARBITRARY twin and repointed every
+                # shipment leg carrying the old number -- including the other
+                # twin's legs. Following the error message corrupted data, so
+                # this path has to refuse for the same reason update_invoice
+                # does. Breaking the tie needs a direct edit, not a rename.
+                return _err(f"{len(target)} invoices share number '{old_no}' "
+                            f"for company '{company_id}' (sheet_rows: "
+                            f"{[t.get('sheet_row') for t in target]}). "
+                            f"rename_invoice cannot tell them apart -- resolve "
+                            f"the duplicate in the store before renumbering.")
             if new_no != old_no and any(
-                    i.get("company_id") == company_id and str(i.get("invoice_no")) == new_no
+                    _same_invoice(i, company_id, new_no)
                     for i in invoices):
                 raise StoreError(f"invoice '{new_no}' already exists for this company")
             target[0]["invoice_no"] = new_no
@@ -1185,7 +1503,8 @@ def rename_invoice(company_id: str, old_invoice_no: str, new_invoice_no: str) ->
             shipments = STORE.load("shipments")
             touched = 0
             for s in shipments:
-                if s.get("company_id") == company_id and str(s.get("invoice_no")) == old_no:
+                if (s.get("company_id") == company_id
+                        and _key(s.get("invoice_no")) == old_no):
                     s["invoice_no"] = new_no
                     touched += 1
             if touched:
@@ -1276,14 +1595,16 @@ def _set_project_archived(project_no: str, archived: bool) -> dict:
     try:
         with STORE.write_lock():
             projects = STORE.load("projects")
-            target = [p for p in projects if str(p["project_no"]) == str(project_no)]
+            want = _resolve(project_no, _project_keys(projects))
+            target = [p for p in projects
+                      if _key(p.get("project_no")) == want] if want else []
             if not target:
                 return _err(f"project '{project_no}' not found")
             target[0]["archived"] = archived
             target[0]["archived_at"] = (
                 datetime.now(timezone.utc).isoformat() if archived else None)
             STORE.save("projects", projects)
-            STORE.log("archive" if archived else "restore", "project", str(project_no),
+            STORE.log("archive" if archived else "restore", "project", want,
                       {"archived": archived})
             return {"ok": True, "interface_version": VERSION, "project": target[0]}
     except StoreError as e:

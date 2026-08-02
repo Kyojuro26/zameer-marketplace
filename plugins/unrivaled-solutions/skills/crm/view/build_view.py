@@ -448,6 +448,23 @@ function sv(v){ return v===null||v===undefined ? '' : String(v).toLowerCase(); }
 // hold a number if it was created through the MCP tools with a numeric value,
 // and .localeCompare / !== against a trimmed input string both misbehave then.
 function st(v){ return v===null||v===undefined ? '' : String(v); }
+// Sibling of st() for the list-shaped fields. owner/annotations are arrays in
+// every record the importer and the tools write, but nothing validates their
+// type, and a string there makes .join/.some throw inside renderMain -- which
+// doSave re-runs after every save, so one such record blanks the whole pane.
+function arr(v){ return Array.isArray(v) ? v : (v===null||v===undefined||v==='' ? [] : [v]); }
+// Options for a <select>, ALWAYS including whatever is actually stored.
+// A stored value absent from the preset list selects nothing, so the browser
+// reports the FIRST option and the save handler sends it unconditionally:
+// normalize.py writes payment_status as "partial:{n}%" for any n, so opening a
+// `partial:30%` invoice and pressing Save wrote the partial payment off as
+// "open". Same shape silently wiped collection_status and fabricated a project
+// status of "won" on a project stored with none.
+function opts(list, current){
+  const cur = st(current);
+  const all = list.map(st).includes(cur) ? list.map(st) : [cur, ...list.map(st)];
+  return all.map(o=>`<option value="${esc(o)}" ${o===cur?'selected':''}>${esc(o||'—')}</option>`).join('');
+}
 
 function companyMatches(c){
   if(filter!=='all' && c.role!==filter) return false;
@@ -484,7 +501,7 @@ function projectMatches(p){
   if(sv(p.invoice_no).includes(q)) return true;
   const co = companyById[p.company_id];
   if(co && sv(co.display_name).includes(q)) return true;
-  if((p.owner||[]).some(o=>sv(o).includes(q))) return true;
+  if(arr(p.owner).some(o=>sv(o).includes(q))) return true;
   return false;
 }
 function projCompanyName(p){
@@ -568,7 +585,7 @@ function renderProjectsMain(){
       <td>${p.company_id?`<a href="#" onclick="event.stopPropagation();select('${jesc(p.company_id)}');return false">${esc(projCompanyName(p))}</a>`:'<span class="muted">—</span>'}</td>
       <td>${esc(p.description||'')}</td>
       <td>${statusBadge(p.status)}</td>
-      <td>${esc((p.owner||[]).join(', '))||'—'}</td>
+      <td>${esc(arr(p.owner).join(', '))||'—'}</td>
       <td class="muted">${esc(st(p.year))}</td>
       <td class="num">${money(p.revenue)}</td>
       <td class="num">${pct(p.margin)}</td>
@@ -580,7 +597,7 @@ function renderProjectsList(){
   const rows = filteredProjects();
   document.getElementById('clist').innerHTML = rows.slice(0,400).map(p=>`
     <div class="citem" onclick="openProject('${jesc(st(p.project_no))}')">
-      <div class="cn">${esc(st(p.project_no)||'—')} ${esc((p.description||'').slice(0,40))}</div>
+      <div class="cn">${esc(st(p.project_no)||'—')} ${esc(st(p.description).slice(0,40))}</div>
       <div class="cm"><span>${esc(projCompanyName(p))}</span>${p.status?`<span>· ${esc(p.status)}</span>`:''}</div>
     </div>`).join('') || '<div class="muted" style="padding:14px">No matches.</div>';
 }
@@ -622,7 +639,10 @@ function enrichmentSection(id){
   if (e === null) return `<div class="section"><h2>Outlook activity</h2><div class="muted">No Outlook signal on file — refresh enrichment to pull last contact, threads, and meetings.</div></div>`;
   let h = `<div class="section"><h2>Outlook activity</h2>`;
   h += `<div class="kv"><span class="k">Last contact</span><span>${e.last_contact ? esc(String(e.last_contact).slice(0,10)) : '<span class="muted">none found</span>'}</span></div>`;
-  const th = e.threads || [];
+  // arr(): set_enrichment validates field NAMES but never types, so a
+  // string here made th.slice(...).map throw inside renderMain -- which
+  // doSave re-runs after every save, blanking the whole detail pane.
+  const th = arr(e.threads);
   if (th.length){
     h += `<table><thead><tr><th>Recent thread</th><th>With</th><th>Date</th><th></th></tr></thead><tbody>` +
       th.slice(0,5).map(t=>`<tr><td>${t.webLink?`<a href="${esc(safeUrl(t.webLink))}" target="_blank" rel="noopener">${esc(t.subject||'(no subject)')}</a>`:esc(t.subject||'(no subject)')}</td>
@@ -631,7 +651,7 @@ function enrichmentSection(id){
   } else {
     h += `<div class="muted">No recent email threads.</div>`;
   }
-  const mt = e.meetings || [];
+  const mt = arr(e.meetings);
   if (mt.length){
     h += `<div style="margin-top:8px"><b style="font-size:12px">Meetings:</b> ` +
       mt.slice(0,3).map(m=>`${esc(m.subject||'meeting')} (${esc(String(m.date||'').slice(0,10))})`).join(' · ') + `</div>`;
@@ -640,7 +660,67 @@ function enrichmentSection(id){
   return h + `</div>`;
 }
 
-function statusBadge(s){ s=(s||'').toLowerCase(); const cls={won:'b-won',pending:'b-pending',lost:'b-lost'}[s]||'b-stage';
+/* Date controls, and why they are not plain <input type="date">.
+   normalize.py stores an invoice/pay date as str() of whatever the tracker
+   cell held, so real stores contain "3/14/2026" as well as ISO -- server.py's
+   _parse_date_loose exists precisely because both shapes occur. Per the HTML
+   value-sanitization algorithm an <input type="date"> DISCARDS any value that
+   is not exactly yyyy-mm-dd: the box renders blank and .value reads "". A save
+   handler that then sends that value unconditionally overwrites the real date
+   with null, in the only copy that exists. So: parse what we can, fall back to
+   a text box for what we cannot, and never send a date the user did not
+   actually touch. */
+function isoDate(v){
+  const t = st(v).trim();
+  if(!t) return '';
+  let y, mo, d;
+  const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(iso){ y=+iso[1]; mo=+iso[2]; d=+iso[3]; }
+  else {
+    const us = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);   // M/D/YYYY, M/D/YY
+    if(!us) return null;
+    mo=+us[1]; d=+us[2]; y=+(us[3].length===2 ? '20'+us[3] : us[3]);
+  }
+  // Shape is not validity. "9/31/2025", "2/30/2026" and "2026-02-29" (2026 is
+  // not a leap year) all match the patterns above and all produce a string an
+  // <input type="date"> refuses to hold -- which is the wipe this whole
+  // mechanism exists to stop. Round-trip through Date to confirm the calendar
+  // actually contains the day.
+  const dt = new Date(Date.UTC(y, mo-1, d));
+  if(!(y>0 && mo>=1 && mo<=12 && d>=1)) return null;
+  if(dt.getUTCFullYear()!==y || dt.getUTCMonth()!==mo-1 || dt.getUTCDate()!==d) return null;
+  return String(y).padStart(4,'0')+'-'+String(mo).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+}
+function dateInput(id, stored){
+  const iso = isoDate(stored);
+  if(iso === null){
+    const raw = esc(st(stored));
+    return `<input id="${esc(id)}" type="text" value="${raw}"/>`
+         + `<p class="muted" style="margin:4px 0 0;font-size:11px">Kept exactly as it came from the tracker.</p>`;
+  }
+  return `<input id="${esc(id)}" type="date" value="${esc(iso)}"/>`;
+}
+// Baseline is read from the control AFTER the browser has parsed and
+// sanitized it -- never from the string we intended to put there. That makes a
+// value/attribute mismatch impossible by construction, which is what the first
+// attempt at this got wrong: it compared against the intended value, so any
+// input the sanitizer rejected read as "changed" and got written back as null.
+function snapDates(ids){
+  ids.forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.setAttribute('data-orig', el.value || '');
+  });
+}
+function dateIfChanged(id, fields, key){
+  const el = document.getElementById(id);
+  if(!el) return;
+  const before = el.getAttribute('data-orig');
+  if(before === null) return;             // never snapshotted -> never send
+  const now = el.value || '';
+  if(now !== before) fields[key] = now || null;
+}
+
+function statusBadge(s){ s=st(s).toLowerCase(); const cls={won:'b-won',pending:'b-pending',lost:'b-lost'}[s]||'b-stage';
   return s?`<span class="badge ${cls}">${esc(s)}</span>`:''; }
 
 function renderMain(){
@@ -689,7 +769,7 @@ function renderMain(){
   h+= cts.length?`<table><thead><tr><th>Name</th><th>Title</th><th>Email</th><th>Phone</th><th>Last action</th><th></th></tr></thead><tbody>`+
     cts.map(x=>`<tr><td>${esc(x.name||'—')}</td><td class="muted">${esc(x.title||'')}</td>
       <td class="contact">${x.email?`<a href="#" onclick="draft('${jesc(x.email)}','${jesc(x.name||'')}');return false">${esc(x.email)}</a>`:'—'}</td>
-      <td class="muted">${esc(x.phone||'')}</td><td class="muted">${esc((x.last_action||'').slice(0,10))}</td>
+      <td class="muted">${esc(x.phone||'')}</td><td class="muted">${esc(st(x.last_action).slice(0,10))}</td>
       <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditContact('${jesc(selected)}','${jesc(x.email||'')}','${jesc(x.name||'')}')">Edit</button></td></tr>`).join('')+
     `</tbody></table>`:'<div class="muted">No contacts.</div>';
   h+=`</div>`;
@@ -699,7 +779,7 @@ function renderMain(){
       <th class="num">Revenue</th><th class="num">Margin</th><th>Collection</th></tr></thead><tbody>`+
     prs.map(p=>`<tr class="click" onclick="openProject('${jesc(p.project_no||'')}')">
       <td><b>${esc(p.project_no||'—')}</b></td><td>${esc(p.description||'')}</td>
-      <td>${statusBadge(p.status)}</td><td>${esc((p.owner||[]).join(', '))||'—'}</td>
+      <td>${statusBadge(p.status)}</td><td>${esc(arr(p.owner).join(', '))||'—'}</td>
       <td class="num">${money(p.revenue)}</td><td class="num">${pct(p.margin)}</td>
       <td class="muted">${esc(p.collection_status||'')}</td></tr>`).join('')+
     `</tbody></table>`:'<div class="muted">No projects.</div>';
@@ -728,10 +808,10 @@ function renderMain(){
       invRows+=list.map(v=>{const ps=st(v.payment_status);const cls=ps==='paid'?'b-won':(ps.startsWith('partial')?'b-pending':'b-lost');
         const due=dueOn(v); const overdue = bk==='Overdue';
         return `<tr><td><b>${esc(v.invoice_no||'—')}</b></td><td class="muted">${esc(v.client_po_raw||'')}</td>
-        <td class="muted">${esc((v.invoice_date||'').slice(0,10))}</td>
+        <td class="muted">${esc(st(v.invoice_date).slice(0,10))}</td>
         <td><span class="badge ${cls}">${esc(ps||'—')}</span></td>
         <td class="${overdue?'':'muted'}" ${overdue?'style="color:var(--red);font-weight:600"':''}>${esc(due||'—')}</td>
-        <td class="muted" style="max-width:280px">${esc((v.payment_notes||'').slice(0,90))}</td>
+        <td class="muted" style="max-width:280px">${esc(st(v.payment_notes).slice(0,90))}</td>
         <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('');
     });
     h+=`<div class="section"><h2>Invoices / customer orders (${invs.length})</h2>
@@ -745,7 +825,7 @@ function renderMain(){
     sps.map(s=>`<tr class="click" onclick="openShipment('${jesc(s.shipment_id||'')}')">
       <td>${esc(s.project_no||'—')}</td><td>${esc(s.vendor_po_raw||'')}</td>
       <td><span class="badge b-stage">${esc(s.stage||'—')}</span></td>
-      <td class="muted">${esc((s.ship_date||'').slice(0,10))}</td></tr>`).join('')+
+      <td class="muted">${esc(st(s.ship_date).slice(0,10))}</td></tr>`).join('')+
     `</tbody></table>`:'<div class="muted">No shipments.</div>';
   h+=`</div>`;
   document.getElementById('main').innerHTML=h;
@@ -779,9 +859,9 @@ function openProject(pno){
     <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
     <div class="row2">
       <div class="field"><label>Status</label><select id="f_status">
-        ${['won','pending','lost'].map(s=>`<option ${p.status===s?'selected':''}>${s}</option>`).join('')}</select></div>
+        ${opts(['won','pending','lost'], p.status)}</select></div>
       <div class="field"><label>Collection</label><select id="f_coll">
-        ${['','open','partial:50%','paid'].map(s=>`<option value="${s}" ${(p.collection_status||'')===s?'selected':''}>${s||'—'}</option>`).join('')}</select></div>
+        ${opts(['','open','partial:50%','paid'], p.collection_status)}</select></div>
     </div>
     <div class="row2">
       <div class="field"><label>Revenue ($)</label><input id="f_revenue" type="number" step="0.01" value="${p.revenue==null?'':esc(p.revenue)}"/></div>
@@ -791,9 +871,9 @@ function openProject(pno){
       <div class="field"><label>Gross profit ($)</label><input id="f_gp" type="number" step="0.01" value="${p.gross_profit==null?'':esc(p.gross_profit)}"/></div>
       <div class="field"><label>Margin (%)</label><input id="f_margin" type="number" step="0.1" value="${esc(marginPct)}"/></div>
     </div>
-    <div class="field"><label>Owner (reps, comma-separated)</label><input id="f_owner" value="${esc((p.owner||[]).join(', '))}"/></div>
+    <div class="field"><label>Owner (reps, comma-separated)</label><input id="f_owner" value="${esc(arr(p.owner).join(', '))}"/></div>
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
-    <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc((p.annotations||[]).join('\n'))}</textarea></div>
+    <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc(arr(p.annotations).join('\n'))}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}')">Save changes</button>
     <button class="btn ghost" onclick="openNewShipment('${jesc(pno)}')" style="margin-left:8px">+ Add shipment</button>
     <button class="pill-btn" style="background:var(--red-soft);color:var(--red);margin-left:8px" onclick="deleteProject('${jesc(pno)}')">Delete project</button>
@@ -882,9 +962,13 @@ async function deleteProject(pno){
 }
 
 function _shipmentProjectNos(s){
-  const nos = (s.all_project_nos && s.all_project_nos.length) ? s.all_project_nos
+  // arr(): all_project_nos stored as a string made .map throw here, and this
+  // runs from deleteProject AFTER archive_project has already succeeded -- so
+  // the project was archived server-side while the app kept listing it, with
+  // no error and the drawer left open.
+  const nos = arr(s.all_project_nos).length ? arr(s.all_project_nos)
     : (s.project_no ? [s.project_no] : []);
-  return new Set(nos.map(String));
+  return new Set(nos.map(st));
 }
 
 /* -------------------------------------------------------- create drawers -- */
@@ -983,13 +1067,14 @@ function openEditContact(cid, email, name){
     </div>
     <div class="row2">
       <div class="field"><label>Location</label><input id="e_c_loc" value="${esc(c.location||'')}"/></div>
-      <div class="field"><label>Last action date (manual)</label><input id="e_c_lastact" value="${esc((c.last_action||'').slice(0,10))}"/></div>
+      <div class="field"><label>Last action date (manual)</label>${dateInput('e_c_lastact', c.last_action)}</div>
     </div>
     <div class="field"><label>Action notes</label><textarea id="e_c_notes">${esc(c.action_notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveEditContact('${jesc(cid)}','${jesc(c.email||'')}','${jesc(c.name||'')}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Matched by email (or by name if there's no email) — changing both at once can create a second contact instead of updating this one.</p>`;
   document.getElementById('drawer').classList.add('open');
+  snapDates(['e_c_lastact']);
 }
 
 async function saveEditContact(cid, origEmail, origName){
@@ -1001,8 +1086,28 @@ async function saveEditContact(cid, origEmail, origName){
     title:document.getElementById('e_c_title').value.trim()||null,
     phone:document.getElementById('e_c_phone').value.trim()||null,
     location:document.getElementById('e_c_loc').value.trim()||null,
-    last_action:document.getElementById('e_c_lastact').value.trim()||null,
+
     action_notes:document.getElementById('e_c_notes').value.trim()||null};
+  // dateIfChanged is right for an UPDATE: it stops a save that only meant to
+  // edit a phone number from rewriting a tracker-format date. But it is wrong
+  // for a CREATE, where there is no stored value to protect and an unsent
+  // field is simply lost -- every other field above is already sent
+  // unconditionally for exactly that reason.
+  //
+  // upsert_contact matches on email (when one is supplied), else on
+  // (company_id, name). So it can only fall through to create when the name
+  // changed AND there is no unchanged email left to match on -- which is the
+  // "changing both at once can create a second contact" case the drawer warns
+  // about. Snapshot the control in that case: its value is faithful either
+  // way, since dateInput falls back to a text box holding the raw string
+  // whenever isoDate cannot parse it.
+  const emailNow=document.getElementById('e_c_email').value.trim();
+  if(name!==origName && (!emailNow || emailNow!==origEmail)){
+    const el=document.getElementById('e_c_lastact');
+    if(el) fields.last_action = el.value || null;
+  } else {
+    dateIfChanged('e_c_lastact', fields, 'last_action');
+  }
   await doSave('upsert_contact', {fields}, (r)=>{
     const rec=r.contact||fields;
     const i=DATA.contacts.findIndex(x=>x.company_id===cid &&
@@ -1175,11 +1280,12 @@ async function saveEditVendor(cid){
   });
 }
 
-/* Edit an invoice / customer order. Only payment_status/pay_date/
-   payment_notes/client_po_raw are editable -- everything else (invoice #,
-   invoice date, the linked project) comes from the original billing
-   documents and isn't safe to hand-edit here. Matched by (company_id,
-   invoice_no), same key server-side. */
+/* Create and edit a client invoice / customer order. As of v0.1.26
+   invoice_date and the linked project_no are editable too; invoice_no is not
+   (rename_invoice owns that, because it also moves any shipment leg carrying
+   the number), and payment_status_raw/sheet_row stay server-side only --
+   they record what the source workbook literally said. Matched by
+   (company_id, invoice_no), the same key server-side. */
 function openNewInvoice(cid){
   const co = companyById[cid] || {};
   document.getElementById('dtitle').textContent = 'New invoice — ' + (co.display_name || cid);
@@ -1207,11 +1313,11 @@ async function saveNewInvoice(cid){
   const fields = {
     invoice_no: document.getElementById('n_iv_no').value.trim(),
     invoice_date: document.getElementById('n_iv_date').value || null,
-    project_no: document.getElementById('n_iv_proj').value.trim(),
-    client_po_raw: document.getElementById('n_iv_po').value.trim(),
+    project_no: document.getElementById('n_iv_proj').value.trim() || null,
+    client_po_raw: document.getElementById('n_iv_po').value.trim() || null,
     payment_status: document.getElementById('n_iv_status').value,
     due_on: document.getElementById('n_iv_due').value || null,
-    payment_notes: document.getElementById('n_iv_notes').value.trim(),
+    payment_notes: document.getElementById('n_iv_notes').value.trim() || null,
   };
   if(!fields.invoice_no){
     const m = document.getElementById('savedMsg');
@@ -1232,22 +1338,23 @@ function openEditInvoice(cid, invoiceNo){
     <div class="field"><label>Invoice #</label><input id="e_iv_no" value="${esc(st(v.invoice_no))}"/>
       <p class="muted" style="margin:4px 0 0;font-size:11px">Changing this also updates any shipment leg logged under this invoice number.</p></div>
     <div class="row2">
-      <div class="field"><label>Invoice date</label><input id="e_iv_date" type="date" value="${esc(st(v.invoice_date).slice(0,10))}"/></div>
+      <div class="field"><label>Invoice date</label>${dateInput('e_iv_date', v.invoice_date)}</div>
       <div class="field"><label>Project # <span class="muted" style="text-transform:none;font-weight:400">(blank = unlinked)</span></label><input id="e_iv_proj" value="${esc(st(v.project_no))}"/></div>
     </div>
     <div class="row2">
       <div class="field"><label>Status</label><select id="e_iv_status">
-        ${['open','partial:50%','paid'].map(s=>`<option value="${s}" ${(v.payment_status||'')===s?'selected':''}>${s}</option>`).join('')}</select></div>
-      <div class="field"><label>Paid on</label><input id="e_iv_paydate" type="date" value="${esc((v.pay_date||'').slice(0,10))}"/></div>
+        ${opts(['open','partial:50%','paid'], v.payment_status)}</select></div>
+      <div class="field"><label>Paid on</label>${dateInput('e_iv_paydate', v.pay_date)}</div>
     </div>
     <div class="row2">
       <div class="field"><label>Client PO / order</label><input id="e_iv_po" value="${esc(v.client_po_raw||'')}"/></div>
-      <div class="field"><label>Due on <span class="muted" style="text-transform:none;font-weight:400">(blank = auto Net 30 from invoice date)</span></label><input id="e_iv_due" type="date" value="${esc((v.due_on||'').slice(0,10))}"/></div>
+      <div class="field"><label>Due on <span class="muted" style="text-transform:none;font-weight:400">(blank = auto Net 30 from invoice date)</span></label>${dateInput('e_iv_due', v.due_on)}</div>
     </div>
     <div class="field"><label>Notes</label><textarea id="e_iv_notes">${esc(v.payment_notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveEditInvoice('${jesc(cid)}','${jesc(v.invoice_no||'')}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>`;
   document.getElementById('drawer').classList.add('open');
+  snapDates(['e_iv_date','e_iv_paydate','e_iv_due']);
 }
 
 async function saveEditInvoice(cid, invoiceNo){
@@ -1270,16 +1377,18 @@ async function saveEditInvoice(cid, invoiceNo){
   }
   const fields={
     payment_status: document.getElementById('e_iv_status').value || null,
-    pay_date: document.getElementById('e_iv_paydate').value || null,
     client_po_raw: document.getElementById('e_iv_po').value.trim() || null,
-    due_on: document.getElementById('e_iv_due').value || null,
     payment_notes: document.getElementById('e_iv_notes').value.trim() || null,
   };
-  // invoice_date / project_no became editable in v0.1.26. Send project_no
-  // even when blank -- an empty string is a deliberate "unlink", and the
-  // server treats it as such rather than as "no change".
-  fields.invoice_date = document.getElementById('e_iv_date').value || null;
-  fields.project_no = document.getElementById('e_iv_proj').value.trim();
+  // Dates contribute only when the control actually changed -- see
+  // dateInput()/dateIfChanged(). Sending them unconditionally is what wiped a
+  // non-ISO invoice_date on a save that only meant to flip the status.
+  dateIfChanged('e_iv_date', fields, 'invoice_date');
+  dateIfChanged('e_iv_paydate', fields, 'pay_date');
+  dateIfChanged('e_iv_due', fields, 'due_on');
+  // project_no is sent even when blank: an empty box is a deliberate unlink,
+  // which the server normalizes to null.
+  fields.project_no = document.getElementById('e_iv_proj').value.trim() || null;
   await doSave('update_invoice', {company_id:cid, invoice_no:invoiceNoNow, fields}, (r)=>{
     const rec=r.invoice||Object.assign({}, (invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNoNow)), fields);
     const i=DATA.invoices.findIndex(x=>x.company_id===cid && String(x.invoice_no)===String(invoiceNoNow));
@@ -1315,12 +1424,12 @@ function openShipment(sid){
     <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
     <div class="row2">
       <div class="field"><label>Stage</label><select id="s_stage">
-        ${STAGES.map(x=>`<option ${s.stage===x?'selected':''}>${x}</option>`).join('')}</select></div>
-      <div class="field"><label>Ship date</label><input id="s_date" type="date" value="${esc((s.ship_date||'').slice(0,10))}"/></div>
+        ${opts(STAGES, s.stage)}</select></div>
+      <div class="field"><label>Ship date</label>${dateInput('s_date', s.ship_date)}</div>
     </div>
     <div class="row2">
-      <div class="field"><label>Start date</label><input id="s_start" type="date" value="${esc((s.start_date||'').slice(0,10))}"/></div>
-      <div class="field"><label>ETA</label><input id="s_eta" type="date" value="${esc((s.eta||'').slice(0,10))}"/></div>
+      <div class="field"><label>Start date</label>${dateInput('s_start', s.start_date)}</div>
+      <div class="field"><label>ETA</label>${dateInput('s_eta', s.eta)}</div>
     </div>
     <div class="field"><label>Order notes</label><textarea id="s_notes">${esc(s.open_orders_notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveShipment('${jesc(sid)}')">Save changes</button>
@@ -1329,6 +1438,7 @@ function openShipment(sid){
       ? 'Demo mode: this save lasts only for this browser session.'
       : 'Stage changes persist to your CRM records (Ordered → Shipped → Delivered → Installed).'}</p>`;
   document.getElementById('drawer').classList.add('open');
+  snapDates(['s_date','s_start','s_eta']);
 }
 
 async function saveShipment(sid){
@@ -1352,14 +1462,24 @@ async function saveShipment(sid){
   const fields = {
     vendor_po_raw: document.getElementById('s_po').value.trim() || null,
     stage: document.getElementById('s_stage').value,
-    ship_date: document.getElementById('s_date').value || null,
-    start_date: document.getElementById('s_start').value || null,
-    eta: document.getElementById('s_eta').value || null,
+    // dates contributed only when actually changed -- advancing a stage must
+    // not null a tracker-format ship_date. Same mechanism as the invoice drawer.
+
     open_orders_notes: document.getElementById('s_notes').value.trim() || null,
   };
+  dateIfChanged('s_date', fields, 'ship_date');
+  dateIfChanged('s_start', fields, 'start_date');
+  dateIfChanged('s_eta', fields, 'eta');
   await doSave('update_shipment', {shipment_id: sid, fields}, (r)=>{
     Object.assign(s, r.shipment || fields);
     if(selected) renderMain();
+    // closeDrawer, as the invoice drawer does. The date controls' data-orig
+    // baseline is snapshotted by openShipment AFTER the inputs are populated,
+    // so it is only correct for as long as the drawer's contents match what
+    // was saved. Leaving it open let a change-save-revert-save sequence send
+    // {} on the second save: the store kept the first value while the drawer
+    // showed the second. Reopening re-snaps against the saved record.
+    closeDrawer();
   });
 }
 
@@ -1390,14 +1510,16 @@ function draftReady(draft, headline){
   const el = document.getElementById('draftToast') || (()=>{
     const d = document.createElement('div');
     d.id = 'draftToast'; d.className = 'mvp live';
-    d.style.cssText = 'bottom:52px;left:12px;max-width:420px;line-height:1.5';
+    d.style.cssText = 'bottom:52px;left:12px;max-width:420px;line-height:1.5;'
+                    + 'pointer-events:none';
     document.body.appendChild(d); return d;
   })();
-  const link = draft && draft.webLink ? safeUrl(draft.webLink) : null;
+  const u = draft && draft.webLink ? safeUrl(draft.webLink) : '#';
+  const link = (u && u !== '#') ? u : null;
   el.innerHTML = esc(headline) + ' — it\u2019s in your <b>Outlook Drafts</b>. '
     + 'Switch to Outlook to finish and send.'
     + (link ? ' <a href="' + esc(link) + '" target="_blank" rel="noopener" '
-              + 'style="color:#9ecbff">Open in browser instead</a>' : '');
+              + 'style="color:#9ecbff;pointer-events:auto">Open in browser instead</a>' : '');
   el.style.display = 'block';
   clearTimeout(window.__draftToastT);
   window.__draftToastT = setTimeout(()=>{ el.style.display = 'none'; }, 12000);

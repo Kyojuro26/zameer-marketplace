@@ -101,9 +101,50 @@ def load(store, name, required):
     return data
 
 
+def from_importer(rec):
+    """True if this invoice came through pipeline/normalize.py.
+
+    Since v0.1.26 an invoice can be typed in by hand (create_invoice). Such a
+    record's `blob` would be the operator's own free-text payment_notes, and
+    replaying the pre-0.1.23 importer regexes over prose the importer never saw
+    can produce a confident CORRECTION_NEEDED whose proposed fix overwrites a
+    correct, deliberately-entered status. This audit only has jurisdiction over
+    records the importer wrote.
+
+    The primary test is POSITIVE -- create_invoice stamps source="manual"
+    (v0.1.28+). The absence test below is a FALLBACK, not the primary: on its
+    own it silently skipped genuinely-imported invoices written by an older
+    pipeline that didn't set those fields, hiding real money errors behind an
+    "out of scope" line. Absence of evidence is not evidence.
+
+    But it cannot be dropped either. create_invoice shipped in v0.1.26 without
+    the stamp, so every invoice hand-entered under 0.1.26 or 0.1.27 has no
+    source at all. Judged on the positive test alone those records read as
+    imported, and the audit then replays the importer's regexes over the
+    operator's own free text and proposes a destructive "fix" to a status they
+    deliberately typed. Keeping both tests costs only the original false-skip
+    risk on a record that has NEITHER a payment_status_raw NOR a sheet_row --
+    a record the importer has no evidence it ever wrote.
+    """
+    if st(rec.get("source")).strip().lower() == "manual":
+        return False
+    if not st(rec.get("payment_status_raw")).strip() \
+            and not st(rec.get("sheet_row")).strip():
+        return False
+    return True
+
+
 def load_changelog(store):
-    """Invoice keys whose payment_notes were edited after import, and whether
-    the store shows any post-fix migration marker. Tolerates torn lines."""
+    """Invoice keys whose payment_notes were EDITED after import.
+
+    Two bugs lived here. The key was rebuilt as a tuple while Store.log writes
+    a single joined string ("acme:7001"), so no lookup ever matched and the
+    UNVERIFIABLE branch was dead code -- the printed coverage promise was
+    false. And the op was never filtered, so once create_invoice began logging
+    a whole record (payment_notes included) every hand-created invoice would
+    have been reported as "edited after import". Fixing either alone turns a
+    silent false negative into a loud false positive; both are fixed together.
+    """
     edited = set()
     path = os.path.join(store, "changelog.jsonl")
     if not os.path.exists(path):
@@ -119,15 +160,12 @@ def load_changelog(store):
                 continue                       # torn tail line; skip, not fatal
             if not isinstance(e, dict):
                 continue
-            if e.get("entity") != "invoice":
+            if e.get("entity") != "invoice" or e.get("op") != "update":
                 continue
             fields = e.get("fields")
             if isinstance(fields, dict) and "payment_notes" in fields:
-                key = e.get("key")
-                if isinstance(key, (list, tuple)):
-                    edited.add(tuple(st(k) for k in key))
-                else:
-                    edited.add((st(key),))
+                # Store.log writes key as the joined string "<company>:<invoice>".
+                edited.add(st(e.get("key")))
     return edited
 
 
@@ -189,7 +227,11 @@ def audit(store):
     # without dedupe and two rows can share a number. Order is table order,
     # and the project back-fill used the FIRST one.
     inv_index = {}
+    hand_entered = 0
     for inv in invoices:
+        if not from_importer(inv):
+            hand_entered += 1
+            continue
         raw = st(inv.get("payment_status_raw"))
         notes = st(inv.get("payment_notes"))
         blob = f"{raw} {notes}"
@@ -202,7 +244,7 @@ def audit(store):
                "invoice_no": ino, "sheet_row": inv.get("sheet_row")}
         inv_index.setdefault((cid, ino), []).append(rec)
 
-        was_edited = (cid, ino) in notes_edited or (ino,) in notes_edited
+        was_edited = f"{cid}:{ino}" in notes_edited
         if was_edited and not commission:
             findings.append({
                 "kind": "invoice", "verdict": "UNVERIFIABLE", "rank": "high",
@@ -245,6 +287,8 @@ def audit(store):
             raw_key_by_project.setdefault(pno, raw)
 
     # --- projects ----------------------------------------------------------
+    # Only importer-written invoices may corroborate or condemn a project's
+    # collection_status -- inv_index already excludes hand-entered ones.
     by_project = {}
     for recs in inv_index.values():
         for rec in recs:
@@ -316,14 +360,14 @@ def audit(store):
                          "old_code_produced": None, "correct_status": None,
                          "source_text": None, "note": note, "fix": None})
 
-    return findings, len(invoices), len(projects), post_fix_store
+    return findings, len(invoices), len(projects), post_fix_store, hand_entered
 
 
 # ------------------------------------------------------------------ rendering
 ORDER = ["CORRECTION_NEEDED", "UNVERIFIABLE", "ALREADY_CHANGED", "FLAG_ONLY"]
 
 
-def render(findings, n_inv, n_proj, post_fix_store, store):
+def render(findings, n_inv, n_proj, post_fix_store, hand_entered, store):
     rank_w = {"high": 0, "low": 1, None: 0}
     findings.sort(key=lambda f: (ORDER.index(f["verdict"]),
                                  rank_w.get(f.get("rank"), 0),
@@ -334,7 +378,9 @@ def render(findings, n_inv, n_proj, post_fix_store, store):
 
     L = ["# Commission-% mis-import audit", "",
          f"Store: `{store}`",
-         f"Scanned: {n_inv} invoices, {n_proj} projects.",
+         f"Scanned: {n_inv - hand_entered} imported invoices, "
+         f"{n_proj} projects."
+         + (f" Skipped {hand_entered} hand-entered invoice(s) — out of scope, see below." if hand_entered else ""),
          f"Store migration provenance: "
          f"{'post-0.1.23 (commission markers present)' if post_fix_store else 'pre-0.1.23 or unknown (no commission markers in needs_review)'}",
          "", "Both `normalize.py` call sites are replayed with their own "
@@ -376,6 +422,19 @@ def render(findings, n_inv, n_proj, post_fix_store, store):
             L.append("")
 
     L += ["## Coverage limits", "",
+          "0. **Hand-entered invoices are out of scope and are skipped.** "
+          "An invoice created with `create_invoice` (v0.1.26+) carries no "
+          "importer decision to replay. Judging one would mean running the "
+          "importer's regexes over the operator's own free text, which can "
+          "manufacture a confident correction that overwrites a "
+          "deliberately-entered status. Such records are neither reported nor "
+          "allowed to corroborate a project's collection status. Detection is "
+          "`source == \"manual\"` (stamped from v0.1.28), OR -- for records "
+          "hand-entered under 0.1.26/0.1.27, before the stamp existed -- the "
+          "absence of both `payment_status_raw` and `sheet_row`. The fallback "
+          "can in principle skip a genuinely-imported invoice written by a "
+          "pipeline old enough to have set neither field; that is the known "
+          "cost of not mis-judging an unstamped hand-entry.",
           "1. **Invoice findings rest on `payment_notes`, which is editable.** "
           "An invoice whose notes were changed after import is reported as "
           "UNVERIFIABLE, but only if the edit is recorded in "
@@ -420,12 +479,13 @@ def main():
         sys.exit("FATAL: --out resolves inside the store. This audit never "
                  "writes into a live store. Choose a path outside it.")
 
-    findings, n_inv, n_proj, post_fix = audit(store)
+    findings, n_inv, n_proj, post_fix, hand_entered = audit(store)
     with open(out, "w", encoding="utf-8") as f:
-        f.write(render(findings, n_inv, n_proj, post_fix, store))
+        f.write(render(findings, n_inv, n_proj, post_fix, hand_entered, store))
 
     tally = {v: sum(1 for f in findings if f["verdict"] == v) for v in ORDER}
-    print(f"Scanned {n_inv} invoices, {n_proj} projects.")
+    print(f"Scanned {n_inv - hand_entered} imported invoices, {n_proj} projects."
+          + (f"  ({hand_entered} hand-entered, out of scope)" if hand_entered else ""))
     print("  " + "   ".join(f"{v}: {tally[v]}" for v in ORDER))
     print(f"Report: {out}")
     print("Read-only: no store file was modified.")
