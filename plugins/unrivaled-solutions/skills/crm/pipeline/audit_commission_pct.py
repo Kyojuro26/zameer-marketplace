@@ -148,7 +148,7 @@ def load_changelog(store):
     have been reported as "edited after import". Fixing either alone turns a
     silent false negative into a loud false positive; both are fixed together.
     """
-    edited, renamed = set(), {}
+    edited = set()
     path = os.path.join(store, "changelog.jsonl")
     if not os.path.exists(path):
         return edited
@@ -168,32 +168,31 @@ def load_changelog(store):
             fields = e.get("fields")
             if e.get("op") == "rename" and isinstance(fields, dict):
                 # An edit is recorded under the number the invoice had AT THE
-                # TIME. rename_invoice then moves it, and a later lookup by the
-                # current number missed the edit entirely -- so an invoice whose
-                # evidence had been overwritten was reported CLEAN instead of
-                # UNVERIFIABLE. Chain renames so the edit follows the record.
+                # TIME. rename_invoice then moves it, so a lookup by the current
+                # number missed the edit and an invoice whose evidence had been
+                # overwritten was reported CLEAN instead of UNVERIFIABLE.
+                #
+                # Applied SEQUENTIALLY, in log order, to the set of keys edited
+                # SO FAR -- not as a closure over a timestamp-free old->new map.
+                # That map applied every rename to every edit regardless of
+                # order, which was worse than not chaining at all: an undone
+                # renumber (A->B->A) landed on B and lost the finding, and a
+                # number later reused by a different invoice moved the edit onto
+                # that innocent record, whose report then proposed overwriting a
+                # payment status somebody had deliberately typed.
                 key = st(e.get("key"))                       # "<company>:<old>"
                 new_no = st(fields.get("new_invoice_no")).strip()
                 cid = key.rsplit(":", 1)[0] if ":" in key else ""
-                if new_no and cid:
-                    renamed[key] = f"{cid}:{new_no}"
+                if new_no and cid and key in edited:
+                    edited.discard(key)
+                    edited.add(f"{cid}:{new_no}")
                 continue
             if e.get("op") != "update":
                 continue
             if isinstance(fields, dict) and "payment_notes" in fields:
                 # Store.log writes key as the joined string "<company>:<invoice>".
                 edited.add(st(e.get("key")))
-    # Walk each edited key forward through every rename that followed it. The
-    # loop is bounded by the rename count, so a cycle in a corrupt log cannot
-    # hang the audit.
-    out = set()
-    for k in edited:
-        seen = {k}
-        while k in renamed and renamed[k] not in seen:
-            k = renamed[k]
-            seen.add(k)
-        out.add(k)
-    return out
+    return edited
 
 
 # --------------------------------------------------------------- replay: sites
@@ -347,8 +346,14 @@ def audit(store):
                     "old_code_produced": st(pre), "correct_status": st(post),
                     "source_text": raw,
                     "note": "key cell recovered from needs_review.json",
+                    # post is None when the replay says the cell implies no
+                    # collection status at all. st(None) is "", and
+                    # update_project REFUSES "" (collection_status must be
+                    # paid|open|partial[:detail]) -- so the report handed the
+                    # operator a remedy that errors. null is what clears it.
                     "fix": (f'update_project(project_no="{pno}", fields='
-                            f'{{"collection_status": "{st(post)}"}})')
+                            f'{{"collection_status": '
+                            f'{json.dumps(st(post) or None)}}})')
                            if verdict == "CORRECTION_NEEDED" else None})
             continue          # settled either way -- no guessing needed
 
@@ -434,8 +439,12 @@ def render(findings, n_inv, n_proj, post_fix_store, hand_entered, store):
                 ident += f' — {f["rank"]} priority'
             L.append(f"### {ident}")
             L.append(f"- stored status: `{f['stored_status']}`")
-            if f.get("correct_status"):
-                L.append(f"- should be: `{f['correct_status']}`")
+            if f.get("correct_status") is not None:
+                # not `if f.get(...)`: an empty correct_status means "no
+                # collection status", which is a real answer. Testing
+                # truthiness suppressed the one line that says what is right.
+                L.append(f"- should be: "
+                         f"`{f['correct_status'] or '(no collection status)'}`")
             if f.get("source_text"):
                 L.append(f"- source text: `{f['source_text']}`")
             if f.get("derived_from_invoice"):

@@ -112,13 +112,17 @@ if [ ! -f "$RB" ]; then
   echo "FATAL: version gate cannot find setup-runbook.md at $RB." >&2
   exit 1
 fi
-RB_RAW=$( { grep -oE '^# Unrivaled CRM — production setup \(v[0-9.]+' "$RB" || true
-            grep -oE '^## STEP 1 — Install plugin v[0-9.]+' "$RB" || true
-            grep -oE 'Verify the version shows \*\*[0-9.]+\*\*' "$RB" || true
-          } | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
-# All three must be PRESENT, not merely agree. If one gets reworded away the
-# gate would otherwise go on passing while silently checking less than it says.
-RB_COUNT=$(printf '%s\n' "$RB_RAW" | grep -c '[0-9]' || true)
+# Each site is matched SEPARATELY and must contribute at least one version.
+# Flattening them into one list and counting lines let a second occurrence of
+# one phrase cover for another that had been reworded away -- the gate would
+# report 3 while actually checking 2. STEP 1's body is a ~9000-character
+# changelog that already cites every past version, so that was reachable.
+RB_H=$(grep -oE '^# Unrivaled CRM — production setup \(v[0-9.]+' "$RB" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+RB_S=$(grep -oE '^## STEP 1 — Install plugin v[0-9.]+' "$RB" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+RB_V=$(grep -oE 'Verify the version shows \*\*[0-9.]+\*\*' "$RB" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+RB_COUNT=0
+for _v in "$RB_H" "$RB_S" "$RB_V"; do [ -n "$_v" ] && RB_COUNT=$((RB_COUNT+1)); done
+RB_RAW=$(printf '%s\n%s\n%s\n' "$RB_H" "$RB_S" "$RB_V" | grep -E '[0-9]' || true)
 if [ "$RB_COUNT" -ne 3 ]; then
   echo "FATAL: expected 3 version markers in setup-runbook.md, found $RB_COUNT." >&2
   echo "  They are its '# Unrivaled CRM — production setup (vX.Y.Z' header, its" >&2

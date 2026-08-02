@@ -17,13 +17,13 @@ Every response carries `ok` and `interface_version`. Failures return
 | Tool | Args | Returns |
 |---|---|---|
 | `get_company` | `ref` (id or name) | company + nested contacts, projects, shipments, needs_review flags |
-| `list_companies` | `role?` (customer\|vendor), `query?` | filtered companies + count |
+| `list_companies` | `role?` (customer\|vendor\|lead), `query?` | filtered companies + count |
 | `get_project` | `project_no` | project + company, contacts, shipments, needs_review flags |
 | `list_projects` | `status?` (won\|pending\|lost), `owner?`, `year?`, `collection_status?` | filtered project cards + count |
-| `list_shipments` | `stage?`, `company?`, `overdue?` | shipment legs + count |
+| `list_shipments` | `stage?`, `company?`, `overdue?`, `vendor_po?` | shipment legs + count. A leg is hidden only when EVERY project it links to is archived, so deleting one deal does not hide a leg another live deal still owns. |
 | `get_vendor` | `ref` (id or name) | vendor with offerings + PO/invoice routing |
 | `find_contacts` | `company?`, `query?` | contacts + count |
-| `list_invoices` | `payment_status?` (paid\|open\|partial), `company?` | the receivables ledger (CLIENT Invoices table); invoices also attached to `get_company` |
+| `list_invoices` | `payment_status?` (paid\|open\|partial), `company?`, `invoice_no?`, `overdue?` | the receivables ledger (CLIENT Invoices table); invoices also attached to `get_company`. Every invoice carries a computed `effective_due_on` — the `due_on` override if set, else `invoice_date` + Net 30. It is response-only and never stored; an `invoice_date` the server cannot parse yields `null` rather than a guessed date. |
 | `crm_info` | — | version, store path, record counts, archived- and enriched-company counts |
 
 Reads that scan companies (`list_companies`, `list_projects`, `list_shipments`,
@@ -53,12 +53,13 @@ it via `set_enrichment`. The store never talks to Outlook for reads itself.
 | `update_company` | `company_id`, `fields` | display_name, role, domains, locations |
 | `create_project` | `fields` | requires unique `project_no` + existing `company_id` |
 | `create_shipment` | `project_no`, `fields` | `shipment_id` auto-derived `<project_no>-L<n>`; defaults stage=Ordered |
-| `create_company` | `fields` | add a customer or vendor; requires `display_name`, `role` defaults customer; `company_id` derived from name unless supplied, must be unique |
+| `create_company` | `fields` | add a customer, vendor or lead; requires `display_name`, `role` defaults customer; `company_id` derived from name unless supplied, must be unique |
 | `create_vendor` | `fields` | add a vendor: creates/reuses the company (role=vendor) + a vendor detail record (rep, email, phone, offerings, PO/invoice routing) |
 | `update_vendor` | `company_id`, `fields` | edit vendor detail |
 | `create_invoice` | `company_id`, `fields` | add a client invoice that never came through the tracker workbook. `invoice_no` required and unique for that customer; a supplied `project_no` must name a live (non-archived) project; `payment_status` defaults to `open`. `payment_status_raw`/`sheet_row` are importer provenance and cannot be set. |
 | `update_invoice` | `company_id`, `invoice_no`, `fields` | edit an invoice / customer order: `payment_status`, `pay_date`, `payment_notes`, `client_po_raw`, `due_on`, and (v0.1.26+) `invoice_date`, `project_no`. Matched by (company_id, invoice_no) — invoice numbers aren't guaranteed unique across companies. A `project_no` must name a live project. The invoice's own number is changed with `rename_invoice`. `payment_status_raw`/`sheet_row` stay locked — they record what the source workbook said. |
 | `rename_project` | `old_project_no`, `new_project_no` | change a project's number/key, cascading the update to every shipment (`project_no`/`all_project_nos`) and invoice (`project_no`) that references it — atomic, one write-locked operation. Fails if the new number is empty or already used by a different project. |
+| `convert_lead` | `company_id` | promote a lead to a customer (role lead -> customer); everything already recorded against it is kept |
 | `archive_company` | `company_id` | **soft-delete** a customer/vendor — hidden from the CRM, nothing destroyed; its projects/contacts/shipments/invoices are preserved |
 | `restore_company` | `company_id` | un-archive a previously deleted customer/vendor, bringing it and its records back |
 | `archive_project` | `project_no` | **soft-delete** a single project within a customer record — hidden from the CRM (`get_company`, `list_projects`, `list_shipments`, `list_invoices`), along with any shipment/invoice linked to it (`project_no`/`all_project_nos`); nothing destroyed |

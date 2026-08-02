@@ -385,18 +385,26 @@ function reindex(){
 }
 const money = (n)=> (n==null||isNaN(n))?'—':'$'+Number(n).toLocaleString(undefined,{maximumFractionDigits:0});
 const pct = (n)=> (n==null||isNaN(n))?'—':(Number(n)*100).toFixed(0)+'%';
-// Due date for an invoice: the live server already computes and sends
-// effective_due_on (due_on override, else invoice_date + Net 30) -- this is
-// only a fallback for embedded/demo mode, where the bootstrap data is the
-// raw stored record with no server-side enrichment.
+// Due date for an invoice: the live server computes and sends
+// effective_due_on (due_on override, else invoice_date + Net 30). The fallback
+// below only runs for embedded/demo mode, where the bootstrap data is the raw
+// stored record with no server-side enrichment.
+//
+// It deliberately mirrors the server's _parse_date_loose rather than using
+// `new Date(...)`, which is far more permissive: it accepted "March 14, 2026"
+// and "2026/03/14" (which the server refuses to guess at, returning null) and
+// turned the Excel serial 45731 into 1970-01-31. The app then showed four
+// invoices in the Overdue bucket, one dated 1970, while "who owes us money" in
+// chat answered one -- the same store, two different answers about money.
 const NET_TERMS_DAYS = 30;
 function dueOn(inv){
   if (inv.effective_due_on) return inv.effective_due_on;
   if (inv.due_on) return inv.due_on;
-  if (!inv.invoice_date) return null;
-  const d = new Date(inv.invoice_date);
+  const iso = isoDate(inv.invoice_date);      // null unless a real calendar date
+  if (!iso) return null;
+  const d = new Date(iso + 'T00:00:00Z');
   if (isNaN(d)) return null;
-  d.setDate(d.getDate() + NET_TERMS_DAYS);
+  d.setUTCDate(d.getUTCDate() + NET_TERMS_DAYS);
   return d.toISOString().slice(0,10);
 }
 const esc = (s)=> (s==null?'':String(s)).replace(/[&<>"'`/]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;','/':'&#47;'}[c]));
@@ -1135,11 +1143,14 @@ async function saveEditContact(cid, origEmail, origName){
       splitOff = i >= 0;              // an edit that became a second record
     } else if(i>=0){ DATA.contacts[i]=rec; } else { DATA.contacts.push(rec); }
     reindex(); renderList();
-    if(!splitOff) closeDrawer();      // keep it open so the notice is readable
+    // ALWAYS close. Leaving it open kept the Save button bound to the original
+    // (origEmail, origName), so a second press matched the NEW email
+    // server-side and overwrote the original row in the local cache -- the
+    // store stayed right while the app showed the same person twice.
+    closeDrawer();
   });
-  // after doSave, which writes its own '✓ Saved' into the same element
-  if(splitOff) msgWarn('Saved as a NEW contact — the original is still there, '
-                     + 'because the name and the email both changed.');
+  if(splitOff) noticeToast('Saved as a NEW contact — the original is still '
+                         + 'there, because the name and the email both changed.');
 }
 
 function openNewShipment(pno){
@@ -1533,9 +1544,18 @@ async function doSave(tool, args, applyLocal){
   }
 }
 
-function msgWarn(text){
-  const el=document.getElementById('savedMsg');
-  if(el){ el.textContent='⚠ '+text; el.className='saved show errc'; }
+function noticeToast(text){
+  // NOT #savedMsg: doSave's finally schedules a 2.5s class removal on that same
+  // element, so a message written after doSave returns was silently faded out.
+  // This is the same surface draftReady uses, and it persists until dismissed.
+  const el = document.getElementById('noticeToast') || (()=>{
+    const d = document.createElement('div');
+    d.id = 'noticeToast'; d.className = 'mvp live';
+    d.style.cssText = 'bottom:52px;left:12px;max-width:420px;line-height:1.5';
+    document.body.appendChild(d); return d;
+  })();
+  el.textContent = '⚠ ' + text + '  (click to dismiss)';
+  el.onclick = ()=>{ el.remove(); };
 }
 function closeDrawer(){document.getElementById('drawer').classList.remove('open');}
 

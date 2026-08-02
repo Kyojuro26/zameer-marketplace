@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from typing import Optional
 from pathlib import Path
 
 def _launch_log(msg):
@@ -530,6 +531,30 @@ def _invoice_key(invoices, company_id, wanted):
                              if i.get("company_id") == company_id})
 
 
+def _one_project(projects, key, what):
+    """The single project answering to `key`, or None. Refuses ambiguity.
+
+    A legacy store can hold two records under one project_no. Every path that
+    used to take target[0] picked an ARBITRARY one -- and rename_project then
+    cascaded on the shared key, moving the LIVE project's invoices and
+    shipments onto whichever twin it happened to rename. An operator following
+    the ambiguity error, doing exactly what it said, ended up with a live
+    receivable permanently attached to an archived project: still invisible,
+    but now looking resolved. update_invoice and rename_invoice already refuse
+    an ambiguous invoice number; this is the project-side equivalent.
+    """
+    matches = [p for p in projects if _key(p.get("project_no")) == key]
+    if len(matches) > 1:
+        raise StoreError(
+            f"{len(matches)} projects share the number '{key}' "
+            f"(archived: {[bool(m.get('archived')) for m in matches]}). "
+            f"{what} would act on an arbitrary one, and any renumber would "
+            f"drag the other's invoices and shipments with it. This needs the "
+            f"duplicate resolved in the store directly -- no tool here can "
+            f"tell the two apart.")
+    return matches[0] if matches else None
+
+
 def _live_project(pno):
     """The project a link may point at, or None.
 
@@ -552,14 +577,8 @@ def _live_project(pno):
     key = _resolve(pno, _project_keys(projects))
     if not key:
         return None
-    matches = [p for p in projects if _key(p.get("project_no")) == key]
-    if len(matches) > 1:
-        raise StoreError(
-            f"{len(matches)} projects share the number '{key}' "
-            f"(archived: {[bool(m.get('archived')) for m in matches]}). "
-            f"Linking to it would create a record that is hidden by the "
-            f"archived twin -- resolve the duplicate before linking.")
-    return matches[0] if matches and not matches[0].get("archived") else None
+    hit = _one_project(projects, key, "Linking to it")
+    return hit if hit and not hit.get("archived") else None
 
 
 def _same_invoice(rec, company_id, invoice_key):
@@ -588,6 +607,21 @@ def _require_company(company_id):
 def _archived_ids():
     """Set of company_ids currently archived (soft-deleted)."""
     return {c["company_id"] for c in STORE.load("companies") if c.get("archived")}
+
+
+def _shipment_hidden(s, arch_pnos):
+    """True when a shipment should be hidden because its project is archived.
+
+    Hidden only when EVERY project it is linked to is archived. The test used
+    to be "any" (a set intersection), which was right while a leg could only
+    have one project -- but reassign_shipment's also_project_nos can now write
+    several, and then archiving a SECONDARY project made the leg vanish from
+    the customer page and the global list while its primary project was still
+    live and still showed it. Deleting one deal must not hide a leg that
+    another live deal still owns.
+    """
+    nos = _shipment_project_nos(s)
+    return bool(nos) and nos <= arch_pnos
 
 
 def _archived_project_nos():
@@ -716,7 +750,7 @@ def get_company(ref: str) -> dict:
     arch_pnos = _archived_project_nos()
     shipments = [x for x in STORE.load("shipments")
                  if x["company_id"] == cid
-                 and not (_shipment_project_nos(x) & arch_pnos)]
+                 and not _shipment_hidden(x, arch_pnos)]
     invoices = [x for x in STORE.load("invoices")
                 if x.get("company_id") == cid
                 and _key(x.get("project_no")) not in arch_pnos]
@@ -754,7 +788,8 @@ def get_project(project_no: str) -> dict:
     """Project card with its shipments, company, and contacts."""
     projects = STORE.load("projects")
     want = _resolve(project_no, _project_keys(projects))
-    pr = [p for p in projects if _key(p.get("project_no")) == want] if want else []
+    _hit = _one_project(projects, want, "Opening it") if want else None
+    pr = [_hit] if _hit else []
     if not pr:
         return _err(f"project '{project_no}' not found")
     p = pr[0]
@@ -807,7 +842,7 @@ def list_shipments(stage: str = None, company: str = None, vendor_po: str = None
         arch = _archived_ids()
         arch_pnos = _archived_project_nos()
         out = [s for s in out if s.get("company_id") not in arch
-               and not (_shipment_project_nos(s) & arch_pnos)]
+               and not _shipment_hidden(s, arch_pnos)]
     if stage:
         out = [s for s in out if s.get("stage") == stage]
     if company:
@@ -921,8 +956,8 @@ def update_project(project_no: str, fields: dict) -> dict:
                 _require_company(fields["company_id"])
             projects = STORE.load("projects")
             want = _resolve(project_no, _project_keys(projects))
-            target = [p for p in projects
-                      if _key(p.get("project_no")) == want] if want else []
+            hit = _one_project(projects, want, "Editing it") if want else None
+            target = [hit] if hit else []
             if not target:
                 return _err(f"project '{project_no}' not found")
             target[0].update(fields)
@@ -960,7 +995,8 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
                 # shipment in the store -- across all companies -- onto the new
                 # number. rename_invoice guards this; this one did not.
                 raise StoreError("old_project_no cannot be empty")
-            target = [p for p in projects if _key(p.get("project_no")) == old_pn]
+            hit = _one_project(projects, old_pn, "Renaming it")
+            target = [hit] if hit else []
             if not target:
                 return _err(f"project '{old_project_no}' not found")
             if new_pn != old_pn and any(_key(p.get("project_no")) == new_pn
@@ -1031,6 +1067,10 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
                     f"exists and keeps the leg's links consistent")
             _validate(fields, SHIPMENT_FIELDS - {"shipment_id"} - link_fields,
                       "shipment")
+            if "company_id" in fields:
+                # unvalidated, this parked the leg on a company that does not
+                # exist and it vanished from every customer page with ok:true
+                _require_company(fields["company_id"])
             shipments = STORE.load("shipments")
             target = [s for s in shipments if s.get("shipment_id") == shipment_id]
             if not target:
@@ -1044,14 +1084,22 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
 
 
 @mcp.tool()
-def reassign_shipment(shipment_id: str, new_project_no: str = None,
-                      also_project_nos: list = None) -> dict:
+def reassign_shipment(shipment_id: str, new_project_no: Optional[str] = None,
+                      also_project_nos: Optional[list] = None) -> dict:
     """Move a shipment to a different project number -- for when it was
     logged under the wrong deal. Unlike a plain update_shipment field edit,
     this validates the target project exists and keeps project_no,
     all_project_nos, and linked_to_project consistent with each other in one
     write. Pass new_project_no=None or "" to unlink the shipment entirely
     (vendor-PO-keyed, no project attached) instead of reassigning it.
+
+    Both optional args are typed Optional -- a bare `str = None` makes the
+    generated tool schema `{"type": "string"}`, so an explicit null was
+    rejected by argument validation BEFORE this function ran, as a raw
+    ToolError rather than {ok:false}. The visual app's unlink sends exactly
+    that null, and this release removed the update_shipment workaround, so
+    unlinking a leg was impossible from the app while three separate docs told
+    the operator to do it that way.
 
     also_project_nos covers the one leg shape the importer can produce that a
     single new_project_no cannot express: a leg that genuinely serves several
@@ -1077,10 +1125,16 @@ def reassign_shipment(shipment_id: str, new_project_no: str = None,
                                      f"been deleted -- a shipment linked to it "
                                      f"would not appear anywhere")
             extra = []
-            for n in _as_list(also_project_nos):
-                k = _resolve(n, _project_keys()) or None
+            _pkeys = _project_keys()          # hoisted: this reloaded
+            for n in _as_list(also_project_nos):   # projects.json per element
+                k = _resolve(n, _pkeys) or None
                 if not k:
-                    continue
+                    # refuse rather than drop: silently discarding an entry
+                    # returned ok:true with fewer links than the caller asked
+                    # for, and nothing said so.
+                    raise StoreError(f"also_project_nos contains an empty or "
+                                     f"unusable entry ({n!r}) -- list only "
+                                     f"real project numbers")
                 if not _live_project(k):
                     raise StoreError(f"project '{k}' not found, or has been "
                                      f"deleted -- a shipment linked to it "
@@ -1092,6 +1146,16 @@ def reassign_shipment(shipment_id: str, new_project_no: str = None,
                                  "the primary project cannot be empty while "
                                  "the leg is linked to others")
             old_pn = target[0].get("project_no")
+            # Carry the customer with the leg. create_shipment forces identity
+            # from the project (same release); this did not, so moving a leg to
+            # another company's deal left it listed under the OLD customer and
+            # invisible on the new one -- while the project page showed it
+            # labelled with the wrong client name.
+            if new_pn:
+                _pr = _live_project(new_pn)
+                if _pr:
+                    target[0]["company_id"] = _pr["company_id"]
+                    target[0]["client_name"] = _pr.get("company_name")
             target[0]["project_no"] = new_pn
             target[0]["all_project_nos"] = ([new_pn] + extra) if new_pn else []
             target[0]["linked_to_project"] = bool(new_pn)
@@ -1642,8 +1706,9 @@ def _set_project_archived(project_no: str, archived: bool) -> dict:
         with STORE.write_lock():
             projects = STORE.load("projects")
             want = _resolve(project_no, _project_keys(projects))
-            target = [p for p in projects
-                      if _key(p.get("project_no")) == want] if want else []
+            hit = (_one_project(projects, want, "Archiving or restoring it")
+                   if want else None)
+            target = [hit] if hit else []
             if not target:
                 return _err(f"project '{project_no}' not found")
             target[0]["archived"] = archived
