@@ -430,13 +430,6 @@ def _canon(v):
     return k[:-2] if k.endswith(".0") and k[:-2].lstrip("-").isdigit() else k
 
 
-# The identifier fields _coerce_text canonicalizes on the way in. Deliberately
-# NOT every TEXT_FIELD: a date must keep whatever shape it arrived in (the
-# view's own sanitizer owns that), and client_po_raw/vendor_po_raw are raw
-# operator text where a trailing ".0" could be real.
-ID_FIELDS = {"project_no", "invoice_no"}
-
-
 def _coerce_text(fields):
     """Stringify numeric values in identifier/text/date fields, in place."""
     def num(x):
@@ -616,6 +609,11 @@ def _as_list(v):
     if isinstance(v, list):
         return v
     if v is None or isinstance(v, bool) or v == "":
+        return []
+    if v == 0:
+        # not [0]: a truthy list here suppressed the project_no fallback, and
+        # the `if n` filter downstream then dropped the 0 anyway, so the leg
+        # vanished from its own project.
         return []
     return [v]
 
@@ -1351,6 +1349,11 @@ def update_invoice(company_id: str, invoice_no: str, fields: dict) -> dict:
                 # made an unchanged ".0" link read as a change -- so the
                 # liveness check fired on a project the operator never
                 # touched and refused to mark the invoice paid.
+                if isinstance(fields["project_no"], bool):
+                    # _key(True) is "", which silently UNLINKED the invoice
+                    # from its project and reported ok:true.
+                    raise StoreError(
+                        "project_no must be a number or text, not a boolean")
                 _raw_pno = _key(fields["project_no"])
                 _pno = _resolve(fields["project_no"], _project_keys())
             invoices = STORE.load("invoices")

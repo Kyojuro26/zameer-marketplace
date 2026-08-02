@@ -642,7 +642,12 @@ function enrichmentSection(id){
   // arr(): set_enrichment validates field NAMES but never types, so a
   // string here made th.slice(...).map throw inside renderMain -- which
   // doSave re-runs after every save, blanking the whole detail pane.
-  const th = arr(e.threads);
+  // .filter(Boolean): set_enrichment validates field NAMES, never types, so
+  // a null member is storable. It threw inside renderMain, which left the
+  // previously-selected company's pane on screen under the new company's
+  // name, and made doSave report a save that had actually persisted as a
+  // failure.
+  const th = arr(e.threads).filter(Boolean);
   if (th.length){
     h += `<table><thead><tr><th>Recent thread</th><th>With</th><th>Date</th><th></th></tr></thead><tbody>` +
       th.slice(0,5).map(t=>`<tr><td>${t.webLink?`<a href="${esc(safeUrl(t.webLink))}" target="_blank" rel="noopener">${esc(t.subject||'(no subject)')}</a>`:esc(t.subject||'(no subject)')}</td>
@@ -651,7 +656,7 @@ function enrichmentSection(id){
   } else {
     h += `<div class="muted">No recent email threads.</div>`;
   }
-  const mt = arr(e.meetings);
+  const mt = arr(e.meetings).filter(Boolean);
   if (mt.length){
     h += `<div style="margin-top:8px"><b style="font-size:12px">Meetings:</b> ` +
       mt.slice(0,3).map(m=>`${esc(m.subject||'meeting')} (${esc(String(m.date||'').slice(0,10))})`).join(' · ') + `</div>`;
@@ -900,7 +905,10 @@ async function saveProject(pno){
     client_po_no: document.getElementById('f_cpo').value.trim() || null,
     invoice_no: document.getElementById('f_inv').value.trim() || null,
     po_flag: document.getElementById('f_poflag').checked,
-    status: document.getElementById('f_status').value,
+    // || null: a project the tracker left without a status renders a blank
+    // option (opts() no longer fabricates 'won'), and "" is refused by the
+    // server for the WHOLE save. null is accepted and means 'still unset'.
+    status: document.getElementById('f_status').value || null,
     collection_status: document.getElementById('f_coll').value || null,
     notes: document.getElementById('f_notes').value,
     owner: document.getElementById('f_owner').value.split(',').map(s=>s.trim()).filter(Boolean),
@@ -1461,12 +1469,16 @@ async function saveShipment(sid){
   }
   const fields = {
     vendor_po_raw: document.getElementById('s_po').value.trim() || null,
-    stage: document.getElementById('s_stage').value,
     // dates contributed only when actually changed -- advancing a stage must
     // not null a tracker-format ship_date. Same mechanism as the invoice drawer.
-
     open_orders_notes: document.getElementById('s_notes').value.trim() || null,
   };
+  // stage is OMITTED when blank rather than sent as "". A leg stored with no
+  // stage renders a blank option, and the server rejects both "" and null for
+  // stage -- which would refuse the whole save (vendor PO, notes, dates) over
+  // a field the operator never touched.
+  const stageNow = document.getElementById('s_stage').value;
+  if(stageNow) fields.stage = stageNow;
   dateIfChanged('s_date', fields, 'ship_date');
   dateIfChanged('s_start', fields, 'start_date');
   dateIfChanged('s_eta', fields, 'eta');
