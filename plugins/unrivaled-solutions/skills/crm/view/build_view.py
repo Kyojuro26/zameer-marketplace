@@ -684,7 +684,11 @@ function isoDate(v){
   else {
     const us = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);   // M/D/YYYY, M/D/YY
     if(!us) return null;
-    mo=+us[1]; d=+us[2]; y=+(us[3].length===2 ? '20'+us[3] : us[3]);
+    // pivot at 70: a 2-digit year is only ever a recent tracker date or a
+    // legacy 19xx one. Mapping every one to the 2000s displayed '12/31/99'
+    // as 2099 -- a century out, and it sorts to the wrong end.
+    mo=+us[1]; d=+us[2];
+    y = us[3].length===2 ? (+us[3] >= 70 ? 1900 + +us[3] : 2000 + +us[3]) : +us[3];
   }
   // Shape is not validity. "9/31/2025", "2/30/2026" and "2026-02-29" (2026 is
   // not a leap year) all match the patterns above and all produce a string an
@@ -1116,13 +1120,26 @@ async function saveEditContact(cid, origEmail, origName){
   } else {
     dateIfChanged('e_c_lastact', fields, 'last_action');
   }
+  let splitOff = false;
   await doSave('upsert_contact', {fields}, (r)=>{
     const rec=r.contact||fields;
     const i=DATA.contacts.findIndex(x=>x.company_id===cid &&
       ((origEmail && x.email===origEmail) || (!origEmail && x.name===origName)));
-    if(i>=0) DATA.contacts[i]=rec; else DATA.contacts.push(rec);
-    reindex(); renderList(); closeDrawer();
+    // Honour the server's own verdict. upsert_contact matches on email, else on
+    // (company_id, name) -- change BOTH and it creates a second contact and
+    // leaves the original untouched. Overwriting the original locally showed a
+    // clean rename while the store held two people, and the duplicate only
+    // surfaced on the next full refresh.
+    if(r.op === 'create'){
+      DATA.contacts.push(rec);
+      splitOff = i >= 0;              // an edit that became a second record
+    } else if(i>=0){ DATA.contacts[i]=rec; } else { DATA.contacts.push(rec); }
+    reindex(); renderList();
+    if(!splitOff) closeDrawer();      // keep it open so the notice is readable
   });
+  // after doSave, which writes its own '✓ Saved' into the same element
+  if(splitOff) msgWarn('Saved as a NEW contact — the original is still there, '
+                     + 'because the name and the email both changed.');
 }
 
 function openNewShipment(pno){
@@ -1516,6 +1533,10 @@ async function doSave(tool, args, applyLocal){
   }
 }
 
+function msgWarn(text){
+  const el=document.getElementById('savedMsg');
+  if(el){ el.textContent='⚠ '+text; el.className='saved show errc'; }
+}
 function closeDrawer(){document.getElementById('drawer').classList.remove('open');}
 
 function draftReady(draft, headline){

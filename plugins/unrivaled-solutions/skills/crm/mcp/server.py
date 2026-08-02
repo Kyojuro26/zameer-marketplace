@@ -539,15 +539,27 @@ def _live_project(pno):
     writes a record that is invisible everywhere while returning ok:true.
     That is exactly the outcome the link guards exist to prevent, so an
     archived project is NOT a valid link target.
+
+    An AMBIGUOUS key is refused too. A legacy store can hold two records under
+    one project_no, one archived and one live: this used to return the live one
+    (so the link guard passed) while _archived_project_nos still contained the
+    key (so every default read hid the record anyway). The result was a
+    receivable created with ok:true that was invisible the moment it was
+    written. update_invoice and rename_invoice already refuse an ambiguous
+    invoice number for the same reason; this is the project-side equivalent.
     """
     projects = STORE.load("projects")
     key = _resolve(pno, _project_keys(projects))
     if not key:
         return None
-    for p in projects:
-        if _key(p.get("project_no")) == key and not p.get("archived"):
-            return p
-    return None
+    matches = [p for p in projects if _key(p.get("project_no")) == key]
+    if len(matches) > 1:
+        raise StoreError(
+            f"{len(matches)} projects share the number '{key}' "
+            f"(archived: {[bool(m.get('archived')) for m in matches]}). "
+            f"Linking to it would create a record that is hidden by the "
+            f"archived twin -- resolve the duplicate before linking.")
+    return matches[0] if matches and not matches[0].get("archived") else None
 
 
 def _same_invoice(rec, company_id, invoice_key):
@@ -1032,13 +1044,21 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
 
 
 @mcp.tool()
-def reassign_shipment(shipment_id: str, new_project_no: str = None) -> dict:
+def reassign_shipment(shipment_id: str, new_project_no: str = None,
+                      also_project_nos: list = None) -> dict:
     """Move a shipment to a different project number -- for when it was
     logged under the wrong deal. Unlike a plain update_shipment field edit,
     this validates the target project exists and keeps project_no,
     all_project_nos, and linked_to_project consistent with each other in one
     write. Pass new_project_no=None or "" to unlink the shipment entirely
-    (vendor-PO-keyed, no project attached) instead of reassigning it."""
+    (vendor-PO-keyed, no project attached) instead of reassigning it.
+
+    also_project_nos covers the one leg shape the importer can produce that a
+    single new_project_no cannot express: a leg that genuinely serves several
+    projects (all_project_nos with more than one entry). Every number listed
+    must name a live project, and new_project_no stays the primary. Without
+    this there was no tool left that could restore a multi-project link, since
+    update_shipment refuses the link fields outright."""
     try:
         with STORE.write_lock():
             shipments = STORE.load("shipments")
@@ -1056,13 +1076,29 @@ def reassign_shipment(shipment_id: str, new_project_no: str = None) -> dict:
                     raise StoreError(f"project '{new_pn}' not found, or has "
                                      f"been deleted -- a shipment linked to it "
                                      f"would not appear anywhere")
+            extra = []
+            for n in _as_list(also_project_nos):
+                k = _resolve(n, _project_keys()) or None
+                if not k:
+                    continue
+                if not _live_project(k):
+                    raise StoreError(f"project '{k}' not found, or has been "
+                                     f"deleted -- a shipment linked to it "
+                                     f"would not appear anywhere")
+                if k != new_pn and k not in extra:
+                    extra.append(k)
+            if extra and not new_pn:
+                raise StoreError("also_project_nos needs a new_project_no -- "
+                                 "the primary project cannot be empty while "
+                                 "the leg is linked to others")
             old_pn = target[0].get("project_no")
             target[0]["project_no"] = new_pn
-            target[0]["all_project_nos"] = [new_pn] if new_pn else []
+            target[0]["all_project_nos"] = ([new_pn] + extra) if new_pn else []
             target[0]["linked_to_project"] = bool(new_pn)
             STORE.save("shipments", shipments)
             STORE.log("reassign", "shipment", shipment_id,
-                      {"old_project_no": old_pn, "new_project_no": new_pn})
+                      {"old_project_no": old_pn, "new_project_no": new_pn,
+                       "also_project_nos": extra})
             return {"ok": True, "interface_version": VERSION, "shipment": target[0]}
     except StoreError as e:
         return _err(e)
@@ -1401,7 +1437,12 @@ def update_invoice(company_id: str, invoice_no: str, fields: dict) -> dict:
             STORE.save("invoices", invoices)
             STORE.log("update", "invoice",
                       f"{company_id}:{inv_key}", fields)
-            return {"ok": True, "interface_version": VERSION, "invoice": target[0]}
+            # _with_due_on: the view replaces its local record with this
+            # response, so returning the undecorated record dropped
+            # effective_due_on and an overdue invoice fell out of the
+            # Overdue bucket until the next full refresh.
+            return {"ok": True, "interface_version": VERSION,
+                    "invoice": _with_due_on([target[0]])[0]}
     except StoreError as e:
         return _err(e)
 
@@ -1451,7 +1492,8 @@ def create_invoice(company_id: str, fields: dict) -> dict:
             invoices.append(record)
             STORE.save("invoices", invoices)
             STORE.log("create", "invoice", f"{company_id}:{inv_no}", record)
-            return {"ok": True, "interface_version": VERSION, "invoice": record}
+            return {"ok": True, "interface_version": VERSION,
+                    "invoice": _with_due_on([record])[0]}
     except StoreError as e:
         return _err(e)
 
@@ -1515,7 +1557,8 @@ def rename_invoice(company_id: str, old_invoice_no: str, new_invoice_no: str) ->
 
             STORE.log("rename", "invoice", f"{company_id}:{old_no}",
                       {"new_invoice_no": new_no, "shipments_updated": touched})
-            return {"ok": True, "interface_version": VERSION, "invoice": target[0],
+            return {"ok": True, "interface_version": VERSION,
+                    "invoice": _with_due_on([target[0]])[0],
                     "shipments_updated": touched}
     except StoreError as e:
         return _err(e)

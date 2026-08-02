@@ -46,7 +46,9 @@ it via `set_enrichment`. The store never talks to Outlook for reads itself.
 | Tool | Args | Notes |
 |---|---|---|
 | `update_project` | `project_no`, `fields` | status/owner/revenue/collection/notes…; enums enforced |
-| `update_shipment` | `shipment_id`, `fields` | advance `stage`; set `ship_date`/`eta` |
+| `update_shipment` | `shipment_id`, `fields` | advance `stage`; set `ship_date`/`eta`/notes/vendor PO. **Cannot re-link the leg** — `project_no`, `all_project_nos` and `linked_to_project` are refused here; use `reassign_shipment`, which validates the target project is live and keeps the three consistent. |
+| `reassign_shipment` | `shipment_id`, `new_project_no`, `also_project_nos` | move a leg to another project, or pass `new_project_no=None`/`""` to unlink it entirely. `also_project_nos` sets the secondary links for a leg that genuinely serves several projects; every number must name a live project. |
+| `rename_invoice` | `company_id`, `old_invoice_no`, `new_invoice_no` | change an invoice's own number, cascading to any shipment leg carrying it. Refused if the new number is empty or already used by another invoice for the same company, **or if two invoices already share the old number** — it cannot tell them apart, and renaming one would drag the other's legs along. |
 | `upsert_contact` | `fields` | match by email, else (company_id, name); company must exist |
 | `update_company` | `company_id`, `fields` | display_name, role, domains, locations |
 | `create_project` | `fields` | requires unique `project_no` + existing `company_id` |

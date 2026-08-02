@@ -77,7 +77,10 @@ def st(v):
         return str(v)
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
-    return re.sub(r"\.0$", "", str(v)) if isinstance(v, (int, float)) else str(v)
+    # .strip() to match server._key(), which strips: a padded " 7001 " is
+    # logged as "acme:7001", so an unstripped lookup key never matched it.
+    return (re.sub(r"\.0$", "", str(v)) if isinstance(v, (int, float))
+            else str(v)).strip()
 
 
 def load(store, name, required):
@@ -145,7 +148,7 @@ def load_changelog(store):
     have been reported as "edited after import". Fixing either alone turns a
     silent false negative into a loud false positive; both are fixed together.
     """
-    edited = set()
+    edited, renamed = set(), {}
     path = os.path.join(store, "changelog.jsonl")
     if not os.path.exists(path):
         return edited
@@ -160,13 +163,37 @@ def load_changelog(store):
                 continue                       # torn tail line; skip, not fatal
             if not isinstance(e, dict):
                 continue
-            if e.get("entity") != "invoice" or e.get("op") != "update":
+            if e.get("entity") != "invoice":
                 continue
             fields = e.get("fields")
+            if e.get("op") == "rename" and isinstance(fields, dict):
+                # An edit is recorded under the number the invoice had AT THE
+                # TIME. rename_invoice then moves it, and a later lookup by the
+                # current number missed the edit entirely -- so an invoice whose
+                # evidence had been overwritten was reported CLEAN instead of
+                # UNVERIFIABLE. Chain renames so the edit follows the record.
+                key = st(e.get("key"))                       # "<company>:<old>"
+                new_no = st(fields.get("new_invoice_no")).strip()
+                cid = key.rsplit(":", 1)[0] if ":" in key else ""
+                if new_no and cid:
+                    renamed[key] = f"{cid}:{new_no}"
+                continue
+            if e.get("op") != "update":
+                continue
             if isinstance(fields, dict) and "payment_notes" in fields:
                 # Store.log writes key as the joined string "<company>:<invoice>".
                 edited.add(st(e.get("key")))
-    return edited
+    # Walk each edited key forward through every rename that followed it. The
+    # loop is bounded by the rename count, so a cycle in a corrupt log cannot
+    # hang the audit.
+    out = set()
+    for k in edited:
+        seen = {k}
+        while k in renamed and renamed[k] not in seen:
+            k = renamed[k]
+            seen.add(k)
+        out.add(k)
+    return out
 
 
 # --------------------------------------------------------------- replay: sites
