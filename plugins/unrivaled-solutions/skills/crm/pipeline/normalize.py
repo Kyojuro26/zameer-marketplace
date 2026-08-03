@@ -873,19 +873,39 @@ def run(workbook, outdir, force=False, mode="merge"):
 
 
 def _store_write_lock(outdir):
-    """server.Store's write lock, or a no-op if server.py is not importable."""
+    """server.Store's write lock, taken WITHOUT constructing a Store.
+
+    Store.__init__ has side effects -- it creates missing entity files, writes
+    .store-manifest.json and sweeps temp files -- so merely asking for a lock
+    used to mutate the store before the import had decided anything, and
+    populate a full empty store in a mistyped output directory.
+
+    Worse, it can RAISE: the missing-file guard refuses to open a store whose
+    changelog proves a file existed. Wrapped in a bare `except Exception ->
+    nullcontext`, that refusal was swallowed and the import then ran with NO
+    LOCK AT ALL -- silently recreating the race this function exists to close,
+    while bypassing a data-loss guard. __new__ takes the lock with none of
+    that: write_lock only ever reads self.root.
+    """
     import contextlib
     import importlib.util
     import os as _os
+    p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                      "..", "mcp", "server.py")
     try:
-        p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                          "..", "mcp", "server.py")
         spec = importlib.util.spec_from_file_location("crm_server_for_lock", p)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod.Store(pathlib.Path(outdir)).write_lock()
-    except Exception:                                 # noqa: BLE001
+    except Exception as e:                            # noqa: BLE001
+        # genuinely no server module (running this file outside the plugin).
+        # Say so -- a silently unlocked import is how concurrent edits vanish.
+        print(f"WARNING: could not load the store lock from {p} ({e}). "
+              f"Proceeding WITHOUT a lock -- close the CRM before importing.",
+              file=sys.stderr)
         return contextlib.nullcontext()
+    st = mod.Store.__new__(mod.Store)          # no __init__: no side effects
+    st.root = pathlib.Path(outdir)
+    return st.write_lock()
 
 
 def _finish(out, outdir, mode, workbook, companies, contacts, projects,

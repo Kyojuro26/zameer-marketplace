@@ -211,6 +211,57 @@ def run(server, crm_dir=None):
             got["payment_status"] == "paid",
             "reverted to open -- _log_key and Store.log disagree on numbers")
 
+    r.section("the importer inherits the store's own safety guards")
+    # Taking the lock must not MUTATE the store, and the import must refuse a
+    # store missing a file its changelog proves existed -- otherwise the
+    # importer becomes the way around the server's data-loss guard.
+    import os as _os, tempfile as _tf, shutil as _sh, importlib.util as _il
+    nrm_p = crm / "pipeline" / "normalize.py"
+    if nrm_p.exists():
+        spec = _il.spec_from_file_location("_nrm_lock", nrm_p)
+        nrm = _il.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(nrm)
+        except Exception:                              # noqa: BLE001
+            nrm = None
+        if nrm and hasattr(nrm, "_store_write_lock"):
+            d = Path(_tf.mkdtemp(prefix="crmlock-"))
+            with nrm._store_write_lock(str(d)):
+                pass
+            left = [f for f in _os.listdir(d) if not f.startswith(".store.lock")]
+            r.check("acquiring the lock does not create store files",
+                    not left,
+                    f"created {left} -- Store.__init__ side effects ran, which "
+                    f"populates a full empty store in a mistyped path")
+            _sh.rmtree(d, ignore_errors=True)
+
+    d2 = Path(_tf.mkdtemp(prefix="crmsync-"))
+    for e in ("companies", "contacts", "projects", "shipments", "vendors",
+              "needs_review"):
+        (d2 / f"{e}.json").write_text("[]")
+    (d2 / "companies.json").write_text(json.dumps(
+        [{"company_id": "acme", "display_name": "Ace", "role": "customer",
+          "archived": False}]))
+    (d2 / "changelog.jsonl").write_text(json.dumps(
+        {"op": "update", "entity": "invoice", "key": "acme:1",
+         "fields": {"payment_status": "paid"}}) + "\n")
+    wb4 = {"companies.json": [{"company_id": "acme", "display_name": "Ace",
+                               "role": "customer", "archived": False}],
+           "contacts.json": [], "vendors.json": [], "projects.json": [],
+           "shipments.json": [], "needs_review.json": [], "invoices.json": []}
+    try:
+        merge.merge_all(wb4, str(d2))
+        r.check("a store missing a file its changelog proves existed is refused",
+                False,
+                "imported anyway -- this is the OneDrive-not-synced case, and "
+                "the import would write over records that are not here yet")
+    except Exception as e:                             # noqa: BLE001
+        r.check("a store missing a file its changelog proves existed is refused",
+                True)
+        r.check("and the refusal explains the sync cause",
+                "synced" in str(e).lower(), str(e)[:80])
+    _sh.rmtree(d2, ignore_errors=True)
+
     r.section("duplicate keys are never collapsed")
     dup = dict(fresh)
     dup["projects.json"] = [{"project_no": "4600", "company_id": "acme",

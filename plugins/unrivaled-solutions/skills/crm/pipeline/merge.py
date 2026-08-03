@@ -172,6 +172,29 @@ def _renamed_key(entity, old_key, fields):
     return None
 
 
+def _entities_in_changelog(store_dir):
+    """Entity names appearing in changelog.jsonl -- evidence a file existed."""
+    seen = set()
+    path = os.path.join(store_dir, "changelog.jsonl")
+    try:
+        if not os.path.exists(path):
+            return seen
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(e, dict) and e.get("entity"):
+                    seen.add(e["entity"])
+    except OSError:
+        return set()
+    return seen
+
+
 def _log_key(fname, rec):
     """Rebuild the key Store.log would have written for this record."""
     if fname == "invoices.json":
@@ -190,6 +213,26 @@ def merge_all(fresh_files, store_dir):
 
     fresh_files: {"invoices.json": [...], ...} straight from normalize.run
     """
+    # An entity file that is ABSENT while the changelog proves it held records
+    # is the OneDrive-not-synced case. Merging would write the workbook's
+    # version of that entity over a file whose real contents are simply not
+    # here yet. The server refuses to start on this; the importer must refuse
+    # too, or it becomes the way around that guard.
+    missing_but_evidenced = []
+    ents = _entities_in_changelog(store_dir)
+    for fname, ent in (("invoices.json", "invoice"), ("projects.json", "project"),
+                       ("shipments.json", "shipment"), ("contacts.json", "contact"),
+                       ("companies.json", "company"), ("vendors.json", "vendor")):
+        if ent in ents and not os.path.exists(os.path.join(store_dir, fname)):
+            missing_but_evidenced.append(fname)
+    if missing_but_evidenced:
+        raise RuntimeError(
+            f"{missing_but_evidenced} are missing from the store, but its own "
+            f"changelog shows those records existed. Refusing to import -- if "
+            f"the store is on OneDrive the files may simply not have synced "
+            f"down yet, and importing now would write over records that are "
+            f"not here. Check the folder is fully synced, then re-run.")
+
     operator = load_operator_edits(store_dir)
     has_data = False
     for fname in KEYS:
