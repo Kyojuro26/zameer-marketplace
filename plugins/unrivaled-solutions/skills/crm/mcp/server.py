@@ -226,7 +226,11 @@ class Store:
                         f"OneDrive the file may simply not have synced down "
                         f"yet, and an empty one written here would replicate "
                         f"over the real data on every machine. Check the folder "
-                        f"is fully synced before restarting.")
+                        f"is fully synced before restarting. If the file is "
+                        f"genuinely gone and you have no backup, create it "
+                        f"containing [] by hand to start the CRM -- those "
+                        f"records will be missing, so restore from the backup "
+                        f"first if you can.")
                 safe_to_create = True
                 self._auto_created = list(missing)
             else:
@@ -280,7 +284,11 @@ class Store:
         try:
             if not p.exists():
                 return seen
-            with open(p, "r", encoding="utf-8") as f:
+            # errors="replace": PowerShell writes UTF-16 on this machine, and a
+            # conflicted-copy or half-synced changelog is exactly the accident
+            # that also loses an entity file. An undecodable log must not stop
+            # the CRM starting.
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -291,7 +299,7 @@ class Store:
                         continue
                     if isinstance(e, dict) and e.get("entity"):
                         seen.add(e["entity"])
-        except OSError:
+        except (OSError, ValueError):
             return set()
         return seen
 
@@ -326,7 +334,10 @@ class Store:
         """
         try:
             prior = self._manifest_read_raw()
-            warn = list(self._auto_created) or (prior or {}).get("auto_created") or []
+            # NOT carried forward from the prior manifest: repeated forever it
+            # became noise, and a real lost-file warning then looked identical
+            # to a benign schema upgrade. Only this boot's creations.
+            warn = list(self._auto_created)
             self._write(self.MANIFEST, {
                 "entity_files": sorted(f for f in ENTITY_FILES.values()
                                        if (self.root / f).exists()),

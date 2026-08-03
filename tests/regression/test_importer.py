@@ -28,11 +28,22 @@ UNPAID = [
     "paid deposit only, balance due 6/1", "paid, awaiting the rest",
     "paid? unsure", "will be paid net 60", "50% paid, balance due",
     "Never paid - write off", "paid - REVERSED",
+    # every one of these was written off by a previous version of this module.
+    # Three successive blacklists each shipped a gap at the NEXT spelling, which
+    # is why the implementation is now a whitelist -- see payment_words.py.
+    "Paid, $12,500 still outstanding", "Paid but balance outstanding",
+    "Paid 3/1, $500 still due", "Paid after installation sign-off",
+    "Part paid", "Paid before shipment", "Paid, balance $8,000",
+    "Paid - amount due 5000", "Paid; outstanding items to bill",
+    "Paid assuming the credit clears", "Paid less shipping",
+    "paid short", "Paid, would clear next week", "Paid pending credit note",
 ]
 PAID = [
     "Paid in full, balance $0", "paid - no balance due",
     "Paid, nothing outstanding", "Paid 6/1 check 8812", "paid in full",
     "PAID", "paid off", "Paid 5/2", "paid in full 3/14 ck 9912",
+    "Paid $12,500", "paid via wire 6/1", "Paid 6/1, thanks",
+    "PAID IN FULL", "paid ck #8812", "Paid 06/01/2026",
 ]
 NO_MENTION = ["Open", "awaiting payment", "unpaid", "", "net 30"]
 

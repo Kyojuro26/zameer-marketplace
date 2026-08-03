@@ -68,29 +68,56 @@ PAID_WRONG_PARTY_RE = re.compile(
     r"mfg|manufacturer|shipper)\b", re.IGNORECASE)
 
 
+# Tokens that CANNOT change what "paid" means: the payment itself, how it
+# arrived, when, and the phrases that confirm there is nothing left owing.
+# Everything here is deliberately narrow.
+_BENIGN = re.compile(
+    r"\bpaid\s+off\b|\bpaid\b|\bpd\b|\bin\s+full\b|\bfull\b|"
+    r"\bno\s+balance(?:\s+(?:due|owing|owed))?\b|\bzero\s+balance\b|"
+    r"\bbalance\s*(?:is\s*)?\$?\s*0(?:\.00)?\b|"
+    r"\bnothing\s+(?:outstanding|owed|owing|due)\b|"
+    r"\b(?:ck|chk|check|cheque|wire|ach|eft|cash|card|transfer|inv|invoice|"
+    r"ref|no|num|thanks|thx|ok|okay|done|closed|complete|received|recd|rec'?d|"
+    r"on|via|by|per|and|the|our|their|his|her|to|of\s+record)\b|"
+    r"\$?\s*[\d,]+(?:\.\d\d)?|"                       # amounts / numbers
+    r"\b\d{1,4}[-/]\d{1,2}(?:[-/]\d{1,4})?\b|"          # dates
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|"
+    r"[^\w\s]", re.IGNORECASE)
+
+
 def says_paid(text):
     """Did the source say this was PAID?
 
     True (paid), False (no mention), None (qualified -- do not guess).
 
-    ORDER MATTERS, and getting it wrong is expensive in both directions.
-    Reversal and wrong-party beat everything. Negation, futurity and doubt are
-    checked BEFORE any confirmation, because "not paid in full", "will be paid
-    in full" and "paid in full? confirm" all contain a confirmation phrase and
-    none of them means paid. A confirmation then overrules only a PARTIAL
-    signal, which is the case it exists for: "paid in full, balance $0" and
-    "paid - no balance due" are payments, not part-payments.
+    WHITELIST, not blacklist. Three successive attempts enumerated the wording
+    that DISQUALIFIES a payment, and each one shipped a money-losing gap at the
+    next spelling: "NOT PAID IN FULL", then "still owed", then "still
+    outstanding" / "balance $8,000" / "amount due 5000". Enumerating what can
+    go wrong in free text is not a winnable game.
+
+    So the test is inverted: strip the word "paid", the ways a payment arrives
+    (check/wire/date/amount) and the phrases that confirm nothing is owing --
+    all of which cannot change the meaning -- and if any substantive word
+    survives, the note is saying something MORE than "this was paid", and that
+    something has to be read by a person.
+
+    Errors therefore land on the flag, which is the recoverable side: a
+    needless flag costs one glance, a missed one leaves a receivable nobody
+    chases. The reversal and wrong-party rules stay as an explicit backstop
+    because those must flag even when the note is otherwise clean.
     """
     t = st_text(text)
     if not PAID_RE.search(t):
         return False
     if PAID_REVERSAL_RE.search(t) or PAID_WRONG_PARTY_RE.search(t):
         return None
-    if (PAID_NEGATION_RE.search(t) or PAID_FUTURE_RE.search(t)
-            or PAID_DOUBT_RE.search(t)):
+    # a percentage is ALWAYS substantive -- "paid 50%" is a part payment, and
+    # the punctuation strip below would otherwise erase the % and the digits
+    if re.search(r"\d{1,3}\s*%", t):
         return None
-    if PAID_CONFIRM_RE.search(t):
-        return True
-    if PAID_PARTIAL_RE.search(t):
+    residue = _BENIGN.sub(" ", t)
+    # anything left with letters in it is the operator telling us something
+    if re.search(r"[A-Za-z]{2,}", residue):
         return None
     return True
