@@ -143,4 +143,52 @@ def run(server):
     r.check("create_invoice stamps source='manual'",
             s.read("invoices")[0].get("source") == "manual")
 
+    r.section("a multi-file write commits fully or not at all")
+    # simulate the documented Windows failure: os.replace refusing one target
+    import os as _os
+    real_replace = _os.replace
+
+    def _fail_on(name):
+        def patched(src, dst):
+            if str(dst).endswith(name):
+                raise PermissionError(f"simulated lock on {name}")
+            return real_replace(src, dst)
+        return patched
+
+    s.reset(companies=[company()], projects=[project("4521")],
+            invoices=[invoice("9001", project_no="4521")],
+            shipments=[shipment()])
+    before = (s.raw("projects"), s.raw("invoices"), s.raw("shipments"))
+    _os.replace = _fail_on("shipments.json")
+    try:
+        res = s.call("rename_project", old_project_no="4521", new_project_no="4600")
+    finally:
+        _os.replace = real_replace
+    r.check("the failure is reported", res.get("ok") is False, str(res)[:80])
+    after = (s.raw("projects"), s.raw("invoices"), s.raw("shipments"))
+    r.check("NOTHING was committed -- the project was not renamed",
+            after[0] == before[0],
+            "projects.json committed while the cascade failed, so the invoice "
+            "now points at a project number that no longer exists")
+    r.check("and the invoice link is untouched", after[1] == before[1])
+    r.check("the store is still readable after the failed write",
+            s.call("get_project", project_no="4521").get("ok") is True)
+    r.check("and the advised retry now works",
+            s.call("rename_project", old_project_no="4521",
+                   new_project_no="4600").get("ok") is True)
+
+    r.section("create_vendor does not silently re-role an existing customer")
+    # company_id must equal _slug(display_name), or create_vendor derives a
+    # different id and never sees the existing customer at all
+    s.reset(companies=[company("ace-manufacturing", "Ace Manufacturing")],
+            invoices=[invoice("9001", "ace-manufacturing")])
+    res = s.call("create_vendor", fields={"display_name": "Ace Manufacturing",
+                                          "rep": "A Rep"})
+    r.check("it refuses rather than reclassifying the customer",
+            res.get("ok") is False, str(res)[:90])
+    r.check("the company is still a customer",
+            s.read("companies")[0]["role"] == "customer")
+    r.check("and still appears in the customers list",
+            s.call("list_companies", role="customer").get("count") == 1)
+
     return r

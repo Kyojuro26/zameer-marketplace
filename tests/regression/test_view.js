@@ -158,6 +158,26 @@ function run(crmDir) {
     proj && proj.args.fields.status !== '',
     proj && JSON.stringify(proj.args.fields.status));
 
+  // ---- KPI arithmetic ----------------------------------------------------
+  // nothing validates the TYPE of year or revenue, and `a + (p.revenue||0)` on
+  // a string CONCATENATES rather than adds
+  app.eval(`DATA.projects.push({company_id:'acme', project_no:'8001', status:'won',
+                                year:String(new Date().getFullYear()),
+                                revenue:'12000', archived:false});
+            DATA.projects.push({company_id:'acme', project_no:'8002', status:'won',
+                                year:new Date().getFullYear(),
+                                revenue:5000, archived:false});
+            reindex();`);
+  safe('kpis');
+  const kpiText = (app.el('kpis') || EMPTY).innerHTML;
+  const wonFigure = (/\$([0-9,]+)/.exec(kpiText.split('Won revenue')[0].split('<div class="n">').pop()) || [])[1];
+  r.check('a string-typed year is counted in the KPI, not silently dropped',
+    kpiText.includes('17,000'),
+    `Won revenue rendered as ${wonFigure} -- expected 17,000 (12000 + 5000)`);
+  r.check('and a string revenue is added, not concatenated',
+    !/\$1[0-9]{6,}/.test(kpiText),
+    'a string revenue concatenated into a nonsense total');
+
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;
 }

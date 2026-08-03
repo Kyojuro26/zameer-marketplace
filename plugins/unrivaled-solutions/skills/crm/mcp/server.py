@@ -158,6 +158,14 @@ class StoreError(Exception):
     pass
 
 
+def _unlink_quietly(path):
+    try:
+        if os.path.exists(path):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
 class Store:
     """Owns the JSON files. All mutation goes through save() (atomic) and log()."""
 
@@ -276,6 +284,122 @@ class Store:
     def save(self, entity, records):
         """Atomic write: temp file in the same dir, then os.replace."""
         self._write(ENTITY_FILES[entity], records)
+
+    def save_many(self, updates):
+        """Commit several entity files as one unit, or leave all of them alone.
+
+        The write lock is a mutex, not a transaction. Tools that touch more
+        than one file (rename_project writes projects, then shipments, then
+        invoices) used to commit them one at a time, so a failure on the second
+        left the first committed -- and _write's own docstring says a
+        PermissionError from OneDrive/Defender is the EXPECTED failure, not an
+        exotic one. The operator then saw "Change not written", which was
+        false; the retry it advised failed with a contradictory "not found";
+        the invoice pointed at a project number that no longer existed; and
+        nothing recorded the partial state because log() runs after every save.
+
+        This is not a journal -- it cannot survive the process dying between
+        two os.replace calls. It closes the far likelier failure: every temp is
+        written and fsynced BEFORE anything is replaced, so a full disk or a
+        serialization error commits nothing at all; and if a replace fails
+        partway, the files already replaced are restored from the bytes read
+        before the commit began.
+
+        updates: {entity_name: records}
+        """
+        names = {e: ENTITY_FILES[e] for e in updates}
+        # bytes as they stand now, so a partial commit can be undone
+        prior = {}
+        for e, fn in names.items():
+            p = self.root / fn
+            try:
+                prior[e] = p.read_bytes() if p.exists() else None
+            except OSError as ex:
+                raise StoreError(f"could not read {fn} before saving: {ex}")
+
+        # stage every file first; nothing is visible yet
+        staged = {}
+        try:
+            for e, fn in names.items():
+                staged[e] = self._stage(fn, updates[e])
+        except BaseException:
+            for t in staged.values():
+                _unlink_quietly(t)
+            raise
+
+        done = []
+        try:
+            for e, fn in names.items():
+                self._commit(staged[e], self.root / fn, fn)
+                done.append(e)
+        except BaseException:
+            # roll the committed ones back, then report BOTH what failed and
+            # whether the rollback itself worked -- a half-rolled-back store is
+            # worse than either outcome and must never be silent
+            restored, failed = [], []
+            for e in done:
+                fn, blob = names[e], prior[e]
+                try:
+                    if blob is None:
+                        _unlink_quietly(self.root / fn)
+                    else:
+                        t = self._stage_bytes(fn, blob)
+                        self._commit(t, self.root / fn, fn)
+                    restored.append(fn)
+                except Exception:                     # noqa: BLE001
+                    failed.append(fn)
+            for e in names:
+                if e not in done:
+                    _unlink_quietly(staged[e])
+            if failed:
+                _launch_log(f"PARTIAL WRITE: rolled back {restored}, "
+                            f"COULD NOT roll back {failed}")
+                raise StoreError(
+                    f"a multi-file save failed partway and {failed} could NOT "
+                    f"be restored. The store is inconsistent -- stop and check "
+                    f"{failed} against your backup before making further edits.")
+            raise
+
+    def _stage(self, filename, data):
+        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".~", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=1, ensure_ascii=False, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            _unlink_quietly(tmp)
+            raise
+        return tmp
+
+    def _stage_bytes(self, filename, blob):
+        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".~", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(blob)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            _unlink_quietly(tmp)
+            raise
+        return tmp
+
+    @staticmethod
+    def _commit(tmp, target, filename):
+        """os.replace with the Windows-lock retry ladder."""
+        last = None
+        for delay in (0, 0.15, 0.4, 0.8, 1.5):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(tmp, target)
+                return
+            except PermissionError as e:
+                last = e
+        _unlink_quietly(tmp)
+        raise StoreError(
+            f"could not save {filename}: the file is locked by another "
+            f"process (OneDrive/backup/antivirus). ({last})")
 
     def _write(self, filename, data):
         target = self.root / filename
@@ -936,7 +1060,10 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
     if owner:
         out = [p for p in out if owner in (p.get("owner") or [])]
     if year:
-        out = [p for p in out if p.get("year") == year]
+        # compare as text: nothing validates year's type, so a project can
+        # hold "2026" while the filter is passed 2026, and a strict == then
+        # silently dropped it from "what did we win this year"
+        out = [p for p in out if _key(p.get("year")) == _key(year)]
     if collection_status:
         out = [p for p in out
                if str(p.get("collection_status") or "").startswith(collection_status)]
@@ -1119,8 +1246,9 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
                                         for p in projects):
                 raise StoreError(f"project '{new_pn}' already exists")
             target[0]["project_no"] = new_pn
-            STORE.save("projects", projects)
-
+            # NOT saved yet -- collected and committed as one unit below, so a
+            # lock on shipments.json cannot leave the project renamed while its
+            # invoices still point at the old number.
             shipments = STORE.load("shipments")
             touched_shipments = 0
             for s in shipments:
@@ -1134,18 +1262,18 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
                                              for n in all_pnos]
                     changed = True
                 touched_shipments += 1 if changed else 0
-            if touched_shipments:
-                STORE.save("shipments", shipments)
-
             invoices = STORE.load("invoices")
             touched_invoices = 0
             for i in invoices:
                 if _key(i.get("project_no")) == old_pn:
                     i["project_no"] = new_pn
                     touched_invoices += 1
+            updates = {"projects": projects}
+            if touched_shipments:
+                updates["shipments"] = shipments
             if touched_invoices:
-                STORE.save("invoices", invoices)
-
+                updates["invoices"] = invoices
+            STORE.save_many(updates)
             STORE.log("rename", "project", old_pn,
                       {"new_project_no": new_pn, "shipments_updated": touched_shipments,
                        "invoices_updated": touched_invoices})
@@ -1286,8 +1414,12 @@ def reassign_shipment(shipment_id: str, new_project_no: Optional[str] = None,
 
 @mcp.tool()
 def upsert_contact(fields: dict) -> dict:
-    """Create or update a contact. Match key: email if present, else
-    (company_id, name). company_id must exist."""
+    """Create or update a contact.
+
+    Match key, ALWAYS scoped to the company: email if present, else name.
+    Matching on email store-wide meant an address another customer's contact
+    already had pulled that record onto this company and overwrote its details.
+    The company must exist and must not be archived."""
     try:
         with STORE.write_lock():
             _validate(fields, CONTACT_FIELDS, "contact")
@@ -1295,13 +1427,22 @@ def upsert_contact(fields: dict) -> dict:
                 raise StoreError("contact needs at least company_id and name")
             _require_company(fields["company_id"])
             contacts = STORE.load("contacts")
+            cid = fields["company_id"]
+            # Both match passes are scoped to the COMPANY. The email pass used
+            # to search every contact in the store, so upserting a contact with
+            # an address another customer's contact already had silently moved
+            # that record onto this company and overwrote its title and phone.
+            # normalize.py writes the literal placeholder "?" into the email
+            # column, so any two placeholder contacts collided outright.
+            email = _norm(fields.get("email"))
             match = None
-            if fields.get("email"):
+            if email and email != "?":
                 match = next((c for c in contacts
-                              if _norm(c.get("email")) == _norm(fields["email"])), None)
+                              if c.get("company_id") == cid
+                              and _norm(c.get("email")) == email), None)
             if match is None:
                 match = next((c for c in contacts
-                              if c["company_id"] == fields["company_id"]
+                              if c.get("company_id") == cid
                               and _norm(c.get("name")) == _norm(fields["name"])), None)
             if match:
                 match.update(fields)
@@ -1523,22 +1664,35 @@ def create_vendor(fields: dict) -> dict:
             if any(v["company_id"] == cid for v in vendors):
                 raise StoreError(f"vendor '{cid}' already exists")
             companies = STORE.load("companies")
-            comp = next((c for c in companies if c["company_id"] == cid), None)
+            comp = next((c for c in companies if c.get("company_id") == cid), None)
             if comp is None:
                 comp = {k: None for k in COMPANY_FIELDS}
                 comp.update({"company_id": cid, "display_name": name, "role": "vendor",
                              "domains": [], "locations": [], "archived": False})
                 companies.append(comp)
+            elif comp.get("role") == "customer":
+                # Silently re-roling an existing CUSTOMER dropped it out of the
+                # customers list and switched its whole detail pane to the
+                # vendor layout, while it kept every receivable it owned. A
+                # company that both buys and sells is real -- but that is a
+                # decision for the operator, not a side effect of adding a
+                # vendor with a name that happens to match.
+                raise StoreError(
+                    f"'{cid}' already exists as a CUSTOMER. Creating a vendor "
+                    f"here would move it out of your customers list while it "
+                    f"still owns its invoices. Use a different display_name, or "
+                    f"supply an explicit company_id for the vendor record.")
             else:
                 comp["role"] = "vendor"
-            STORE.save("companies", companies)
             record = {k: None for k in VENDOR_FIELDS}
-            record.update({"company_id": cid, "display_name": name, "archived": False,
-                           "po_routing_source": fields.get("po_routing_source") or "manual"})
             record.update(fields)
-            record["company_id"] = cid
+            record.update({"company_id": cid, "display_name": name, "archived": False,
+                           "archived_at": None,
+                           "po_routing_source": fields.get("po_routing_source") or "manual"})
             vendors.append(record)
-            STORE.save("vendors", vendors)
+            # both files or neither: separately, a lock on vendors.json left a
+            # company flipped to role=vendor with no vendor record behind it
+            STORE.save_many({"companies": companies, "vendors": vendors})
             STORE.log("create", "vendor", cid, {"display_name": name})
             return {"ok": True, "interface_version": VERSION, "vendor": record}
     except StoreError as e:
@@ -1755,8 +1909,6 @@ def rename_invoice(company_id: str, old_invoice_no: str, new_invoice_no: str) ->
                     for i in invoices):
                 raise StoreError(f"invoice '{new_no}' already exists for this company")
             target[0]["invoice_no"] = new_no
-            STORE.save("invoices", invoices)
-
             shipments = STORE.load("shipments")
             touched = 0
             for s in shipments:
@@ -1764,9 +1916,10 @@ def rename_invoice(company_id: str, old_invoice_no: str, new_invoice_no: str) ->
                         and _key(s.get("invoice_no")) == old_no):
                     s["invoice_no"] = new_no
                     touched += 1
+            updates = {"invoices": invoices}
             if touched:
-                STORE.save("shipments", shipments)
-
+                updates["shipments"] = shipments
+            STORE.save_many(updates)
             STORE.log("rename", "invoice", f"{company_id}:{old_no}",
                       {"new_invoice_no": new_no, "shipments_updated": touched})
             return {"ok": True, "interface_version": VERSION,
@@ -1789,14 +1942,19 @@ def _set_archived(company_id: str, archived: bool) -> dict:
             target[0]["archived"] = archived
             target[0]["archived_at"] = (
                 datetime.now(timezone.utc).isoformat() if archived else None)
-            STORE.save("companies", companies)
-            # mirror onto the vendor detail record if this company is a vendor
+            # mirror onto the vendor detail record if this company is a vendor.
+            # Committed together: separately, a lock on vendors.json left the
+            # company archived and its vendor record live, so get_vendor kept
+            # returning a company hidden everywhere else -- permanently, since
+            # nothing re-syncs the two.
+            updates = {"companies": companies}
             vendors = STORE.load("vendors")
-            if any(v["company_id"] == company_id for v in vendors):
+            if any(v.get("company_id") == company_id for v in vendors):
                 for v in vendors:
-                    if v["company_id"] == company_id:
+                    if v.get("company_id") == company_id:
                         v["archived"] = archived
-                STORE.save("vendors", vendors)
+                updates["vendors"] = vendors
+            STORE.save_many(updates)
             STORE.log("archive" if archived else "restore", "company", company_id,
                       {"archived": archived})
             return {"ok": True, "interface_version": VERSION, "company": target[0]}

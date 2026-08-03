@@ -435,12 +435,20 @@ function kpis(){
   // company count stay all-time: those are current-state counts, not
   // revenue that should reset at year boundary.
   const thisYear = new Date().getFullYear();
-  const curProjects = DATA.projects.filter(p=>p.year===thisYear);
-  const openShip = DATA.shipments.filter(s=>['Ordered','Shipped','On Hold'].includes(s.stage)).length;
-  const won = curProjects.filter(p=>p.status==='won').reduce((a,p)=>a+(p.revenue||0),0);
-  const pend = curProjects.filter(p=>p.status==='pending').reduce((a,p)=>a+(p.revenue||0),0);
-  const recv = curProjects.filter(p=>{const c=p.collection_status;return c && c!=='paid';})
-                          .reduce((a,p)=>a+(p.revenue||0),0);
+  // st()/num(): nothing validates the TYPE of year or revenue, so a project
+  // written through chat can hold "2026" and "12000" as strings. `===` then
+  // excluded it from every KPI (reading $0 for the year) while the Projects
+  // tab, which already coerces, totalled it correctly -- two numbers on the
+  // same screen disagreeing by a whole year. And `a + (p.revenue||0)` on a
+  // string CONCATENATES: one string revenue turned $17,000 into $120,005,000.
+  const num = (v)=>{ const n = Number(v); return isNaN(n) ? 0 : n; };
+  const sameYear = (v)=> st(v) === String(thisYear);
+  const curProjects = DATA.projects.filter(p=>sameYear(p.year));
+  const openShip = DATA.shipments.filter(s=>['Ordered','Shipped','On Hold'].includes(st(s.stage))).length;
+  const won = curProjects.filter(p=>st(p.status)==='won').reduce((a,p)=>a+num(p.revenue),0);
+  const pend = curProjects.filter(p=>st(p.status)==='pending').reduce((a,p)=>a+num(p.revenue),0);
+  const recv = curProjects.filter(p=>{const c=st(p.collection_status);return c && c!=='paid';})
+                          .reduce((a,p)=>a+num(p.revenue),0);
   document.getElementById('kpis').innerHTML = [
     ['Companies', DATA.companies.length],
     ['Open shipments', openShip],
