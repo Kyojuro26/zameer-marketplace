@@ -90,12 +90,51 @@ def load_operator_edits(store_dir):
                 continue
             if op == "create":
                 created.add((ent, key))
-            if op in ("update", "rename", "archive", "restore") \
-                    and isinstance(fields, dict):
+            if op == "rename" and isinstance(fields, dict):
+                # An edit is recorded under the number the record had AT THE
+                # TIME. A later rename moves the record, so looking it up by its
+                # CURRENT key found nothing and the workbook silently reverted a
+                # payment the operator had recorded -- the exact failure this
+                # module exists to prevent. Renames are therefore applied
+                # SEQUENTIALLY, in log order, to the edits accumulated so far.
+                # (Same defect, same fix, as audit_commission_pct.load_changelog:
+                # a timestamp-free old->new map applied every rename to every
+                # edit and got undone renumbers and reused numbers wrong.)
+                new_key = _renamed_key(ent, key, fields)
+                if new_key and new_key != key:
+                    moved = edits.pop((ent, key), set())
+                    # the rename is itself an operator decision: the identifier
+                    # must not be reverted by the workbook either
+                    moved.update({"invoice_no"} if ent == "invoice"
+                                 else {"project_no"} if ent == "project" else set())
+                    edits.setdefault((ent, new_key), set()).update(moved)
+                    if (ent, key) in created:
+                        created.discard((ent, key))
+                        created.add((ent, new_key))
+                continue
+            if op in ("update", "archive", "restore") and isinstance(fields, dict):
                 edits.setdefault((ent, key), set()).update(fields.keys())
             if op in ("archive", "restore"):
                 edits.setdefault((ent, key), set()).update({"archived", "archived_at"})
     return {"edits": edits, "created": created}
+
+
+def _renamed_key(entity, old_key, fields):
+    """The changelog key a record moves to when it is renamed.
+
+    Mirrors what Store.log writes: rename_project logs key=<old project_no>
+    with new_project_no; rename_invoice logs key="<company_id>:<old>" with
+    new_invoice_no.
+    """
+    if entity == "project":
+        return _s(fields.get("new_project_no")) or None
+    if entity == "invoice":
+        new_no = _s(fields.get("new_invoice_no"))
+        if not new_no:
+            return None
+        cid = old_key.rsplit(":", 1)[0] if ":" in old_key else ""
+        return f"{cid}:{new_no}" if cid else None
+    return None
 
 
 def _log_key(fname, rec):

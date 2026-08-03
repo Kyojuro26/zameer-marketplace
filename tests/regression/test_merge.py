@@ -114,6 +114,43 @@ def run(server, crm_dir=None):
             any(set(p["fields"]) >= {"payment_status"} for p in report["preserved"]),
             str(report["preserved"]))
 
+    r.section("an edit follows its record through a rename")
+    # An edit is logged under the key the record had AT THE TIME. A later rename
+    # moves the record, and looking it up by its CURRENT key found nothing -- so
+    # the workbook silently reverted a payment the operator had recorded. The
+    # suite passed over this until it was tested directly.
+    from lib.harness import Store as _S, company as _co, invoice as _inv
+    for label, ops, wb_no, want in (
+            ("edit, then renumber",
+             [("update", "9001", {"payment_status": "paid"}), ("rename", "9001", "9002")],
+             "9002", "paid"),
+            ("edit, then renumber twice",
+             [("update", "9001", {"payment_status": "paid"}), ("rename", "9001", "9002"),
+              ("rename", "9002", "9003")], "9003", "paid"),
+            ("renumber, undo it, then edit",
+             [("rename", "9001", "9002"), ("rename", "9002", "9001"),
+              ("update", "9001", {"payment_status": "paid"})], "9001", "paid"),
+            ("no edit at all -- the workbook must win",
+             [("rename", "9001", "9002")], "9002", "open")):
+        st = _S(server).reset(companies=[_co()],
+                              invoices=[_inv("9001", payment_status_raw="Open",
+                                             sheet_row=11)])
+        for op, key, arg in ops:
+            if op == "update":
+                st.call("update_invoice", company_id="acme", invoice_no=key, fields=arg)
+            else:
+                st.call("rename_invoice", company_id="acme", old_invoice_no=key,
+                        new_invoice_no=arg)
+        wb = {"companies.json": [_co()], "contacts.json": [], "vendors.json": [],
+              "projects.json": [], "shipments.json": [], "needs_review.json": [],
+              "invoices.json": [{"invoice_no": wb_no, "company_id": "acme",
+                                 "payment_status": "open", "payment_notes": None,
+                                 "payment_status_raw": "Open", "sheet_row": 11}]}
+        got = merge.merge_all(wb, str(st.path))[0]["invoices.json"][0]
+        r.check(f"{label}: status is {want!r} after the merge",
+                got["payment_status"] == want,
+                f"got {got['payment_status']!r}")
+
     r.section("it refuses when it cannot know what to protect")
     (tmp / "changelog.jsonl").unlink()
     try:
