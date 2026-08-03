@@ -167,6 +167,50 @@ def run(server, crm_dir=None):
     r.check("and the report says why nothing was refreshed",
             bool(rep2.get("note")), str(rep2.get("note")))
 
+    r.section("every kind of operator correction survives")
+    from lib.harness import Store as _S2, company as _co2
+    CO2 = [_co2()]
+    EMPTY2 = {"companies.json": CO2, "contacts.json": [], "vendors.json": [],
+              "projects.json": [], "shipments.json": [], "needs_review.json": [],
+              "invoices.json": []}
+    # reassign_shipment logs op="reassign" with field names that appear nowhere
+    # on the record, so the correction used to be reverted every re-import
+    st = _S2(server).reset(
+        companies=CO2,
+        projects=[{"project_no": "4521", "company_id": "acme", "status": "won",
+                   "archived": False},
+                  {"project_no": "4600", "company_id": "acme", "status": "won",
+                   "archived": False}],
+        shipments=[{"shipment_id": "4521-L1", "company_id": "acme",
+                    "project_no": "4521", "all_project_nos": ["4521"],
+                    "stage": "Ordered", "linked_to_project": True}])
+    st.call("reassign_shipment", shipment_id="4521-L1", new_project_no="4600")
+    wb = dict(EMPTY2)
+    wb["projects.json"] = [{"project_no": "4521", "company_id": "acme",
+                            "status": "won", "archived": False}]
+    wb["shipments.json"] = [{"shipment_id": "4521-L1", "company_id": "acme",
+                             "project_no": "4521", "all_project_nos": ["4521"],
+                             "stage": "Ordered"}]
+    leg = merge.merge_all(wb, str(st.path))[0]["shipments.json"][0]
+    r.check("a shipment moved to the right deal stays there",
+            leg["project_no"] == "4600",
+            f"reverted to {leg['project_no']!r} -- reassign is not honoured")
+
+    # Store.log de-floats identifiers; merge must reconstruct the SAME key or
+    # it matches nothing and a collected receivable reverts to open
+    st = _S2(server).reset(companies=CO2,
+                           invoices=[{"invoice_no": 7011.0, "company_id": "acme",
+                                      "payment_status": "open"}])
+    st.call("update_invoice", company_id="acme", invoice_no="7011",
+            fields={"payment_status": "paid", "payment_notes": "wire recd"})
+    wb2 = dict(EMPTY2)
+    wb2["invoices.json"] = [{"invoice_no": 7011.0, "company_id": "acme",
+                             "payment_status": "open", "payment_notes": None}]
+    got = merge.merge_all(wb2, str(st.path))[0]["invoices.json"][0]
+    r.check("a numerically-stored invoice_no still matches its changelog key",
+            got["payment_status"] == "paid",
+            "reverted to open -- _log_key and Store.log disagree on numbers")
+
     r.section("duplicate keys are never collapsed")
     dup = dict(fresh)
     dup["projects.json"] = [{"project_no": "4600", "company_id": "acme",

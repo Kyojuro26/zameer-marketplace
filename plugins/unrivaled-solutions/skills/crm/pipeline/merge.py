@@ -46,10 +46,10 @@ KEYS = {
                                  (_s(r.get("email")).lower()
                                   if _s(r.get("email")) not in ("", "?") else "")
                                  or _s(r.get("name")).lower())),
-    "projects.json": lambda r: ("project_no", _s(r.get("project_no"))),
-    "shipments.json": lambda r: ("shipment_id", _s(r.get("shipment_id"))),
+    "projects.json": lambda r: ("project_no", _idkey(r.get("project_no"))),
+    "shipments.json": lambda r: ("shipment_id", _idkey(r.get("shipment_id"))),
     "invoices.json": lambda r: ("invoice",
-                                (_s(r.get("company_id")), _s(r.get("invoice_no")))),
+                                (_s(r.get("company_id")), _idkey(r.get("invoice_no")))),
     "vendors.json": lambda r: ("company_id", _s(r.get("company_id"))),
 }
 # needs_review is regenerated wholesale every import: it is the importer's own
@@ -66,6 +66,21 @@ CHANGELOG_ENTITY = {
 
 def _s(v):
     return "" if v is None else str(v).strip()
+
+
+def _idkey(v):
+    """Identifier in the form Store.log writes it.
+
+    Must match server._key(): it de-floats through _num_to_str, so an
+    invoice_no stored as the JSON number 7011.0 is logged as "7011". Using a
+    bare str() here produced "7011.0", matched no changelog entry, and a
+    collected receivable silently reverted to open on the next re-import.
+    """
+    if v is None or isinstance(v, bool):
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
 
 
 def load_operator_edits(store_dir):
@@ -122,6 +137,15 @@ def load_operator_edits(store_dir):
                         created.discard((ent, key))
                         created.add((ent, new_key))
                 continue
+            if op == "reassign" and isinstance(fields, dict):
+                # logs old_project_no/new_project_no/also_project_nos -- names
+                # that appear nowhere on the record. Map them to the fields the
+                # reassignment actually changes, or the operator's "this leg was
+                # filed under the wrong deal" correction is silently undone.
+                edits.setdefault((ent, key), set()).update(
+                    {"project_no", "all_project_nos", "linked_to_project",
+                     "company_id", "client_name"})
+                continue
             if op in ("update", "archive", "restore") and isinstance(fields, dict):
                 edits.setdefault((ent, key), set()).update(fields.keys())
             if op in ("archive", "restore"):
@@ -151,13 +175,13 @@ def _renamed_key(entity, old_key, fields):
 def _log_key(fname, rec):
     """Rebuild the key Store.log would have written for this record."""
     if fname == "invoices.json":
-        return f"{_s(rec.get('company_id'))}:{_s(rec.get('invoice_no'))}"
+        return f"{_s(rec.get('company_id'))}:{_idkey(rec.get('invoice_no'))}"
     if fname == "contacts.json":
         return _s(rec.get("email")) or _s(rec.get("name"))
     if fname == "projects.json":
-        return _s(rec.get("project_no"))
+        return _idkey(rec.get("project_no"))
     if fname == "shipments.json":
-        return _s(rec.get("shipment_id"))
+        return _idkey(rec.get("shipment_id"))
     return _s(rec.get("company_id"))
 
 

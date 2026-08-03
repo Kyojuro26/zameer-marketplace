@@ -158,6 +158,17 @@ class StoreError(Exception):
     pass
 
 
+# changelog entity name -> the file that holds it
+ENTITY_OF_FILE = {v: k.rstrip('s') if k != 'companies' else 'company'
+                  for k, v in ENTITY_FILES.items()}
+ENTITY_OF_FILE.update({'companies.json': 'company',
+                       'contacts.json': 'contact',
+                       'projects.json': 'project',
+                       'shipments.json': 'shipment',
+                       'invoices.json': 'invoice',
+                       'vendors.json': 'vendor'})
+
+
 def _unlink_quietly(path):
     try:
         if os.path.exists(path):
@@ -197,6 +208,25 @@ class Store:
                 # The creation is recorded and surfaced by crm_info rather than
                 # buried in a temp-dir log, so a file that was missing because
                 # OneDrive had not synced it down is at least visible.
+                # ...but only where there is no EVIDENCE the file ever held
+                # anything. The changelog names the entity of every record ever
+                # written, so an entry for an entity whose file is now absent
+                # proves the file existed -- which is the OneDrive/lost-file
+                # case, and creating it empty would replicate over the real
+                # data. No evidence means a genuine schema upgrade, which is
+                # the case that must keep working.
+                evidenced = self._entities_in_changelog()
+                lost = [f for f in missing
+                        if ENTITY_OF_FILE.get(f) in evidenced]
+                if lost:
+                    raise StoreError(
+                        f"store at {root} is missing {lost}, and this store's "
+                        f"own changelog shows those records existed. Refusing "
+                        f"to create an empty {lost[0]} -- if the store is on "
+                        f"OneDrive the file may simply not have synced down "
+                        f"yet, and an empty one written here would replicate "
+                        f"over the real data on every machine. Check the folder "
+                        f"is fully synced before restarting.")
                 safe_to_create = True
                 self._auto_created = list(missing)
             else:
@@ -240,6 +270,30 @@ class Store:
                 pass
 
     MANIFEST = ".store-manifest.json"
+
+    def _entities_in_changelog(self):
+        """Entity names that appear in changelog.jsonl -- evidence a file
+        existed even when no manifest was ever written. Best-effort: an
+        unreadable log yields the empty set, which falls back to creating."""
+        seen = set()
+        p = self.root / "changelog.jsonl"
+        try:
+            if not p.exists():
+                return seen
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(e, dict) and e.get("entity"):
+                        seen.add(e["entity"])
+        except OSError:
+            return set()
+        return seen
 
     def _manifest_read_raw(self):
         p = self.root / self.MANIFEST
@@ -2233,6 +2287,19 @@ def crm_info() -> dict:
         out["enriched_companies"] = len(STORE.load_enrichment())
     except StoreError as ex:
         problems["enrichment/archive"] = str(ex)
+    # A store file this build had to create at first boot is surfaced here,
+    # not buried in a temp-dir launch log. If it was missing because OneDrive
+    # had not synced it down, this is the operator's only signal.
+    try:
+        created = (STORE._manifest_read_raw() or {}).get("auto_created") or []
+        if created:
+            out["auto_created_store_files"] = created
+            problems["auto_created"] = (
+                f"{created} did not exist when the CRM first started and were "
+                f"created empty. If they should have held records, restore them "
+                f"from your backup before making further edits.")
+    except Exception:                                 # noqa: BLE001
+        pass
     if problems:
         out["problems"] = problems
     return out
