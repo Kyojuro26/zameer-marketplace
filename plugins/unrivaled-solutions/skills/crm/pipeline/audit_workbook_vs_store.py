@@ -37,8 +37,22 @@ import openpyxl
 
 PO_RE = re.compile(r"(?i)(\bp\.?o\.?\s*#?\s*\d|\bpo\b|^p\d{4,})")
 DATE_STR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{1,2}/\d{1,2}/\d{2,4}$")
-PAID_RE = re.compile(r"(?i)\bpaid\b")
+# Payment wording lives in ONE place -- see payment_words.py. Three modules
+# need it and a checker that drifts from the importer cannot catch the
+# importer's mistake, which is exactly how "NOT PAID" read as paid for five
+# releases. Imported by path so these stay runnable as plain scripts.
+def _load_payment_words():
+    import importlib.util, os
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_words.py")
+    _spec = importlib.util.spec_from_file_location("crm_payment_words", _p)
+    _m = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_m)
+    return _m
 
+
+_PW = _load_payment_words()
+PAID_RE = _PW.PAID_RE
+says_paid = _PW.says_paid
 
 PAID_QUALIFIER_RE = re.compile(
     r"\b(?:not|never|non|no|isn'?t|wasn'?t|aren'?t|won'?t|"
@@ -48,18 +62,6 @@ PAID_QUALIFIER_RE = re.compile(
     r"to\s+be|yet\s+to|going\s+to|supposed\s+to)\b", re.IGNORECASE)
 
 
-def says_paid(text):
-    """True (paid) / False (no mention) / None (qualified -- do not guess).
-
-    Must stay in step with normalize.py's says_paid. A checker that reproduces
-    the importer's own parsing cannot catch the importer's mistake: this file
-    and audit_workbook_vs_store.py both carried the bare \\bpaid\\b and so
-    certified "NOT PAID" as paid for five releases.
-    """
-    t = "" if text is None else str(text)
-    if not PAID_RE.search(t):
-        return False
-    return None if PAID_QUALIFIER_RE.search(t) else True
 
 def clean(v):
     if v is None:

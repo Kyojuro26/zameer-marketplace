@@ -39,24 +39,26 @@ import os
 import re
 import sys
 
-PAID_RE = re.compile(r"\bpaid\b", re.IGNORECASE)
-# kept in step with normalize.py's PAID_QUALIFIER_RE
-PAID_QUALIFIER_RE = re.compile(
-    r"\b(?:not|never|non|no|isn'?t|wasn'?t|aren'?t|won'?t|"
-    r"will|shall|should|would|expect(?:ed|ing|s)?|due|pending|awaiting|chas(?:e|ing)|"
-    r"partial(?:ly)?|part|half|balance|remaining|outstanding|short|"
-    r"if|unless|when|once|after|before|upon|assuming|"
-    r"to\s+be|yet\s+to|going\s+to|supposed\s+to)\b", re.IGNORECASE)
+# Payment wording lives in ONE place -- see payment_words.py. Three modules
+# need it and a checker that drifts from the importer cannot catch the
+# importer's mistake, which is exactly how "NOT PAID" read as paid for five
+# releases. Imported by path so these stay runnable as plain scripts.
+def _load_payment_words():
+    import importlib.util, os
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_words.py")
+    _spec = importlib.util.spec_from_file_location("crm_payment_words", _p)
+    _m = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_m)
+    return _m
 
+
+_PW = _load_payment_words()
+PAID_RE = _PW.PAID_RE
+says_paid = _PW.says_paid
 
 def st(v):
     return "" if v is None else str(v)
 
-
-def qualified(text):
-    """A paid-ish word that is negated or conditioned by nearby wording."""
-    t = st(text)
-    return bool(PAID_RE.search(t)) and bool(PAID_QUALIFIER_RE.search(t))
 
 
 def load(store, name, required=True):
@@ -94,7 +96,7 @@ def main():
             continue
         blob = f"{st(inv.get('payment_status_raw'))} {st(inv.get('payment_notes'))}"
         stored = st(inv.get("payment_status")).strip().lower()
-        if stored.startswith("paid") and qualified(blob):
+        if stored.startswith("paid") and says_paid(blob) is None:
             findings.append({
                 "kind": "invoice",
                 "company_id": st(inv.get("company_id")),
@@ -110,7 +112,7 @@ def main():
         stored = st(p.get("collection_status")).strip().lower()
         # the project's own notes are the only evidence back-filled onto it
         blob = f"{st(p.get('notes'))} {st(p.get('payment_notes'))}"
-        if stored.startswith("paid") and qualified(blob):
+        if stored.startswith("paid") and says_paid(blob) is None:
             findings.append({
                 "kind": "project",
                 "project_no": st(p.get("project_no")),

@@ -130,6 +130,50 @@ def run(server, crm_dir=None):
                 decide("paid 6/1 check 8812") in (True, False),
                 "an unqualified 'paid' must still be readable")
 
+    # ---- every module deciding "paid" must give the SAME answer ------------
+    r.section("the importer and its checkers cannot drift apart")
+    # They carried three separate copies of a bare r"\bpaid\b" and so agreed,
+    # wrongly, for five releases. They now share payment_words.py -- this
+    # asserts they still do, on wording where a disagreement costs money.
+    corpus = [
+        ("Paid in full, balance $0", True),      # chasing a paid customer
+        ("paid - no balance due", True),
+        ("Paid 6/1 check 8812", True),
+        ("paid 50%", None),                      # writing off live money
+        ("was paid but check bounced", None),
+        ("paid - REVERSED", None),
+        ("paid to VENDOR, client still owes", None),
+        ("disputed - they say paid", None),
+        ("NOT PAID as of 7/1", None),
+        ("will be paid net 60", None),
+        ("Open", False),
+        ("unpaid", False),
+    ]
+    deciders = {}
+    for name in ("payment_words.py", "normalize.py", "audit_workbook_vs_store.py",
+                 "audit_qualified_paid.py"):
+        f = crm / "pipeline" / name
+        if not f.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(f"_pw_{name}", f)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception as e:                      # noqa: BLE001
+            r.check(f"{name} imports", False, str(e)[:70])
+            continue
+        if hasattr(mod, "says_paid"):
+            deciders[name] = mod.says_paid
+    r.check("every module that decides 'paid' was found",
+            len(deciders) >= 3, f"found {sorted(deciders)}")
+    for text, want in corpus:
+        got = {n: fn(text) for n, fn in deciders.items()}
+        r.check(f"all modules agree on {text!r}",
+                len(set(got.values())) == 1, str(got))
+        r.check(f"and the answer is right for {text!r}",
+                all(v == want for v in got.values()),
+                f"want {want}, got {got}")
+
     # ---- a verifier must distinguish a good tree from a bad one ------------
     r.section("meta: this suite itself must be able to fail")
     marker = REPO / "tests" / ".positive-control-ran"

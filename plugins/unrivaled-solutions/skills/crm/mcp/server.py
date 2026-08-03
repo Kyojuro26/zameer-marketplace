@@ -1392,6 +1392,14 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
             target = [s for s in shipments if s.get("shipment_id") == shipment_id]
             if not target:
                 return _err(f"shipment '{shipment_id}' not found")
+            if len(target) > 1:
+                return _err(
+                    f"{len(target)} shipments share the id '{shipment_id}' "
+                    f"(vendor POs: {[t.get('vendor_po_raw') for t in target]}). "
+                    f"Nothing here can tell them apart, so this needs the "
+                    f"duplicate resolved in the store directly -- editing one "
+                    f"at random is how the wrong leg gets marked delivered.")
+
             target[0].update(fields)
             STORE.save("shipments", shipments)
             STORE.log("update", "shipment", shipment_id, fields)
@@ -1427,9 +1435,17 @@ def reassign_shipment(shipment_id: str, new_project_no: Optional[str] = None,
     try:
         with STORE.write_lock():
             shipments = STORE.load("shipments")
-            target = [s for s in shipments if s["shipment_id"] == shipment_id]
+            target = [s for s in shipments if s.get("shipment_id") == shipment_id]
             if not target:
                 return _err(f"shipment '{shipment_id}' not found")
+            if len(target) > 1:
+                return _err(
+                    f"{len(target)} shipments share the id '{shipment_id}' "
+                    f"(vendor POs: {[t.get('vendor_po_raw') for t in target]}). "
+                    f"Nothing here can tell them apart, so this needs the "
+                    f"duplicate resolved in the store directly -- editing one "
+                    f"at random is how the wrong leg gets marked delivered.")
+
             # _resolve, not _key: _key left a caller's "4521.0" un-canonicalized
             # while _live_project validated it against the project stored as
             # "4521". The leg then persisted "4521.0", was invisible on the

@@ -16,6 +16,7 @@ parameters, and companies/contacts/vendors are read from the sheet, not baked in
 import argparse
 import json
 import os
+import pathlib
 import re
 import sys
 from collections import OrderedDict
@@ -59,34 +60,22 @@ def commission_like(text):
     from the number, leave it open, and flag it for a person."""
     t = "" if text is None else str(text)
     return bool(COMMISSION_RE.search(t)) or bool(REP_ALLOC_RE.search(t))
-PAID_RE = re.compile(r"\bpaid\b", re.IGNORECASE)
-# Words that NEGATE or QUALIFY a nearby "paid". `\bpaid\b` alone read "NOT
-# PAID as of 7/1 - chasing" as paid, wrote it over a payment_status_raw that
-# literally said "Open", and back-filled it onto the project -- an unpaid
-# receivable shown as collected, with no review flag, since v0.1.23. The
-# columns this runs over are free-text collection notes, so negation and
-# future tense are the normal case, not an edge case.
-PAID_QUALIFIER_RE = re.compile(
-    r"\b(?:not|never|non|no|isn'?t|wasn'?t|aren'?t|won'?t|"
-    r"will|shall|should|would|expect(?:ed|ing|s)?|due|pending|awaiting|chas(?:e|ing)|"
-    r"partial(?:ly)?|part|half|balance|remaining|outstanding|short|"
-    r"if|unless|when|once|after|before|upon|assuming|"
-    r"to\s+be|yet\s+to|going\s+to|supposed\s+to)\b", re.IGNORECASE)
+# Payment wording lives in ONE place -- see payment_words.py. Three modules
+# need it and a checker that drifts from the importer cannot catch the
+# importer's mistake, which is exactly how "NOT PAID" read as paid for five
+# releases. Imported by path so these stay runnable as plain scripts.
+def _load_payment_words():
+    import importlib.util, os
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_words.py")
+    _spec = importlib.util.spec_from_file_location("crm_payment_words", _p)
+    _m = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_m)
+    return _m
 
 
-def says_paid(text):
-    """Did the source say this was PAID?
-
-    Returns True (paid), False (no mention), or None (a paid-ish word is
-    present but qualified -- do not guess). None is the important one: this
-    module's contract is that anything ambiguous is FLAGGED, never guessed, and
-    guessing here is the difference between a collected receivable and one
-    nobody is chasing.
-    """
-    t = st_text(text)
-    if not PAID_RE.search(t):
-        return False
-    return None if PAID_QUALIFIER_RE.search(t) else True
+_PW = _load_payment_words()
+PAID_RE = _PW.PAID_RE
+says_paid = _PW.says_paid
 
 
 def st_text(v):
@@ -870,6 +859,37 @@ def run(workbook, outdir, force=False, mode="merge"):
         "vendors.json": list(vendors.values()),
         "needs_review.json": review,
     }
+    # Take the store's OWN write lock around the read-merge-write. Without it
+    # the importer read the store, spent seconds merging, then replaced every
+    # file -- and any edit a tool made in that window was discarded, with
+    # ok:true reported to both sides. That is precisely the failure
+    # Store.write_lock exists for, and the importer was the one writer not
+    # using it. Best-effort: if the lock cannot be loaded (running this file
+    # standalone, outside the plugin), carry on rather than refuse to import.
+    _lock = _store_write_lock(outdir)
+    with _lock:
+        return _finish(out, outdir, mode, workbook, companies, contacts,
+                       projects, shipments, invoices, vendors, review)
+
+
+def _store_write_lock(outdir):
+    """server.Store's write lock, or a no-op if server.py is not importable."""
+    import contextlib
+    import importlib.util
+    import os as _os
+    try:
+        p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                          "..", "mcp", "server.py")
+        spec = importlib.util.spec_from_file_location("crm_server_for_lock", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.Store(pathlib.Path(outdir)).write_lock()
+    except Exception:                                 # noqa: BLE001
+        return contextlib.nullcontext()
+
+
+def _finish(out, outdir, mode, workbook, companies, contacts, projects,
+            shipments, invoices, vendors, review):
     merge_report = None
     if mode == "merge":
         # Default. Refresh from the workbook without discarding operator work;
