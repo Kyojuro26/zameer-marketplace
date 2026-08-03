@@ -38,8 +38,13 @@ import os
 # already in the store. Mirrors the tool layer's own keys.
 KEYS = {
     "companies.json": lambda r: ("company_id", _s(r.get("company_id"))),
+    # "?" is the literal placeholder normalize.py writes into the email column,
+    # so it identifies nobody -- keying on it collapsed every placeholder
+    # contact in a company into one record.
     "contacts.json": lambda r: ("contact",
-                                (_s(r.get("company_id")), _s(r.get("email")).lower()
+                                (_s(r.get("company_id")),
+                                 (_s(r.get("email")).lower()
+                                  if _s(r.get("email")) not in ("", "?") else "")
                                  or _s(r.get("name")).lower())),
     "projects.json": lambda r: ("project_no", _s(r.get("project_no"))),
     "shipments.json": lambda r: ("shipment_id", _s(r.get("shipment_id"))),
@@ -72,7 +77,7 @@ def load_operator_edits(store_dir):
     path = os.path.join(store_dir, "changelog.jsonl")
     if not os.path.exists(path):
         return None
-    edits, created = {}, set()
+    edits, created, renamed_from = {}, set(), set()
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -102,6 +107,11 @@ def load_operator_edits(store_dir):
                 # edit and got undone renumbers and reused numbers wrong.)
                 new_key = _renamed_key(ent, key, fields)
                 if new_key and new_key != key:
+                    # the workbook still lists the OLD number; re-adding it
+                    # would resurrect the same receivable as a second record,
+                    # one open and one paid, double-counting the total
+                    renamed_from.add((ent, key))
+                    renamed_from.discard((ent, new_key))
                     moved = edits.pop((ent, key), set())
                     # the rename is itself an operator decision: the identifier
                     # must not be reverted by the workbook either
@@ -116,7 +126,8 @@ def load_operator_edits(store_dir):
                 edits.setdefault((ent, key), set()).update(fields.keys())
             if op in ("archive", "restore"):
                 edits.setdefault((ent, key), set()).update({"archived", "archived_at"})
-    return {"edits": edits, "created": created}
+    return {"edits": edits, "created": created,
+            "renamed_from": renamed_from}
 
 
 def _renamed_key(entity, old_key, fields):
@@ -168,15 +179,27 @@ def merge_all(fresh_files, store_dir):
             except (OSError, ValueError):
                 has_data = True                # unreadable: assume it matters
                 break
-    if has_data and operator is None:
-        raise RuntimeError(
-            "this store holds data but has no changelog.jsonl, so a merge "
-            "cannot tell an operator edit from an import artefact. Refusing "
-            "rather than overwriting work. Back the store up and re-run with "
-            "--replace if you genuinely want the workbook to win.")
-    operator = operator or {"edits": {}, "created": set()}
+    # No changelog on a store that holds data: we cannot tell an operator edit
+    # from an import artefact. The first version REFUSED and told the operator
+    # to use --replace -- which itself refuses, then needs --force, which
+    # destroys every record. Pointing at the more destructive option is the
+    # dead-end class this project has hit twice before.
+    #
+    # Instead: fall back to ADD-ONLY. New rows from the workbook are added;
+    # every record already in the store is left completely untouched. That is
+    # safe whether the changelog is absent because nothing was ever edited or
+    # because it was lost, and it is strictly safer than either alternative.
+    conservative = has_data and operator is None
+    operator = operator or {"edits": {}, "created": set(), "renamed_from": set()}
+    if conservative:
+        report_note = ("no changelog.jsonl: nothing already in the store was "
+                       "refreshed, only new rows were added")
+    else:
+        report_note = None
+    operator.setdefault("renamed_from", set())
 
-    merged, report = {}, {"refreshed": 0, "preserved": [], "kept": [], "added": 0}
+    merged, report = {}, {"refreshed": 0, "preserved": [], "kept": [], "added": 0,
+                      "ambiguous": [], "renamed_away": [], "note": None}
     for fname, fresh in fresh_files.items():
         if fname in REGENERATED:
             merged[fname] = fresh
@@ -195,17 +218,42 @@ def merge_all(fresh_files, store_dir):
 
         keyfn = KEYS[fname]
         ent = CHANGELOG_ENTITY[fname]
-        old_by_key = {keyfn(r)[1]: r for r in existing if isinstance(r, dict)}
+        # group, do NOT collapse. A dict comprehension is last-wins, so two
+        # records sharing a key silently lost one -- and the edit lookup then
+        # attributed one record's changes to the other, which the report
+        # cheerfully described as "kept your edits". Duplicate project numbers
+        # are the exact legacy shape _one_project exists for, and duplicate
+        # contact keys occur in the ordinary case.
+        old_groups = {}
+        for rec in existing:
+            if isinstance(rec, dict):
+                old_groups.setdefault(keyfn(rec)[1], []).append(rec)
+        ambiguous = {k for k, v in old_groups.items() if len(v) > 1}
+        old_by_key = {k: v[0] for k, v in old_groups.items() if len(v) == 1}
         out, used = [], set()
 
         for rec in fresh:
             k = keyfn(rec)[1]
+            if (ent, _log_key(fname, rec)) in operator["renamed_from"]:
+                report["renamed_away"].append({"file": fname, "key": str(k)})
+                continue
+            if k in ambiguous:
+                # cannot tell which record the workbook row refers to, and
+                # cannot tell whose edits are whose. Keep every existing record
+                # untouched and refresh none of them.
+                report["ambiguous"].append({"file": fname, "key": str(k),
+                                            "count": len(old_groups[k])})
+                continue
             prior = old_by_key.get(k)
             if prior is None:
                 out.append(rec)
                 report["added"] += 1
                 continue
             used.add(k)
+            if conservative:
+                out.append(prior)              # untouched; refresh nothing
+                report["untouched"] = report.get("untouched", 0) + 1
+                continue
             touched = operator["edits"].get((ent, _log_key(fname, prior)), set())
             merged_rec = dict(rec)
             for field in touched:
@@ -221,6 +269,8 @@ def merge_all(fresh_files, store_dir):
             report["refreshed"] += 1
             out.append(merged_rec)
 
+        for k in ambiguous:
+            out.extend(old_groups[k])          # all of them, untouched
         # anything the workbook no longer mentions is KEPT, never dropped
         for k, prior in old_by_key.items():
             if k in used:
@@ -233,11 +283,12 @@ def merge_all(fresh_files, store_dir):
             out.append(prior)
 
         merged[fname] = out
+    report["note"] = report_note
     return merged, report
 
 
 def format_report(report):
-    L = [f"refreshed {report['refreshed']} record(s) from the workbook, "
+    L = ([f"NOTE: {report['note']}"] if report.get("note") else []) + [f"refreshed {report['refreshed']} record(s) from the workbook, "
          f"added {report['added']} new one(s)."]
     if report["preserved"]:
         L.append(f"\nKEPT YOUR EDITS on {len(report['preserved'])} record(s) -- "

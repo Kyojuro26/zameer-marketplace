@@ -151,18 +151,38 @@ def run(server, crm_dir=None):
                 got["payment_status"] == want,
                 f"got {got['payment_status']!r}")
 
-    r.section("it refuses when it cannot know what to protect")
+    r.section("no changelog -> add-only, never a dead end")
+    # Refusing here sent the operator to --replace, which also refuses and then
+    # needs --force, which destroys every record: the more-destructive-advice
+    # dead end. Add-only is safe whether the changelog is absent because
+    # nothing was edited or because it was lost.
     (tmp / "changelog.jsonl").unlink()
-    try:
-        merge.merge_all(fresh, str(tmp))
-        r.check("a live store with no changelog is refused", False,
-                "merged anyway -- without the changelog an operator edit is "
-                "indistinguishable from an import artefact")
-    except Exception as e:                              # noqa: BLE001
-        r.check("a live store with no changelog is refused", True)
-        r.check("and the refusal explains what to do",
-                "backup" in str(e).lower() or "back the store up" in str(e).lower(),
-                str(e)[:90])
+    merged2, rep2 = merge.merge_all(fresh, str(tmp))
+    inv2 = {i["invoice_no"]: i for i in merged2["invoices.json"]}
+    r.check("the merge still proceeds", bool(inv2))
+    r.check("but NOTHING already in the store is refreshed",
+            inv2["7001"]["payment_status"] == "paid",
+            "an existing record was overwritten with no changelog to protect it")
+    r.check("the hand-entered record still survives", "9999" in inv2)
+    r.check("and the report says why nothing was refreshed",
+            bool(rep2.get("note")), str(rep2.get("note")))
+
+    r.section("duplicate keys are never collapsed")
+    dup = dict(fresh)
+    dup["projects.json"] = [{"project_no": "4600", "company_id": "acme",
+                             "status": "won", "revenue": 1}]
+    (tmp / "projects.json").write_text(json.dumps([
+        {"project_no": "4600", "company_id": "acme", "status": "won",
+         "revenue": 90000, "archived": False},
+        {"project_no": "4600", "company_id": "acme", "status": "won",
+         "archived": True}]))
+    merged3, rep3 = merge.merge_all(dup, str(tmp))
+    got = [p for p in merged3["projects.json"] if p.get("project_no") == "4600"]
+    r.check("both records sharing a key survive", len(got) == 2,
+            f"{len(got)} of 2 -- a duplicate key silently deleted a record")
+    r.check("the live one keeps its revenue",
+            any(p.get("revenue") == 90000 for p in got),
+            "the surviving record was the wrong one")
 
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)

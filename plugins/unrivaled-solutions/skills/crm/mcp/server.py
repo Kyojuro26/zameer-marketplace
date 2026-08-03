@@ -185,13 +185,20 @@ class Store:
             # never held anything.
             known = self._manifest_read()
             if known is None:
-                # No manifest: written before this guard existed. A store with
-                # no data anywhere is a genuinely new one; anything else is
-                # treated as a file that went missing.
-                brand_new = all(
-                    self._read_json(root / f, []) == []
-                    for f in ENTITY_FILES.values() if (root / f).exists())
-                safe_to_create = brand_new
+                # FIRST BOOT under this build -- there is no manifest yet, so
+                # there is no record of what this store has ever held. Behave as
+                # every previous version did and create the file, because the
+                # alternative bricks the upgrade: a real store that predates a
+                # newer entity file would refuse to start, main() would
+                # sys.exit, and every CRM tool would disappear with no in-app
+                # way to fix it. The manifest written at the end of this boot is
+                # what makes the NEXT absence detectable.
+                #
+                # The creation is recorded and surfaced by crm_info rather than
+                # buried in a temp-dir log, so a file that was missing because
+                # OneDrive had not synced it down is at least visible.
+                safe_to_create = True
+                self._auto_created = list(missing)
             else:
                 # A file the manifest never recorded is a schema upgrade. A
                 # file it DID record has existed before and must not be
@@ -234,6 +241,13 @@ class Store:
 
     MANIFEST = ".store-manifest.json"
 
+    def _manifest_read_raw(self):
+        p = self.root / self.MANIFEST
+        try:
+            return json.loads(p.read_text(encoding="utf-8-sig")) if p.exists() else None
+        except (OSError, ValueError):
+            return None
+
     def _manifest_read(self):
         """Entity files this store is known to have held, or None if it has
         never been recorded. Never raises -- an unreadable manifest must not
@@ -248,6 +262,8 @@ class Store:
         except (OSError, ValueError):
             return None
 
+    _auto_created = ()
+
     def _manifest_write(self):
         """Record which entity files exist, so a later absence is detectable.
 
@@ -255,9 +271,12 @@ class Store:
         block startup, and a missing manifest only costs us the cautious path.
         """
         try:
+            prior = self._manifest_read_raw()
+            warn = list(self._auto_created) or (prior or {}).get("auto_created") or []
             self._write(self.MANIFEST, {
                 "entity_files": sorted(f for f in ENTITY_FILES.values()
                                        if (self.root / f).exists()),
+                "auto_created": warn,
                 "note": "written by server.py so a store file that later goes "
                         "missing is not silently recreated empty",
             })

@@ -325,15 +325,19 @@ class GraphClient:
         guardrail and paranoia check as create_draft. reply_all=True uses
         createReplyAll instead of createReply."""
         action = "createReplyAll" if reply_all else "createReply"
-        # quote(): the id lands in the URL PATH. Unencoded, a message_id of
+        # quote(safe=''): the id lands in the URL PATH, and this alone defuses
+        # the attack -- "<id>/reply#" becomes the inert segment
+        # "<id>%2Freply%23", so no traversal is possible. An additional
+        # reject-list on "/?#%\\" was removed: Graph message ids use the
+        # standard base64 alphabet, which contains "/" and "+", so it would
+        # permanently break the Reply button on any thread whose id carried
+        # one -- with an error that reads like an attack warning. Unencoded, a
+        # message_id of
         # "<real-id>/reply#" made requests strip the fragment and POST to
         # /me/messages/<real-id>/reply -- which SENDS immediately, on a token
         # holding Mail.ReadWrite, with caller-chosen text. The module's own
         # docstring promises drafts only; nothing enforced it. The explicit
         # reject is belt-and-braces: a legitimate Graph id never contains these.
-        if any(ch in str(message_id) for ch in "/?#%\\"):
-            raise GraphError("message_id contains a character that could "
-                             "retarget the Graph request; refusing")
         d = self._call("POST", f"/me/messages/{quote(str(message_id), safe='')}/{action}",
                        json={"comment": comment} if comment else {})
         if d.get("isDraft") is not True:  # must PROVE it is a draft:
