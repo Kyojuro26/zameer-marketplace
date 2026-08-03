@@ -37,7 +37,28 @@ PCT_RE = re.compile(r"(\d{1,3})\s*%")
 # Client feedback 2026-07: this was misreading commission % as percent
 # invoiced. Never guess which the number means -- flag it for review instead
 # of assigning it as collection/payment status.
-COMMISSION_RE = re.compile(r"\bcomm(?:ission)?\b", re.IGNORECASE)
+# A percentage sitting next to a commission / rep-split mention is a payout
+# rate, NOT percent-of-invoice-collected. The original guard was
+# r"\bcomm(?:ission)?\b", which missed the plural: "10% commissions to D" was
+# stored as partial:10%. That is the exact client-reported incident this guard
+# was written for, reachable by adding one letter -- so it is spelled out
+# generously here, and a miss costs only a needs_review entry.
+COMMISSION_RE = re.compile(
+    r"\b(?:comm|comms|commn|comm'?n|cmsn|commis(?:s)?ion(?:s)?|"
+    r"commision(?:s)?|rep\s*split|split|payout|kickback)\b\.?",
+    re.IGNORECASE)
+# "10% to D" / "15% for JS" -- a percentage allocated TO someone is a person's
+# share, not a collection status. Requires a name-shaped token so "50% to be
+# invoiced" and "10% for freight" do not trip it.
+REP_ALLOC_RE = re.compile(r"%\s*(?:to|for)\s+(?:[A-Z]{1,3}\b|[A-Z][a-z]+)")
+
+
+def commission_like(text):
+    """True when a percentage in this text is a payout rate, not a collection
+    percentage. Both call sites treat True the same way: never guess a status
+    from the number, leave it open, and flag it for a person."""
+    t = "" if text is None else str(text)
+    return bool(COMMISSION_RE.search(t)) or bool(REP_ALLOC_RE.search(t))
 PAID_RE = re.compile(r"\bpaid\b", re.IGNORECASE)
 # Words that NEGATE or QUALIFY a nearby "paid". `\bpaid\b` alone read "NOT
 # PAID as of 7/1 - chasing" as paid, wrote it over a payment_status_raw that
@@ -294,7 +315,7 @@ def parse_project_key(raw):
             f"payment wording is qualified, collection_status left unset: {s!r}"
         if inv:
             out["collection_status"] = "open"
-    elif COMMISSION_RE.search(s):
+    elif commission_like(s):
         # A percentage here is a commission/rep-split rate, not percent paid --
         # never guess; flag it so a person confirms the real collection status.
         out["review"] = (out["review"] + "; " if out["review"] else "") + \
@@ -342,7 +363,7 @@ def col(hm, *names):
 
 # ---------------------------------------------------------------- pipeline
 
-def _guard_live_store(outdir, force):
+def _guard_live_store(outdir, force, mode="replace"):
     """Refuse to overwrite a store that already holds user data / edits.
 
     normalize.py rewrites every entity file wholesale; pointed at the live
@@ -351,8 +372,12 @@ def _guard_live_store(outdir, force):
     companies.json is the signal that this is a real store, not an empty output
     directory. A brand-new store whose files are just "[]" (2 bytes) does not
     trip this. Pass force=True only for a throwaway/scratch target. (v0.1.14)
+
+    mode="merge" is exempt because it does not overwrite wholesale -- see
+    merge.py, which refuses on its own terms if it cannot preserve operator
+    work. The guard exists to stop a REPLACE landing on a live store.
     """
-    if force:
+    if force or mode == "merge":
         return
     signals = []
     changelog = os.path.join(outdir, "changelog.jsonl")
@@ -370,8 +395,8 @@ def _guard_live_store(outdir, force):
             "a throwaway/scratch target, re-run with --force.")
 
 
-def run(workbook, outdir, force=False):
-    _guard_live_store(outdir, force)
+def run(workbook, outdir, force=False, mode="merge"):
+    _guard_live_store(outdir, force, mode)
     wb = openpyxl.load_workbook(workbook, data_only=True, read_only=True)
     companies = OrderedDict()     # company_id -> record
     contacts = []
@@ -719,7 +744,7 @@ def run(workbook, outdir, force=False):
             review.append({"type": "payment_wording_ambiguous", "invoice_no": invoice_no,
                            "detail": f"qualified payment wording, not read as paid: {blob!r}",
                            "sheet_row": rn})
-        elif COMMISSION_RE.search(blob):
+        elif commission_like(blob):
             # Same guard as parse_project_key: a "NN%" next to a commission
             # mention is a rep-split rate, not percent of the invoice paid --
             # never guess. Leave it open and flag it for a person to confirm.
@@ -845,9 +870,38 @@ def run(workbook, outdir, force=False):
         "vendors.json": list(vendors.values()),
         "needs_review.json": review,
     }
-    for fname, data in out.items():
-        with open(os.path.join(outdir, fname), "w") as f:
-            json.dump(data, f, indent=2, default=str)
+    merge_report = None
+    if mode == "merge":
+        # Default. Refresh from the workbook without discarding operator work;
+        # merge.merge_all raises if it cannot do that safely.
+        try:
+            from . import merge as _merge_mod   # packaged
+        except ImportError:
+            import merge as _merge_mod          # run as a script
+        out, merge_report = _merge_mod.merge_all(out, outdir)
+    # Stage every file before replacing any: a failure partway through used to
+    # leave companies/contacts/projects NEW and invoices/shipments OLD, cross-
+    # referencing keys that no longer agree -- and Store then auto-created the
+    # missing ones empty and booted reporting zero invoices.
+    staged = []
+    try:
+        for fname, data in out.items():
+            tmp = os.path.join(outdir, f".~{fname}.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            staged.append((tmp, os.path.join(outdir, fname)))
+        for tmp, target in staged:
+            os.replace(tmp, target)
+    except BaseException:
+        for tmp, _ in staged:
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except OSError:
+                pass
+        raise
 
     summary = {
         "companies": len(companies),
@@ -863,6 +917,7 @@ def run(workbook, outdir, force=False):
         "  invoices linked to a project": sum(1 for i in invoices if i["project_no"]),
         "vendors": len(vendors),
         "needs_review": len(review),
+        "merge_report": merge_report,
     }
     return summary
 
@@ -871,11 +926,22 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--workbook", required=True)
     ap.add_argument("--out", default="./store")
+    ap.add_argument("--replace", action="store_true",
+                    help="REPLACE the store wholesale instead of merging. "
+                         "Discards every hand-entered record and every edit "
+                         "made since the last import. Almost never what you "
+                         "want -- the default merges.")
     ap.add_argument("--force", action="store_true",
-                    help="allow writing into a non-empty store (DESTROYS existing "
-                         "records/edits) — only for throwaway/scratch targets")
+                    help="with --replace, allow it against a store that holds "
+                         "data (DESTRUCTIVE) — only for throwaway targets")
     a = ap.parse_args()
-    s = run(a.workbook, a.out, force=a.force)
-    print("Normalization complete →", a.out)
+    mode = "replace" if a.replace else "merge"
+    s = run(a.workbook, a.out, force=a.force, mode=mode)
+    print(f"Normalization complete ({mode}) →", a.out)
     for k, v in s.items():
+        if k == "merge_report":
+            continue        # skip-ok: printing the summary, not importing a row
         print(f"  {k}: {v}")
+    if s.get("merge_report"):
+        from merge import format_report
+        print("\n" + format_report(s["merge_report"]))

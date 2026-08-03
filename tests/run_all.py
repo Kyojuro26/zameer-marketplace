@@ -39,6 +39,7 @@ PY_MODULES = [
     ("regression.test_identifiers", "regression/test_identifiers.py"),
     ("regression.test_visibility", "regression/test_visibility.py"),
     ("regression.test_integrity", "regression/test_integrity.py"),
+    ("regression.test_merge", "regression/test_merge.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
