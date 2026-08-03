@@ -51,6 +51,7 @@ if [ ! -r "$ROOT/.pii-names" ]; then
 fi
 
 NPAT=0
+ALLNAMES=""
 while IFS= read -r pat || [ -n "$pat" ]; do
   # Strip a trailing CR. .pii-names is hand-written, and the setup runbooks all
   # have the operator working in PowerShell/Notepad, which write CRLF. Left on,
@@ -62,6 +63,8 @@ while IFS= read -r pat || [ -n "$pat" ]; do
   [ -z "$pat" ] && continue
   case "$pat" in \#*) continue ;; esac
   NPAT=$((NPAT + 1))
+  # combined alternation, used by the binary/UTF-16 pass below
+  if [ -z "$ALLNAMES" ]; then ALLNAMES="$pat"; else ALLNAMES="$ALLNAMES|$pat"; fi
 
   # Validate the ERE before trusting a no-match result. A typo like "Sm(ith"
   # makes grep exit 2 with zero output, which reads identically to "clean"
@@ -110,6 +113,39 @@ if [ "$NPAT" -eq 0 ]; then
   echo "  appear in this public repo." >&2
   exit 1
 fi
+
+
+# --- 3. Binary and non-UTF-8 files -----------------------------------------
+# grep -I skips binary files ENTIRELY, so the formats a leak is most likely to
+# arrive in walked straight through: an .xlsx (the client's sales tracker is a
+# zip of XML), a UTF-16 text file (what PowerShell and Notepad write by
+# default, and the runbooks have the operator in both), and any PDF or doc.
+#
+# NUL-stripping rather than iconv: without a BOM, `iconv -f UTF-16` guesses the
+# wrong endianness and yields mojibake that matches nothing -- it reported
+# those files clean. Deleting NUL bytes recovers ASCII from UTF-16LE, UTF-16BE
+# and NUL-containing binaries alike, with no guessing.
+#
+# Fail CLOSED: a binary the sweep cannot read is a binary it cannot clear. The
+# tree currently contains none, so the allowlist starts empty on purpose --
+# add to it deliberately, per format, with a reason.
+BINARY_ALLOW='\.(png|jpg|jpeg|gif|ico|woff2?|ttf|otf)$'
+BINARIES=""
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  grep -Iq . "$f" 2>/dev/null && continue          # ordinary text: swept above
+  if tr -d '\000' < "$f" 2>/dev/null | grep -qiE "$ALLNAMES" 2>/dev/null; then
+    BINARIES="$BINARIES$f: contains an identifying name (binary/UTF-16)"$'\n'
+  elif ! printf '%s\n' "$f" | grep -qE "$BINARY_ALLOW"; then
+    BINARIES="$BINARIES$f: binary, and not an allowlisted format -- the sweep cannot read it, so it cannot clear it"$'\n'
+  fi
+done <<EOF
+$(find "$ROOT" -type f -not -path '*/.git/*' -not -path '*/__pycache__/*' 2>/dev/null)
+EOF
+if [ -n "$(printf '%s' "$BINARIES" | tr -d '[:space:]')" ]; then
+  add_hit "$BINARIES"
+fi
+
 
 if [ "$FAIL" -ne 0 ]; then
   printf '%s\n' "$HITS"

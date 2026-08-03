@@ -32,6 +32,7 @@ The transport is injectable for tests.
 """
 
 import json
+from urllib.parse import quote
 import os
 import tempfile
 import time
@@ -310,7 +311,9 @@ class GraphClient:
             "toRecipients": [{"emailAddress": {"address": to_email,
                                                "name": to_name or to_email}}],
         })
-        if d.get("isDraft") is False:  # paranoia: refuse anything not a draft
+        if d.get("isDraft") is not True:  # must PROVE it is a draft:
+            # an empty 202 body (what /reply returns after SENDING)
+            # passed the old `is False` test
             raise GraphError("Graph returned a non-draft message; aborting")
         return {"id": d["id"], "webLink": d.get("webLink"), "isDraft": True}
 
@@ -322,9 +325,20 @@ class GraphClient:
         guardrail and paranoia check as create_draft. reply_all=True uses
         createReplyAll instead of createReply."""
         action = "createReplyAll" if reply_all else "createReply"
-        d = self._call("POST", f"/me/messages/{message_id}/{action}",
+        # quote(): the id lands in the URL PATH. Unencoded, a message_id of
+        # "<real-id>/reply#" made requests strip the fragment and POST to
+        # /me/messages/<real-id>/reply -- which SENDS immediately, on a token
+        # holding Mail.ReadWrite, with caller-chosen text. The module's own
+        # docstring promises drafts only; nothing enforced it. The explicit
+        # reject is belt-and-braces: a legitimate Graph id never contains these.
+        if any(ch in str(message_id) for ch in "/?#%\\"):
+            raise GraphError("message_id contains a character that could "
+                             "retarget the Graph request; refusing")
+        d = self._call("POST", f"/me/messages/{quote(str(message_id), safe='')}/{action}",
                        json={"comment": comment} if comment else {})
-        if d.get("isDraft") is False:  # paranoia: refuse anything not a draft
+        if d.get("isDraft") is not True:  # must PROVE it is a draft:
+            # an empty 202 body (what /reply returns after SENDING)
+            # passed the old `is False` test
             raise GraphError("Graph returned a non-draft message; aborting")
         return {"id": d["id"], "webLink": d.get("webLink"), "isDraft": True}
 

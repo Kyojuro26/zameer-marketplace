@@ -60,6 +60,12 @@ def run(server, crm_dir=None):
         for i, ln in enumerate(lines):
             if re.match(r"\s+continue\s*$", ln):
                 window = "\n".join(lines[max(0, i - 12):i + 1])
+                # `# skip-ok: <reason>` marks a skip that drops nothing a
+                # store could hold -- a token or column-pair loop. It must be
+                # written deliberately, with a reason, which is the whole point:
+                # every skip becomes a considered decision rather than a default.
+                if "skip-ok" in ln:
+                    continue
                 if "needs_review" not in window and "review.append" not in window \
                         and "flag(" not in window:
                     unflagged.append(i + 1)

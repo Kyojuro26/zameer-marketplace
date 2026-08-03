@@ -164,20 +164,53 @@ class Store:
     def __init__(self, root: Path):
         self.root = root
         missing = [f for f in ENTITY_FILES.values() if not (root / f).exists()]
-        if missing and "companies.json" not in missing:
-            # Real store, newer schema: create the missing entity files empty
-            # rather than dying (the invoices.json lesson, 2026-07-14). Goes
-            # through self._write — the same atomic-temp-file + os.replace
-            # Windows-lock retry as every other store write (v0.1.9). A bare
-            # write_text here defeated the exact lesson this code exists to
-            # apply: it could still throw an unhandled PermissionError and
-            # take the whole server down at boot.
-            for f in missing:
-                self._write(f, [])
-            _launch_log(f"auto-created missing store files: {missing}")
-            missing = []
+        if missing:
+            # Auto-creating a missing entity file empty was the old behaviour,
+            # added so a store predating a newer entity file would still open.
+            # It is also the only defect in this system that can DESTROY data
+            # rather than hide or mis-state it: this store lives on OneDrive,
+            # a file can be absent because it has not synced down yet (new
+            # machine, re-linked account, AV quarantine, conflict resolution),
+            # and writing an authoritative empty invoices.json replicates
+            # upward and takes the nightly mirror with it. Refusing to start is
+            # always safe; auto-creating is safe only when the file provably
+            # never held anything.
+            known = self._manifest_read()
+            if known is None:
+                # No manifest: written before this guard existed. A store with
+                # no data anywhere is a genuinely new one; anything else is
+                # treated as a file that went missing.
+                brand_new = all(
+                    self._read_json(root / f, []) == []
+                    for f in ENTITY_FILES.values() if (root / f).exists())
+                safe_to_create = brand_new
+            else:
+                # A file the manifest never recorded is a schema upgrade. A
+                # file it DID record has existed before and must not be
+                # recreated behind the operator's back.
+                safe_to_create = not (set(missing) & set(known))
+            if safe_to_create:
+                # via self._write: the same atomic temp-file + os.replace
+                # Windows-lock retry as every other store write (v0.1.9). A
+                # bare write_text could throw an unhandled PermissionError and
+                # take the server down at boot.
+                for f in missing:
+                    self._write(f, [])
+                _launch_log(f"created missing store files: {missing}")
+                missing = []
+            else:
+                raise StoreError(
+                    f"store at {root} is missing {missing}, and this store has "
+                    f"held data before. Refusing to start rather than create an "
+                    f"empty {missing[0]} -- if the store is on OneDrive the file "
+                    f"may simply not have synced down yet, and an empty one "
+                    f"written here would replicate over the real data on every "
+                    f"machine. Check the folder is fully synced (and the backup "
+                    f"mirror) before restarting. If the file genuinely never "
+                    f"existed, create it containing [] by hand.")
         if missing:
             raise StoreError(f"store at {root} is missing: {missing}")
+        self._manifest_write()
         # Sweep atomic-write temp files orphaned by a hard kill mid-write
         # (power loss, force-quit): nothing else ever removes them, and the
         # OneDrive backup mirrors them forever. Age-gated one hour so another
@@ -190,6 +223,38 @@ class Store:
                     _launch_log(f"swept orphaned temp file {tmpf.name}")
             except OSError:
                 pass
+
+    MANIFEST = ".store-manifest.json"
+
+    def _manifest_read(self):
+        """Entity files this store is known to have held, or None if it has
+        never been recorded. Never raises -- an unreadable manifest must not
+        stop the server, it just means we fall back to the cautious path."""
+        p = self.root / self.MANIFEST
+        try:
+            if not p.exists():
+                return None
+            data = json.loads(p.read_text(encoding="utf-8-sig"))
+            files = data.get("entity_files")
+            return files if isinstance(files, list) else None
+        except (OSError, ValueError):
+            return None
+
+    def _manifest_write(self):
+        """Record which entity files exist, so a later absence is detectable.
+
+        Best-effort: a store on a read-only mount or a locked file must not
+        block startup, and a missing manifest only costs us the cautious path.
+        """
+        try:
+            self._write(self.MANIFEST, {
+                "entity_files": sorted(f for f in ENTITY_FILES.values()
+                                       if (self.root / f).exists()),
+                "note": "written by server.py so a store file that later goes "
+                        "missing is not silently recreated empty",
+            })
+        except Exception:                             # noqa: BLE001
+            pass
 
     def load(self, entity):
         return self._read_json(self.root / ENTITY_FILES[entity], [])
@@ -332,8 +397,35 @@ STORE: Store = None  # set in main()
 # ------------------------------------------------------------- helpers
 
 
+# Keys that exist on Object.prototype. The visual app builds its per-company
+# indexes as plain objects, so any of these as a company_id makes
+# `m[id] = m[id] || []` short-circuit onto an inherited function.
+_JS_RESERVED_KEYS = {
+    "__proto__", "constructor", "prototype", "hasownproperty", "hasOwnProperty",
+    "toString", "tostring", "valueOf", "valueof", "isPrototypeOf",
+    "isprototypeof", "propertyIsEnumerable", "propertyisenumerable",
+    "toLocaleString", "tolocalestring", "__defineGetter__", "__defineSetter__",
+    "__lookupGetter__", "__lookupSetter__",
+}
+
+
 def _norm(s):
-    return (s or "").strip().lower()
+    """Loose comparison form for names and refs.
+
+    Coerces rather than assuming a string. Nothing validates the TYPE of
+    display_name or company_id, so a store can legitimately hold a list, a
+    number or a bool there -- and `.strip()` on one of those raised a raw
+    exception out of _company_by_ref, which scans EVERY company. One malformed
+    record therefore broke get_company, list_companies, find_contacts,
+    list_invoices and list_shipments for the whole store, as a ToolError across
+    the wire rather than {ok:false}. Coercing yields a key that simply matches
+    nothing, which is the safe direction.
+    """
+    if s is None or isinstance(s, bool):
+        return ""
+    if not isinstance(s, str):
+        s = _num_to_str(s) if isinstance(s, (int, float)) else str(s)
+    return s.strip().lower()
 
 
 def _slug(name):
@@ -344,13 +436,15 @@ def _slug(name):
 def _company_by_ref(companies, ref):
     """Find a company by company_id or (loosely) by display name."""
     r = _norm(ref)
+    # .get(), not [...]: a record missing company_id/display_name entirely is a
+    # real legacy shape, and a KeyError here took down every name-based read.
     for c in companies:
-        if c["company_id"] == ref or c["company_id"] == r:
+        if c.get("company_id") == ref or c.get("company_id") == r:
             return c
     for c in companies:
-        if _norm(c["display_name"]) == r:
+        if _norm(c.get("display_name")) == r:
             return c
-    matches = [c for c in companies if r and r in _norm(c["display_name"])]
+    matches = [c for c in companies if r and r in _norm(c.get("display_name"))]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -599,14 +693,36 @@ def _same_invoice(rec, company_id, invoice_key):
 
 
 def _require_company(company_id):
+    """The company a new record may be attached to.
+
+    Checks LIVENESS, not just existence -- the company-side twin of
+    _live_project. Every default read drops records whose company is archived
+    (_archived_ids), so creating an invoice, project or contact against an
+    archived company wrote a record that was invisible the moment it landed,
+    while returning ok:true. That is exactly the outcome the project-side link
+    guards exist to prevent; this half was never given the same treatment.
+    """
     companies = STORE.load("companies")
-    if not any(c["company_id"] == company_id for c in companies):
+    hit = next((c for c in companies if c.get("company_id") == company_id), None)
+    if hit is None:
         raise StoreError(f"company_id '{company_id}' does not exist")
+    if hit.get("archived"):
+        raise StoreError(f"company '{company_id}' has been deleted -- a record "
+                         f"attached to it would not appear anywhere. Restore it "
+                         f"first with restore_company.")
 
 
 def _archived_ids():
-    """Set of company_ids currently archived (soft-deleted)."""
-    return {c["company_id"] for c in STORE.load("companies") if c.get("archived")}
+    """Set of company_ids currently archived (soft-deleted).
+
+    Falsy ids are dropped, exactly as _archived_project_nos drops falsy project
+    numbers: "" in this set matches every record whose company_id is null, and
+    normalize.py legitimately writes company_id: None on an invoice whose
+    client cell did not parse. Without this, one archived company with a
+    missing id hides those receivables store-wide.
+    """
+    return {k for c in STORE.load("companies") if c.get("archived")
+            and (k := c.get("company_id"))}
 
 
 def _shipment_hidden(s, arch_pnos):
@@ -1207,9 +1323,21 @@ def update_company(company_id: str, fields: dict) -> dict:
     """Edit a company record (display_name, role, domains, locations)."""
     try:
         with STORE.write_lock():
-            _validate(fields, COMPANY_FIELDS - {"company_id"}, "company")
+            # archived/archived_at are the soft-delete flag, owned by
+            # archive_company / restore_company. Written here they skipped
+            # archived_at and the vendor mirror, and -- because every read
+            # tests them for truthiness -- a string like "no" hid the customer
+            # and all its receivables while the record read archived: "no".
+            soft_delete = {"archived", "archived_at"} & set(fields)
+            if soft_delete:
+                raise StoreError(
+                    f"update_company cannot set {sorted(soft_delete)} -- use "
+                    f"archive_company / restore_company, which set the flag, "
+                    f"stamp archived_at, and keep the vendor record in step")
+            _validate(fields, COMPANY_FIELDS - {"company_id", "archived",
+                                                "archived_at"}, "company")
             companies = STORE.load("companies")
-            target = [c for c in companies if c["company_id"] == company_id]
+            target = [c for c in companies if c.get("company_id") == company_id]
             if not target:
                 return _err(f"company '{company_id}' not found")
             target[0].update(fields)
@@ -1329,18 +1457,38 @@ def create_company(fields: dict) -> dict:
             role = fields.get("role") or "customer"
             if role not in COMPANY_ROLES:
                 raise StoreError(f"role must be one of {sorted(COMPANY_ROLES)}")
-            cid = fields.get("company_id") or _slug(name)
+            if isinstance(name, bool) or not isinstance(name, (str, int, float)):
+                raise StoreError("display_name must be text")
+            supplied = fields.get("company_id")
+            if supplied is not None and (isinstance(supplied, bool)
+                                         or not isinstance(supplied, str)):
+                raise StoreError("company_id must be text")
+            cid = supplied or _slug(name)
             if not cid:
                 raise StoreError("could not derive a company_id from display_name")
+            if cid in _JS_RESERVED_KEYS:
+                # the visual app indexes records into a plain object keyed by
+                # company_id (m[id] = m[id] || []), so a name inherited from
+                # Object.prototype short-circuits onto a function and .push
+                # throws -- at top level, so NOTHING renders. _slug("Constructor")
+                # reaches this with no hostile input at all.
+                raise StoreError(
+                    f"company_id '{cid}' collides with a JavaScript built-in and "
+                    f"would stop the visual app rendering -- supply a different "
+                    f"company_id (e.g. '{cid}-co')")
             companies = STORE.load("companies")
-            if any(c["company_id"] == cid for c in companies):
+            if any(c.get("company_id") == cid for c in companies):
                 raise StoreError(f"company '{cid}' already exists")
             record = {k: None for k in COMPANY_FIELDS}
-            record.update({"company_id": cid, "display_name": name, "role": role,
-                           "domains": [], "locations": [], "archived": False})
+            # caller fields FIRST, then the authoritative identity -- the same
+            # order create_invoice uses. Reversed, `fields` won, so a caller
+            # could set archived:True and mint a company invisible from birth.
             record.update(fields)
-            record["company_id"], record["role"] = cid, role
-            if not record.get("primary_location") and record.get("locations"):
+            record.update({"company_id": cid, "display_name": name, "role": role,
+                           "archived": False, "archived_at": None})
+            record["domains"] = _as_list(record.get("domains"))
+            record["locations"] = _as_list(record.get("locations"))
+            if not record.get("primary_location") and record["locations"]:
                 record["primary_location"] = record["locations"][0]
             companies.append(record)
             STORE.save("companies", companies)

@@ -61,6 +61,27 @@ import sys
 PCT_RE = re.compile(r"(\d{1,3})\s*%")
 COMMISSION_RE = re.compile(r"\bcomm(?:ission)?\b", re.IGNORECASE)
 PAID_RE = re.compile(r"\bpaid\b", re.IGNORECASE)
+PAID_QUALIFIER_RE = re.compile(
+    r"\b(?:not|never|non|no|isn'?t|wasn'?t|aren'?t|won'?t|"
+    r"will|shall|should|would|expect(?:ed|ing|s)?|due|pending|awaiting|chas(?:e|ing)|"
+    r"partial(?:ly)?|part|half|balance|remaining|outstanding|short|"
+    r"if|unless|when|once|after|before|upon|assuming|"
+    r"to\s+be|yet\s+to|going\s+to|supposed\s+to)\b", re.IGNORECASE)
+
+
+def says_paid(text):
+    """True (paid) / False (no mention) / None (qualified -- do not guess).
+
+    Must stay in step with normalize.py's says_paid. A checker that reproduces
+    the importer's own parsing cannot catch the importer's mistake: this file
+    and audit_workbook_vs_store.py both carried the bare \\bpaid\\b and so
+    certified "NOT PAID" as paid for five releases.
+    """
+    t = "" if text is None else str(text)
+    if not PAID_RE.search(t):
+        return False
+    return None if PAID_QUALIFIER_RE.search(t) else True
+
 INV_RE = re.compile(r"INV[\s#-]*(\d+)", re.IGNORECASE)
 LEADING_NUMS_RE = re.compile(r"^\s*(\d{2,6})(?:\s*(?:and|&|,|/)\s*(\d{2,6}))*")
 ONE_NUM_RE = re.compile(r"\d{2,6}")
@@ -198,6 +219,11 @@ def load_changelog(store):
 # --------------------------------------------------------------- replay: sites
 def replay_invoice(blob):
     """Return (pre_fix, post_fix, commission_seen) for the invoice loop."""
+    # bare PAID_RE ON PURPOSE: this REPLAYS the pre-0.1.23 importer to
+    # discover what it produced. Using the corrected says_paid() here
+    # would replay a decision that never happened and invalidate every
+    # verdict. The corrected form is used for current-truth judgements
+    # (see the corroboration test below) and by find_qualified_paid().
     if PAID_RE.search(blob):
         return "paid", "paid", False
     if COMMISSION_RE.search(blob):
@@ -212,7 +238,7 @@ def replay_project_key(s):
     """Return (pre_fix, post_fix, commission_seen) for parse_project_key.
     Note the n >= 100 -> 'paid' branch, which the invoice loop does NOT have,
     and the 'None unless an INV number is present' fallback."""
-    if PAID_RE.search(s):
+    if PAID_RE.search(s):   # replay, not current truth -- see replay_invoice
         return "paid", "paid", False
     inv = bool(INV_RE.search(s))
     pct = PCT_RE.search(s)
@@ -381,7 +407,7 @@ def audit(store):
                 "persisted. Check this project's key in the source tracker "
                 "for a commission mention.")
         else:                                   # "paid"
-            corroborated = any(PAID_RE.search(r["blob"]) for r in linked)
+            corroborated = any((says_paid(r["blob"]) is True) for r in linked)
             if corroborated:
                 continue     # a linked invoice independently says paid
             rank, note = "low", (

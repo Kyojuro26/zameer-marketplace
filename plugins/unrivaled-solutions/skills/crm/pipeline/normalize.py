@@ -39,8 +39,63 @@ PCT_RE = re.compile(r"(\d{1,3})\s*%")
 # of assigning it as collection/payment status.
 COMMISSION_RE = re.compile(r"\bcomm(?:ission)?\b", re.IGNORECASE)
 PAID_RE = re.compile(r"\bpaid\b", re.IGNORECASE)
+# Words that NEGATE or QUALIFY a nearby "paid". `\bpaid\b` alone read "NOT
+# PAID as of 7/1 - chasing" as paid, wrote it over a payment_status_raw that
+# literally said "Open", and back-filled it onto the project -- an unpaid
+# receivable shown as collected, with no review flag, since v0.1.23. The
+# columns this runs over are free-text collection notes, so negation and
+# future tense are the normal case, not an edge case.
+PAID_QUALIFIER_RE = re.compile(
+    r"\b(?:not|never|non|no|isn'?t|wasn'?t|aren'?t|won'?t|"
+    r"will|shall|should|would|expect(?:ed|ing|s)?|due|pending|awaiting|chas(?:e|ing)|"
+    r"partial(?:ly)?|part|half|balance|remaining|outstanding|short|"
+    r"if|unless|when|once|after|before|upon|assuming|"
+    r"to\s+be|yet\s+to|going\s+to|supposed\s+to)\b", re.IGNORECASE)
+
+
+def says_paid(text):
+    """Did the source say this was PAID?
+
+    Returns True (paid), False (no mention), or None (a paid-ish word is
+    present but qualified -- do not guess). None is the important one: this
+    module's contract is that anything ambiguous is FLAGGED, never guessed, and
+    guessing here is the difference between a collected receivable and one
+    nobody is chasing.
+    """
+    t = st_text(text)
+    if not PAID_RE.search(t):
+        return False
+    return None if PAID_QUALIFIER_RE.search(t) else True
+
+
+def st_text(v):
+    return "" if v is None else str(v)
 LEADING_NUMS_RE = re.compile(r"^\s*(\d{2,6})(?:\s*(?:and|&|,|/)\s*(\d{2,6}))*")
 ONE_NUM_RE = re.compile(r"\d{2,6}")
+
+
+
+# Row bounds exist so a sheet with a stray cell far down does not make
+# openpyxl walk a million empty rows. They must never truncate real data
+# silently: the ledger grows past them on its own, and the independent audit
+# re-read with the SAME numbers, so it could not catch it either.
+ROW_CAP = 20000
+
+
+def _cap_check(ws, cap, label, review, min_row=1):
+    """Flag loudly if the sheet holds data beyond the row bound."""
+    try:
+        beyond = ws.max_row or 0
+    except Exception:                                 # noqa: BLE001
+        return
+    if beyond > cap:
+        review.append({
+            "type": "sheet_truncated",
+            "detail": (f"{label}: the sheet has {beyond} rows but only the first "
+                       f"{cap} were read. Rows {cap + 1}-{beyond} were NOT "
+                       f"imported. Raise ROW_CAP in normalize.py and re-run."),
+            "sheet_row": cap,
+        })
 
 
 def clean(v):
@@ -91,7 +146,7 @@ def strip_rep_tags(name):
     for m in PAREN_RE.finditer(s):
         tag = m.group(1).strip()
         if not tag:
-            continue
+            continue        # skip-ok: empty () in a name, not a data row
         (owners if OWNER_TAG_RE.match(tag) else notes).append(tag)
     if cut != -1:
         leftover = re.sub(r"\s+", " ", PAREN_RE.sub(" ", s[cut:])).strip(" -–—")
@@ -229,8 +284,16 @@ def parse_project_key(raw):
     if inv:
         out["invoice_no"] = inv.group(1)
 
-    if PAID_RE.search(s):
+    _paid = says_paid(s)
+    if _paid is True:
         out["collection_status"] = "paid"
+    elif _paid is None:
+        # a qualified "paid" -- "not paid", "will be paid", "partially paid".
+        # Never guess a collection status from it; flag for a person.
+        out["review"] = (out["review"] + "; " if out["review"] else "") + \
+            f"payment wording is qualified, collection_status left unset: {s!r}"
+        if inv:
+            out["collection_status"] = "open"
     elif COMMISSION_RE.search(s):
         # A percentage here is a commission/rep-split rate, not percent paid --
         # never guess; flag it so a person confirms the real collection status.
@@ -340,6 +403,13 @@ def run(workbook, outdir, force=False):
                 hrow = rr
                 break
         if not hrow:
+            review.append({
+                "type": "sheet_header_not_found",
+                "detail": (f"{ws.title!r}: no 'Project#' header in the first 7 "
+                           f"rows, so NONE of this sheet was imported -- no "
+                           f"deals, revenue, margin or collection status. Check "
+                           f"the header spelling (a stray space is enough)."),
+            })
             continue
         hm = header_map(ws, hrow, 15)
         c_pno = col(hm, "project#")
@@ -357,12 +427,20 @@ def run(workbook, outdir, force=False):
         c_marg = col(hm, "margain", "margin")
         c_notes = col(hm, "notes")
 
-        for row in ws.iter_rows(min_row=hrow + 1, max_row=2200, values_only=True):
+        for row in ws.iter_rows(min_row=hrow + 1, max_row=ROW_CAP, values_only=True):
             def g(ci):
                 return row[ci - 1] if ci and ci - 1 < len(row) else None
             cust = clean(g(c_cust))
             pno_raw = g(c_pno)
             if not cust and pno_raw in (None, ""):
+                if any(clean(g(c)) for c in (c_rev, c_gp, c_cost) if c):
+                    review.append({
+                        "type": "deal_row_without_keys",
+                        "detail": ("row carries financial values but has neither "
+                                   "a customer nor a project number, so it was "
+                                   "not imported"),
+                        "sheet_row": rn,
+                    })
                 continue
             pno = clean(pno_raw)
             if pno:
@@ -443,13 +521,14 @@ def run(workbook, outdir, force=False):
     cc = {k: col(hm, k) for k in ["client business", "client name", "email",
           "phone number", "job title", "location", "action taken and notes",
           "last date of action"]}
-    for row in ws.iter_rows(min_row=2, max_row=1100, values_only=True):
+    _cap_check(ws, ROW_CAP, 'contacts sheet', review)
+    for row in ws.iter_rows(min_row=2, max_row=ROW_CAP, values_only=True):
         def g(ci):
             return row[ci - 1] if ci and ci - 1 < len(row) else None
         biz = clean(g(cc["client business"]))
         name = clean(g(cc["client name"]))
         if not biz and not name:
-            continue
+            continue        # skip-ok: a contact row with neither a business nor a name carries nothing to import
         cid = ensure_company(biz, "customer") if biz else None
         email = clean(g(cc["email"]))
         d = domain_of(email)
@@ -478,12 +557,13 @@ def run(workbook, outdir, force=False):
         "phone": ["contact phone number"], "offerings": ["offerings"],
         "send_po": ["send po's to", "send po’s to"], "send_inv": ["send invoices to"],
     }.items()}
-    for row in ws.iter_rows(min_row=vhrow + 1, max_row=1100, values_only=True):
+    _cap_check(ws, ROW_CAP, 'vendors sheet', review)
+    for row in ws.iter_rows(min_row=vhrow + 1, max_row=ROW_CAP, values_only=True):
         def g(ci):
             return row[ci - 1] if ci and ci - 1 < len(row) else None
         comp = clean(g(vc["company"]))
         if not comp:
-            continue
+            continue        # skip-ok: a vendor row with no company name carries nothing to import
         cid = ensure_company(comp, "vendor")
         rep = clean(g(vc["rep"]))
         email = clean(g(vc["email"]))
@@ -511,7 +591,8 @@ def run(workbook, outdir, force=False):
     #   pay date and "Vendors were…" prose OR real vendor-PO shipment legs.
     # Semantics confirmed by Zeeshan 2026-07-03.
     ws = wb["Project Tracker"]
-    all_rows = list(ws.iter_rows(min_row=1, max_row=400, values_only=True))
+    _cap_check(ws, ROW_CAP, 'project tracker sheet', review)
+    all_rows = list(ws.iter_rows(min_row=1, max_row=ROW_CAP, values_only=True))
     inv_header_idx = next((i for i, r in enumerate(all_rows)
                            if r and clean(r[0]) == "Invoice Number:"), None)
     if inv_header_idx is None:
@@ -557,6 +638,13 @@ def run(workbook, outdir, force=False):
     # --- Table 1: open orders ---
     for r in all_rows[1:inv_header_idx]:
         if not r or r[0] is None:
+            if r and any(c is not None and str(c).strip() for c in r[1:]):
+                review.append({
+                    "type": "open_order_row_without_project",
+                    "detail": ("row has content but no project number, so its "
+                               "shipment legs were not imported: "
+                               + repr([clean(c) for c in list(r)[:6]])),
+                })
             continue
         raw_key = r[0]
         parsed = parse_project_key(raw_key)
@@ -580,7 +668,7 @@ def run(workbook, outdir, force=False):
         for j in range(6, 20, 2):   # G..T as PO/date pairs
             po_val, sd_val = clean(cells[j]), cells[j + 1]
             if not po_val and not sd_val:
-                continue
+                continue    # skip-ok: an empty PO/date column pair, not a row
             leg += 1
             add_shipment(primary or "noid", leg, po_val, sd_val, pnos,
                          row_company, picked_client, clean(cells[5]), cells[2])
@@ -594,6 +682,18 @@ def run(workbook, outdir, force=False):
 
     for rn, r in enumerate(all_rows[inv_header_idx + 1:], inv_header_idx + 2):
         if not r or r[0] is None:
+            # A blank invoice-number cell used to drop the row entirely, with no
+            # needs_review entry -- and that is exactly what a merged cell, or
+            # an order not yet invoiced, looks like. A row carrying any other
+            # content is a real receivable that would simply never exist.
+            if r and any(c is not None and str(c).strip() for c in r[1:]):
+                review.append({
+                    "type": "invoice_row_without_number",
+                    "detail": ("row has content but no invoice number, so it was "
+                               "not imported: "
+                               + repr([clean(c) for c in list(r)[:6]])),
+                    "sheet_row": rn,
+                })
             continue
         cells = list(r) + [None] * 24
         invoice_no = clean(r[0])
@@ -608,8 +708,17 @@ def run(workbook, outdir, force=False):
         status_raw = clean(cells[3])
         pay_notes = clean(cells[5])
         blob = f"{status_raw or ''} {pay_notes or ''}"
-        if re.search(r"\bpaid\b", blob, re.IGNORECASE):
+        _paid = says_paid(blob)
+        if _paid is True:
             payment_status = "paid"
+        elif _paid is None:
+            # qualified wording: leave it OPEN (the safe direction for a
+            # receivable -- an open invoice gets chased, a wrongly-paid one
+            # never does) and flag it.
+            payment_status = "open"
+            review.append({"type": "payment_wording_ambiguous", "invoice_no": invoice_no,
+                           "detail": f"qualified payment wording, not read as paid: {blob!r}",
+                           "sheet_row": rn})
         elif COMMISSION_RE.search(blob):
             # Same guard as parse_project_key: a "NN%" next to a commission
             # mention is a rep-split rate, not percent of the invoice paid --
@@ -694,7 +803,7 @@ def run(workbook, outdir, force=False):
         toks = [t for t in re.split(r"[^a-z0-9]+", (c["display_name"] or "").lower())
                 if t and t not in STOP]
         if not toks:
-            continue
+            continue        # skip-ok: token loop for duplicate detection, not a row
         key = " ".join(toks[:2]) if len(toks) >= 2 else toks[0]
         buckets.setdefault(key, []).append(c["company_id"])
     dupes = {k: v for k, v in buckets.items() if len(v) > 1}

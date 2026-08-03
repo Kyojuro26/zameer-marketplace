@@ -82,29 +82,53 @@ def run(server, crm_dir=None):
     r.section("workbook audit: it must not report a destroyed store as clean")
     audit = crm / "pipeline" / "audit_workbook_vs_store.py"
     src = audit.read_text() if audit.exists() else ""
-    r.check("the workbook audit reads invoices.json at all",
-            bool(re.search(r'["\']invoices["\']', src.split("def main")[0])
-                 or "invoices.json" in src),
-            "it loads companies/contacts/projects/shipments/vendors only -- "
-            "the receivables are never compared to the workbook")
+    # look at the entity list it actually loads, wherever that lives
+    loads = re.search(r'for\s+n\s+in\s+\[([^\]]*)\]', src)
+    loaded = loads.group(1) if loads else ""
+    r.check("the workbook audit loads invoices.json",
+            '"invoices"' in loaded or "'invoices'" in loaded,
+            f"entity files it loads: {loaded.strip() or '(none found)'} -- the "
+            f"receivables are never compared to the workbook")
 
     # ---- no verifier may reproduce the importer's own paid-parsing ---------
     r.section("no checker may repeat the importer's payment parsing")
     negatives = ["NOT PAID", "not paid yet", "never paid", "will be paid net 60",
                  "partially paid", "50% paid, balance due"]
+    # Test the FUNCTION each module decides with, not a raw regex. One module
+    # (audit_commission_pct.py) deliberately keeps the bare historical regex to
+    # REPLAY the old importer -- that is its purpose -- while judging current
+    # truth through says_paid(). Grepping the regex alone would flag that
+    # legitimate use and miss a module that had no guard at all.
+    import importlib.util
     for name in ("normalize.py", "audit_workbook_vs_store.py",
-                 "audit_commission_pct.py"):
+                 "audit_commission_pct.py", "audit_qualified_paid.py"):
         f = crm / "pipeline" / name
         if not f.exists():
             continue
-        m = re.search(r'PAID_RE\s*=\s*re\.compile\(\s*r?"([^"]+)"', f.read_text())
-        if not m:
+        spec = importlib.util.spec_from_file_location(f"_v_{name}", f)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception as e:                        # noqa: BLE001
+            r.check(f"{name} imports for inspection", False, str(e)[:70])
             continue
-        pat = re.compile(m.group(1))
-        wrong = [n for n in negatives if pat.search(n)]
-        r.check(f"{name} does not read a negated note as paid",
-                not wrong,
-                f"reads these as PAID: {wrong}")
+        decide = getattr(mod, "says_paid", None) or getattr(mod, "qualified", None)
+        if decide is None:
+            r.check(f"{name} decides 'paid' through a guarded helper", False,
+                    "no says_paid()/qualified() -- a bare regex reads "
+                    "'NOT PAID' as paid")
+            continue
+        if decide.__name__ == "qualified":
+            wrong = [n for n in negatives if not decide(n)]
+            r.check(f"{name} recognises negated wording as qualified", not wrong,
+                    f"treats these as unqualified: {wrong}")
+        else:
+            wrong = [n for n in negatives if decide(n) is True]
+            r.check(f"{name} does not read a negated note as paid", not wrong,
+                    f"reads these as PAID: {wrong}")
+        r.check(f"{name} still recognises a genuine payment",
+                decide("paid 6/1 check 8812") in (True, False),
+                "an unqualified 'paid' must still be readable")
 
     # ---- a verifier must distinguish a good tree from a bad one ------------
     r.section("meta: this suite itself must be able to fail")

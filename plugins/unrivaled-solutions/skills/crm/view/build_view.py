@@ -375,7 +375,11 @@ function setModePill(){
 /* ---------------------------------------------------------- indexes/util -- */
 let contactsByCo={}, projectsByCo={}, shipsByCo={}, invoicesByCo={}, companyById={}, vendorById={};
 function reindex(){
-  const byCo = (arr)=>{const m={};(arr||[]).forEach(x=>{(m[x.company_id]=m[x.company_id]||[]).push(x)});return m;};
+  // Object.create(null), not {}: a company_id of 'constructor' or
+  // '__proto__' otherwise short-circuits onto an inherited member and
+  // .push throws. reindex() runs at top level, so that blanked the ENTIRE
+  // app, and _slug('Constructor') reaches it with no hostile input.
+  const byCo = (arr)=>{const m=Object.create(null);(arr||[]).forEach(x=>{(m[x.company_id]=m[x.company_id]||[]).push(x)});return m;};
   contactsByCo = byCo(DATA.contacts);
   projectsByCo = byCo(DATA.projects);
   shipsByCo    = byCo(DATA.shipments);

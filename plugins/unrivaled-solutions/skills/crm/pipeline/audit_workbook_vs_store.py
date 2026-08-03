@@ -40,6 +40,27 @@ DATE_STR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{1,2}/\d{1,2}/\d{2,4}$")
 PAID_RE = re.compile(r"(?i)\bpaid\b")
 
 
+PAID_QUALIFIER_RE = re.compile(
+    r"\b(?:not|never|non|no|isn'?t|wasn'?t|aren'?t|won'?t|"
+    r"will|shall|should|would|expect(?:ed|ing|s)?|due|pending|awaiting|chas(?:e|ing)|"
+    r"partial(?:ly)?|part|half|balance|remaining|outstanding|short|"
+    r"if|unless|when|once|after|before|upon|assuming|"
+    r"to\s+be|yet\s+to|going\s+to|supposed\s+to)\b", re.IGNORECASE)
+
+
+def says_paid(text):
+    """True (paid) / False (no mention) / None (qualified -- do not guess).
+
+    Must stay in step with normalize.py's says_paid. A checker that reproduces
+    the importer's own parsing cannot catch the importer's mistake: this file
+    and audit_workbook_vs_store.py both carried the bare \\bpaid\\b and so
+    certified "NOT PAID" as paid for five releases.
+    """
+    t = "" if text is None else str(text)
+    if not PAID_RE.search(t):
+        return False
+    return None if PAID_QUALIFIER_RE.search(t) else True
+
 def clean(v):
     if v is None:
         return None
@@ -187,7 +208,13 @@ def main():
     # and Windows' default locale codec (cp1252) can't read it back. utf-8-sig
     # also survives a BOM from any hand-edit in Notepad.
     S = {}
-    for n in ["companies", "contacts", "projects", "shipments", "vendors"]:
+    # invoices included: this audit exists to check the store against the
+    # workbook, and it never loaded the receivables at all -- so a store
+    # with every invoice deleted produced a summary byte-identical to a
+    # healthy one. needs_review is loaded so the report can say how much
+    # the importer had already flagged.
+    for n in ["companies", "contacts", "projects", "shipments", "vendors",
+              "invoices", "needs_review"]:
         try:
             with open(store / f"{n}.json", encoding="utf-8-sig") as f:
                 S[n] = json.load(f)
@@ -261,8 +288,8 @@ def main():
 
     joined = 0
     for ino, inv in inv_by_no.items():
-        paid = bool(PAID_RE.search(inv["payment_status_raw"] or "")
-                    or PAID_RE.search(inv["payment_notes"] or ""))
+        paid = bool((says_paid(inv["payment_status_raw"] or "") is True)
+                    or (says_paid(inv["payment_notes"] or "") is True))
         expected = "paid" if paid else "open"
         targets = proj_by_inv.get(ino, [])
         if targets:
