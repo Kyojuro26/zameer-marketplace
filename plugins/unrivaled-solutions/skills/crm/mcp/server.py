@@ -1397,8 +1397,10 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
                     f"{len(target)} shipments share the id '{shipment_id}' "
                     f"(vendor POs: {[t.get('vendor_po_raw') for t in target]}). "
                     f"Nothing here can tell them apart, so this needs the "
-                    f"duplicate resolved in the store directly -- editing one "
-                    f"at random is how the wrong leg gets marked delivered.")
+                    f"duplicate resolved first -- editing one at random is how "
+                    f"the wrong leg gets marked delivered. Run "
+                    f"renumber_duplicate_shipments('{shipment_id}') to give each "
+                    f"leg its own id, then edit them individually.")
 
             target[0].update(fields)
             STORE.save("shipments", shipments)
@@ -1443,8 +1445,10 @@ def reassign_shipment(shipment_id: str, new_project_no: Optional[str] = None,
                     f"{len(target)} shipments share the id '{shipment_id}' "
                     f"(vendor POs: {[t.get('vendor_po_raw') for t in target]}). "
                     f"Nothing here can tell them apart, so this needs the "
-                    f"duplicate resolved in the store directly -- editing one "
-                    f"at random is how the wrong leg gets marked delivered.")
+                    f"duplicate resolved first -- editing one at random is how "
+                    f"the wrong leg gets marked delivered. Run "
+                    f"renumber_duplicate_shipments('{shipment_id}') to give each "
+                    f"leg its own id, then edit them individually.")
 
             # _resolve, not _key: _key left a caller's "4521.0" un-canonicalized
             # while _live_project validated it against the project stored as
@@ -2047,6 +2051,51 @@ def _set_archived(company_id: str, archived: bool) -> dict:
             STORE.log("archive" if archived else "restore", "company", company_id,
                       {"archived": archived})
             return {"ok": True, "interface_version": VERSION, "company": target[0]}
+    except StoreError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def renumber_duplicate_shipments(shipment_id: str) -> dict:
+    """Give each shipment sharing an id its own unique id, so they can be edited.
+
+    Stores migrated before v0.1.28 can hold several legs under one
+    shipment_id -- the importer restarted its leg counter on every row, so a
+    project number appearing on two open-order rows minted the same id twice.
+    update_shipment and reassign_shipment refuse such a leg outright (they
+    cannot tell which one you mean), and the visual app opens whichever comes
+    first. That left no way to edit those legs at all.
+
+    This is the way out: the first leg keeps the id, the rest get -L<n>
+    suffixes that are free. Nothing else about them changes, and the vendor PO
+    on each is reported so you can tell which is which."""
+    try:
+        with STORE.write_lock():
+            shipments = STORE.load("shipments")
+            dupes = [s for s in shipments if s.get("shipment_id") == shipment_id]
+            if len(dupes) < 2:
+                return _err(f"shipment '{shipment_id}' is not duplicated "
+                            f"({len(dupes)} record(s) carry that id)")
+            taken = {x.get("shipment_id") for x in shipments}
+            base = str(shipment_id).rsplit("-L", 1)[0] or str(shipment_id)
+            renamed = []
+            n = 1
+            for leg in dupes[1:]:
+                while f"{base}-L{n}" in taken:
+                    n += 1
+                new_id = f"{base}-L{n}"
+                taken.add(new_id)
+                leg["shipment_id"] = new_id
+                renamed.append({"new_shipment_id": new_id,
+                                "vendor_po_raw": leg.get("vendor_po_raw"),
+                                "stage": leg.get("stage")})
+            STORE.save("shipments", shipments)
+            STORE.log("renumber", "shipment", shipment_id,
+                      {"renamed": renamed})
+            return {"ok": True, "interface_version": VERSION,
+                    "kept": {"shipment_id": shipment_id,
+                             "vendor_po_raw": dupes[0].get("vendor_po_raw")},
+                    "renamed": renamed}
     except StoreError as e:
         return _err(e)
 

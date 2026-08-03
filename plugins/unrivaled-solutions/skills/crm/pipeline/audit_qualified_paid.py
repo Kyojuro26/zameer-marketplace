@@ -56,6 +56,39 @@ _PW = _load_payment_words()
 PAID_RE = _PW.PAID_RE
 says_paid = _PW.says_paid
 
+# DELIBERATELY INDEPENDENT of says_paid.
+#
+# This script's job is to find records the importer may already have got wrong.
+# Calling the importer's own says_paid made that impossible: if the importer
+# said PAID, this asks says_paid, gets True, and reports CLEAN -- so it
+# certified a store holding an invoice whose own text read "NOT PAID IN FULL -
+# 50% short". Sharing one definition is right for DECIDING (the importer and
+# its checkers must not disagree about what is stored); it is wrong for
+# AUDITING, which needs a second opinion.
+#
+# So this vocabulary is deliberately BROADER and its errors point the safe way:
+# a false positive costs the operator one glance at a record that turns out
+# fine, a false negative leaves a written-off receivable nobody ever revisits.
+SUSPECT_RE = re.compile(
+    r"\b(?:not|never|non|un|isn'?t|wasn'?t|hasn'?t|haven'?t|didn'?t|won'?t|"
+    r"will|shall|should|would|expect|promis|pending|awaiting|chas|"
+    r"partial|part|half|deposit|instal?lment|1st|2nd|first|balance|remain|"
+    r"outstanding|short|less|rest|owe|owes|owed|owing|still|open|"
+    r"bounce|nsf|return|revers|charge|void|cancel|refund|insufficient|"
+    r"disput|confirm|verify|unclear|unsure|claim|"
+    r"if|unless|once|when|upon|c\.?o\.?d\.?|delivery|"
+    r"vendor|supplier|freight|carrier)\b"
+    r"|\?|\d{1,3}\s*%|\$?[\d,]+(?:\.\d\d)?\s+of\s+", re.IGNORECASE)
+
+
+def suspect(text):
+    """A stored PAID whose own evidence text contains anything that could
+    qualify it. Broader than says_paid on purpose -- see above."""
+    t = "" if text is None else str(text)
+    if not PAID_RE.search(t) and not SUSPECT_RE.search(t):
+        return False
+    return bool(SUSPECT_RE.search(t))
+
 def st(v):
     return "" if v is None else str(v)
 
@@ -96,7 +129,7 @@ def main():
             continue
         blob = f"{st(inv.get('payment_status_raw'))} {st(inv.get('payment_notes'))}"
         stored = st(inv.get("payment_status")).strip().lower()
-        if stored.startswith("paid") and says_paid(blob) is None:
+        if stored.startswith("paid") and suspect(blob):
             findings.append({
                 "kind": "invoice",
                 "company_id": st(inv.get("company_id")),
@@ -112,7 +145,7 @@ def main():
         stored = st(p.get("collection_status")).strip().lower()
         # the project's own notes are the only evidence back-filled onto it
         blob = f"{st(p.get('notes'))} {st(p.get('payment_notes'))}"
-        if stored.startswith("paid") and says_paid(blob) is None:
+        if stored.startswith("paid") and suspect(blob):
             findings.append({
                 "kind": "project",
                 "project_no": st(p.get("project_no")),

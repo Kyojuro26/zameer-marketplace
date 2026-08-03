@@ -629,6 +629,18 @@ def run(workbook, outdir, force=False, mode="merge"):
         s = clean(v)
         return bool(s and not _is_dateish(v) and PO_TOKEN_RE.search(s))
 
+    # A running counter PER sid_base, not per row. It used to restart at 1 on
+    # every row, so "4521" appearing on two open-order rows (phase 2, a
+    # multi-project key, a continuation) minted 4521-L1 twice. Duplicate
+    # shipment_ids are unusable downstream: update_shipment and
+    # reassign_shipment cannot tell the legs apart and refuse outright, and the
+    # visual app's .find() silently opens the first one's data.
+    _leg_seq = {}
+
+    def _next_leg(sid_base):
+        _leg_seq[sid_base] = _leg_seq.get(sid_base, 0) + 1
+        return _leg_seq[sid_base]
+
     def add_shipment(sid_base, leg_no, po_val, sd_val, pnos, company_id,
                      client, notes, start, invoice_no=None):
         stage = "Shipped" if sd_val else "Ordered"
@@ -636,7 +648,8 @@ def run(workbook, outdir, force=False, mode="merge"):
             stage = "On Hold"
         primary = pnos[0] if pnos else None
         shipments.append({
-            "shipment_id": f"{sid_base}-L{leg_no}",
+            # leg_no is ignored in favour of the running counter
+            "shipment_id": f"{sid_base}-L{_next_leg(sid_base)}",
             "project_no": primary, "all_project_nos": [p for p in pnos if p],
             "invoice_no": invoice_no,
             "vendor_po_raw": po_val,

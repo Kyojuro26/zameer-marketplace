@@ -110,6 +110,16 @@ def load_operator_edits(store_dir):
                 continue
             if op == "create":
                 created.add((ent, key))
+                # A record the operator CREATED is theirs in full: everything
+                # they set at creation must survive a re-import. Without this a
+                # hand-entered invoice marked paid reverted to open and lost
+                # source="manual", which also re-armed the commission audit.
+                if isinstance(fields, dict):
+                    edits.setdefault((ent, key), set()).update(fields.keys())
+                edits.setdefault((ent, key), set()).update(
+                    {"payment_status", "pay_date", "payment_notes", "source",
+                     "invoice_no", "project_no", "due_on"}
+                    if ent == "invoice" else {"source"})
             if op == "rename" and isinstance(fields, dict):
                 # An edit is recorded under the number the record had AT THE
                 # TIME. A later rename moves the record, so looking it up by its
@@ -364,6 +374,26 @@ def format_report(report):
             L.append(f"  {p['file']} {p['key']}: {', '.join(p['fields'])}")
         if len(report["preserved"]) > 40:
             L.append(f"  ... and {len(report['preserved']) - 40} more")
+    if report.get("ambiguous"):
+        L.append(f"\nCOULD NOT MATCH {len(report['ambiguous'])} workbook row(s): "
+                 f"the store holds more than one record under each of these "
+                 f"numbers, so there is no way to tell which one the workbook "
+                 f"meant. Every existing record was left EXACTLY as it is, and "
+                 f"the workbook's version of these was NOT applied -- it will "
+                 f"keep being skipped until the duplicate is resolved:")
+        for a in report["ambiguous"][:40]:
+            L.append(f"  {a['file']} {a['key']}  ({a['count']} records share it)")
+        if len(report["ambiguous"]) > 40:
+            L.append(f"  ... and {len(report['ambiguous']) - 40} more")
+    if report.get("renamed_away"):
+        L.append(f"\nSKIPPED {len(report['renamed_away'])} workbook row(s) whose "
+                 f"number you have since changed -- re-adding them would create "
+                 f"the same record twice:")
+        for a in report["renamed_away"][:20]:
+            L.append(f"  {a['file']} {a['key']}")
+    if report.get("untouched"):
+        L.append(f"\n{report['untouched']} record(s) already in the store were "
+                 f"left untouched (see the note above).")
     if report["kept"]:
         L.append(f"\nKEPT {len(report['kept'])} record(s) the workbook no longer "
                  f"lists. Nothing was deleted -- review these:")
