@@ -36,7 +36,13 @@ function launch(opts) {
     Promise, Set, Map, isNaN, parseFloat, parseInt, encodeURIComponent,
     decodeURIComponent, setTimeout: (fn) => { if (opts.runTimers) fn(); },
     clearTimeout, alert: (m) => sandbox.__alerts.push(String(m)),
-    confirm: () => (opts.confirm === undefined ? true : opts.confirm),
+    // Prompts are recorded and the answer is settable mid-test, so a test can
+    // assert both "was the operator asked?" and "was the answer obeyed?".
+    // A confirm that is never asked is the failure mode that matters here.
+    confirm: (m) => {
+      sandbox.__confirms.push(String(m));
+      return sandbox.__confirmReturn;
+    },
     window: {
       addEventListener() {}, location: { href: '', search: '' },
       matchMedia: () => ({ matches: false, addEventListener() {} }),
@@ -44,6 +50,8 @@ function launch(opts) {
     fetch: () => new Promise(() => {}),          // never resolves by default
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     __alerts: [],
+    __confirms: [],
+    __confirmReturn: opts.confirm === undefined ? true : opts.confirm,
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
@@ -73,6 +81,10 @@ function launch(opts) {
     el: (id) => document._els[id],
     els: document._els,
     alerts: () => sandbox.__alerts,
+    confirms: () => sandbox.__confirms,
+    resetConfirms: () => { sandbox.__confirms.length = 0; },
+    answerConfirm: (v) => { sandbox.__confirmReturn = v; },
+    doc: document,
     calls: () => sandbox.__calls,
     resetCalls: () => { sandbox.__calls.length = 0; },
     eval: (code) => vm.runInContext(code, sandbox),

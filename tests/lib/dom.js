@@ -48,7 +48,15 @@ function makeEl(id, doc) {
     getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; },
     get innerHTML() { return this._html || ''; },
     set innerHTML(h) { this._html = String(h); if (doc) doc._parse(this._html); },
-    addEventListener() {}, removeChild() {}, remove() {}, focus() {}, blur() {},
+    // Listeners are RECORDED, not just swallowed. A shim that drops them makes
+    // every close-affordance test unable to fail: the handler never runs, the
+    // drawer never closes, and an assertion of "still open" passes on code
+    // that does nothing. See fire() for what this deliberately does NOT model.
+    _listeners: Object.create(null),
+    addEventListener(type, fn) {
+      (this._listeners[type] || (this._listeners[type] = [])).push(fn);
+    },
+    removeChild() {}, remove() {}, focus() {}, blur() {},
     insertAdjacentHTML(_pos, h) { if (doc) doc._parse(String(h)); },
     querySelectorAll() { return []; }, querySelector() { return null; },
     closest() { return null; },
@@ -94,11 +102,28 @@ function createDocument() {
     createElement(t) { const e = makeEl('', doc); e.tagName = String(t).toUpperCase(); return e; },
     querySelectorAll() { return []; },
     querySelector() { return null; },
-    addEventListener() {},
+    _listeners: Object.create(null),
+    addEventListener(type, fn) {
+      (doc._listeners[type] || (doc._listeners[type] = [])).push(fn);
+    },
   };
   doc.body = makeEl('body', doc);
   doc.documentElement = makeEl('html', doc);
   return doc;
+}
+
+// Invoke the handlers registered on `target` for `type`.
+//
+// This does NOT model bubbling: elements in this shim are a flat id registry,
+// not a tree, so an 'input' on a child cannot propagate to #dbody on its own.
+// Firing directly at #dbody stands in for "the event reached the delegate",
+// which is the browser behaviour the app relies on but is not itself under
+// test here. What IS under test is what our handler does once it arrives.
+// Returns the number of handlers invoked so a test can assert one was wired.
+function fire(target, type, evt) {
+  const hs = (target && target._listeners && target._listeners[type]) || [];
+  hs.forEach(fn => fn(evt || {}));
+  return hs.length;
 }
 
 function decodeEntities(s) {
@@ -107,4 +132,4 @@ function decodeEntities(s) {
     .replace(/&amp;/g, '&');
 }
 
-module.exports = { createDocument, makeEl, isValidDateString, decodeEntities };
+module.exports = { createDocument, makeEl, isValidDateString, decodeEntities, fire };

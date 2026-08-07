@@ -102,6 +102,13 @@ TEMPLATE = r"""<!DOCTYPE html>
           border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(20,30,50,.08);
           transform:translateX(100%);transition:transform .18s ease;z-index:20;overflow-y:auto}
   .drawer.open{transform:none}
+  /* Sits between the page (z<19) and the drawer (z=20). Clicking it closes the
+     drawer, and it also blocks clicks reaching the page underneath -- without
+     it, clicking a company in the sidebar switched the main panel while the
+     drawer stayed open still editing the PREVIOUS company's record. */
+  .scrim{position:fixed;inset:0;background:rgba(20,30,50,.28);opacity:0;
+         pointer-events:none;transition:opacity .18s ease;z-index:19}
+  .scrim.open{opacity:1;pointer-events:auto}
   .drawer .dh{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
   .drawer .db{padding:20px}
   .drawer h3{margin:0;font-size:17px}
@@ -158,7 +165,8 @@ TEMPLATE = r"""<!DOCTYPE html>
   </aside>
   <main class="main" id="main"><div class="empty">Select a company to begin.</div></main>
 </div>
-<div class="drawer" id="drawer"><div class="dh"><h3 id="dtitle"></h3><button class="x" onclick="closeDrawer()">&times;</button></div><div class="db" id="dbody"></div></div>
+<div class="scrim" id="scrim"></div>
+<div class="drawer" id="drawer"><div class="dh"><h3 id="dtitle"></h3><button class="x" onclick="requestCloseDrawer()">&times;</button></div><div class="db" id="dbody"></div></div>
 <div class="mvp" id="modePill">Connecting…</div>
 
 <script>
@@ -911,7 +919,7 @@ function openProject(pno){
   document.getElementById('drawerNote').textContent = CRM.mode==='embedded'
     ? 'Demo mode: this save lasts only for this browser session.'
     : 'Saves persist to your CRM records through the validated write interface.';
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
 }
 
 function numOrNull(id){
@@ -1021,7 +1029,7 @@ function openNewProject(cid){
     <div class="field"><label>Notes</label><textarea id="n_notes"></textarea></div>
     <button class="btn" id="saveBtn" onclick="saveNewProject('${jesc(cid)}')">Create project</button>
     <span class="saved" id="savedMsg"></span>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
 }
 
 async function saveNewProject(cid){
@@ -1058,7 +1066,7 @@ function openNewContact(cid){
     <button class="btn" id="saveBtn" onclick="saveNewContact('${jesc(cid)}')">Add contact</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Matched by email if one already exists — no duplicates.</p>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
 }
 
 async function saveNewContact(cid){
@@ -1105,7 +1113,7 @@ function openEditContact(cid, email, name){
     <button class="btn" id="saveBtn" onclick="saveEditContact('${jesc(cid)}','${jesc(c.email||'')}','${jesc(c.name||'')}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Matched by email (or by name if there's no email) — changing both at once can create a second contact instead of updating this one.</p>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
   snapDates(['e_c_lastact']);
 }
 
@@ -1176,7 +1184,7 @@ function openNewShipment(pno){
     </div>
     <button class="btn" id="saveBtn" onclick="saveNewShipment('${jesc(pno)}')">Add shipment</button>
     <span class="saved" id="savedMsg"></span>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
 }
 
 async function saveNewShipment(pno){
@@ -1215,7 +1223,7 @@ function openNewCompany(role){
     <button class="btn" id="saveBtn" onclick="saveNewCompany('${jesc(role)}')">Add ${label}</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Saved to your CRM records; the name must be unique.</p>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
 }
 
 async function saveNewCompany(role){
@@ -1260,7 +1268,7 @@ function openEditCompany(cid){
     <button class="btn" id="saveBtn" onclick="saveEditCompany('${jesc(cid)}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Customer/vendor type isn't editable here — ask Claude in chat if a company needs to be reclassified.</p>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
 }
 
 async function saveEditCompany(cid){
@@ -1312,7 +1320,7 @@ function openEditVendor(cid){
     <div class="field"><label>Notes</label><textarea id="e_notes" placeholder="Anything else worth remembering about this vendor">${esc(v.notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveEditVendor('${jesc(cid)}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
 }
 
 async function saveEditVendor(cid){
@@ -1354,7 +1362,7 @@ function openNewInvoice(cid){
     <div class="field"><label>Notes</label><textarea id="n_iv_notes"></textarea></div>
     <button class="btn" id="saveBtn" onclick="saveNewInvoice('${jesc(cid)}')">Create invoice</button>
     <span class="saved" id="savedMsg"></span>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
 }
 
 async function saveNewInvoice(cid){
@@ -1401,7 +1409,7 @@ function openEditInvoice(cid, invoiceNo){
     <div class="field"><label>Notes</label><textarea id="e_iv_notes">${esc(v.payment_notes||'')}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveEditInvoice('${jesc(cid)}','${jesc(v.invoice_no||'')}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
   snapDates(['e_iv_date','e_iv_paydate','e_iv_due']);
 }
 
@@ -1485,7 +1493,7 @@ function openShipment(sid){
     <p class="muted" style="margin-top:16px;font-size:12px">${CRM.mode==='embedded'
       ? 'Demo mode: this save lasts only for this browser session.'
       : 'Stage changes persist to your CRM records (Ordered → Shipped → Delivered → Installed).'}</p>`;
-  document.getElementById('drawer').classList.add('open');
+  openDrawer();
   snapDates(['s_date','s_start','s_eta']);
 }
 
@@ -1569,7 +1577,43 @@ function noticeToast(text){
   el.textContent = '⚠ ' + text + '  (click to dismiss)';
   el.onclick = ()=>{ el.remove(); };
 }
-function closeDrawer(){document.getElementById('drawer').classList.remove('open');}
+/* ---------------------------------------------------- drawer open/close --
+   One #drawer serves all eleven editors, so this lives in one place.
+
+   There are deliberately TWO closes:
+
+     closeDrawer()         unconditional. Every save path calls this, and a
+                           save that already succeeded must never be
+                           interrupted by a prompt.
+     requestCloseDrawer()  user-initiated (scrim, Esc, the X). Asks first if
+                           the form has been touched.
+
+   The prompt exists because this change makes closing EASY. The X was a
+   deliberate act; clicking beside a drawer is not, and the store is the only
+   copy of these receivables -- so a stray click must not silently discard
+   something that was typed and not yet saved.
+
+   Dirtiness is tracked by listening for input/change on #dbody rather than by
+   diffing a snapshot of the field values. #dbody survives every innerHTML
+   replacement, so ONE delegated listener covers all eleven drawers and there
+   is no ordering hazard with the snapDates() calls that run after three of
+   them open. Typing a value then manually restoring it still counts as dirty;
+   that costs one extra confirm and never loses an edit. */
+let drawerDirty = false;
+function openDrawer(){
+  drawerDirty = false;
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('scrim').classList.add('open');
+}
+function closeDrawer(){
+  drawerDirty = false;
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('scrim').classList.remove('open');
+}
+function requestCloseDrawer(){
+  if(drawerDirty && !confirm('Discard your unsaved changes to this record?')) return;
+  closeDrawer();
+}
 
 function draftReady(draft, headline){
   const el = document.getElementById('draftToast') || (()=>{
@@ -1661,6 +1705,18 @@ function setFilter(f){
 }
 document.querySelectorAll('#filters button').forEach(b=>
   b.addEventListener('click', ()=>setFilter(b.dataset.f)));
+
+/* Drawer close affordances. Bound once -- #dbody and #scrim are in the static
+   template and are never themselves replaced, only #dbody's contents are. */
+['input','change'].forEach(ev=>
+  document.getElementById('dbody').addEventListener(ev, ()=>{ drawerDirty = true; }));
+document.getElementById('scrim').addEventListener('click', requestCloseDrawer);
+document.addEventListener('keydown', e=>{
+  if(e.key === 'Escape' && document.getElementById('drawer').classList.contains('open')){
+    requestCloseDrawer();
+  }
+});
+
 reindex(); kpis(); renderList();
 CRM.detect();
 </script>

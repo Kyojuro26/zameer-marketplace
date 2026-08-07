@@ -46,7 +46,8 @@ PY_MODULES = [
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
 ]
-JS_MODULES = [("regression/test_view.js", "view")]
+JS_MODULES = [("regression/test_view.js", "view"),
+              ("regression/test_drawer_close.js", "drawer-close")]
 
 
 def _load(modname, relpath):
