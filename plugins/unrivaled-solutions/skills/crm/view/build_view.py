@@ -927,8 +927,21 @@ function numOrNull(id){
   return v===''?null:parseFloat(v);
 }
 
-async function saveProject(pno){
-  const newPno = document.getElementById('f_pno').value.trim();
+async function saveProject(pnoArg){
+  // The number the STORE currently holds, which after a rename that already
+  // landed is NOT the one baked into this button's onclick. Renaming is two
+  // calls: if rename_project succeeds and update_project is then refused, the
+  // drawer stays up (so the error and the typed values survive) but its
+  // handlers still carry the old number. Comparing against that stale number
+  // made a second Save re-fire the rename with an old_project_no the store no
+  // longer had, reporting "rename failed" for a rename that had succeeded --
+  // and the field save could never be retried. saveShipment already avoids
+  // this by comparing against its live record; data-orig is the same idea for
+  // a value that has no object to hang off.
+  const pnoEl = document.getElementById('f_pno');
+  let pno = pnoEl.getAttribute('data-orig');
+  if(pno === null) pno = pnoArg;
+  const newPno = pnoEl.value.trim();
   const marginRaw = numOrNull('f_margin');
   const fields = {
     description: document.getElementById('f_desc').value.trim() || null,
@@ -972,8 +985,16 @@ async function saveProject(pno){
     });
     DATA.invoices.forEach(i=>{ if(String(i.project_no)===String(pno)) i.project_no=newPno; });
     reindex();
+    // The rename is committed, so record it on the control: a retry after a
+    // refused field save must not fire it a second time.
+    pnoEl.setAttribute('data-orig', newPno);
     pno = newPno;
     renamed = true;
+    // Repaint now rather than only in doSave's ok branch. The store and DATA
+    // both say the new number at this point; leaving the sidebar and main pane
+    // on the old one for the duration of a FAILED field save showed the
+    // operator a number that no longer existed anywhere.
+    renderList(); renderMain();
   }
   const ok = await doSave('update_project', {project_no: pno, fields}, (r)=>{
     const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
@@ -1422,21 +1443,29 @@ function openEditInvoice(cid, invoiceNo){
 
 async function saveEditInvoice(cid, invoiceNo){
   const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
-  let invoiceNoNow = invoiceNo;
-  const newNo = document.getElementById('e_iv_no').value.trim();
-  if(newNo && newNo !== invoiceNo){
+  // data-orig, not the closure argument -- same two-call rename trap as
+  // saveProject: once rename_invoice has landed, this button still carries the
+  // OLD number, and comparing against it re-fired the rename on every retry.
+  const noEl = document.getElementById('e_iv_no');
+  const storedNo = noEl.getAttribute('data-orig') === null
+    ? invoiceNo : noEl.getAttribute('data-orig');
+  let invoiceNoNow = storedNo;
+  const newNo = noEl.value.trim();
+  if(newNo && newNo !== storedNo){
     btn.disabled=true; msg.className='saved';
-    const rr = await CRM.call('rename_invoice', {company_id:cid, old_invoice_no:invoiceNo, new_invoice_no:newNo});
+    const rr = await CRM.call('rename_invoice', {company_id:cid, old_invoice_no:storedNo, new_invoice_no:newNo});
     if(!rr || !rr.ok){
       msg.textContent='✗ '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';
       btn.disabled=false;
       return;
     }
-    const p=(invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNo));
+    const p=(invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(storedNo));
     if(p) p.invoice_no=newNo;
-    DATA.shipments.forEach(s=>{ if(s.company_id===cid && String(s.invoice_no)===String(invoiceNo)) s.invoice_no=newNo; });
+    DATA.shipments.forEach(s=>{ if(s.company_id===cid && String(s.invoice_no)===String(storedNo)) s.invoice_no=newNo; });
     reindex();
+    noEl.setAttribute('data-orig', newNo);   // committed; do not rename twice
     invoiceNoNow = newNo;
+    renderList(); renderMain();
   }
   const fields={
     payment_status: document.getElementById('e_iv_status').value || null,
@@ -1558,24 +1587,39 @@ async function saveShipment(sid){
 async function doSave(tool, args, applyLocal){
   const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
   btn.disabled=true; msg.className='saved';
-  // Only #saveBtn is disabled during the round trip -- every field stays
-  // editable. Anything typed while the call is in flight was NOT sent, so
-  // clearing the flag unconditionally on success would mark those keystrokes
-  // saved and let them be discarded with no prompt. The counter says whether
-  // any input arrived after we committed to this payload.
-  const seq = drawerDirtySeq;
+  // Lock the WHOLE form, not just the button.
+  //
+  // Every caller reads its fields into `args` before calling doSave, so
+  // anything typed while the call is in flight is not in the payload. Ten of
+  // the eleven callers close the drawer from inside applyLocal, and
+  // closeDrawer clears drawerDirty -- so those keystrokes were dropped with no
+  // prompt and no beforeunload warning. An earlier attempt at this used a
+  // sequence counter checked after applyLocal, which could never fire on those
+  // ten paths because the flag had already been zeroed by then.
+  //
+  // Not solvable by accounting after the fact: make the window not exist.
+  // `disabled` rather than `inert` because it has no support question, and the
+  // finally below restores exactly what was changed.
+  const locked = [];
+  const body = document.getElementById('dbody');
+  if(body.querySelectorAll){
+    body.querySelectorAll('input,select,textarea').forEach(el=>{
+      if(!el.disabled){ el.disabled = true; locked.push(el); }
+    });
+  }
   try{
     const r = await CRM.call(tool, args);
     if (r && r.ok){
       applyLocal(r);
-      // The work is on disk, so the drawer is no longer dirty -- unless the
-      // operator typed more while we waited. Not every save path closes
-      // (saveProject deliberately stays open so the "Saved" flash survives),
-      // and without this the flag stayed TRUE over a written record, so the
-      // next Escape asked "discard your unsaved changes?" about changes that
-      // were already saved. The danger is not the wrong prompt, it is that it
-      // trains the operator to dismiss the prompt that is real.
-      if (drawerDirtySeq === seq) drawerDirty = false;
+      // The work is on disk, so the drawer is no longer dirty. The form was
+      // locked for the whole round trip, so there is nothing newer to lose.
+      // Not every save path closes -- saveProject deliberately stays open so
+      // the "Saved" flash survives -- and without this the flag stayed TRUE
+      // over a written record, so the next Escape asked "discard your unsaved
+      // changes?" about changes that were already saved. The danger is not the
+      // wrong prompt, it is that it trains the operator to dismiss the prompt
+      // that is real.
+      drawerDirty = false;
       msg.textContent='✓ Saved'; msg.className='saved show okc';
       kpis(); renderMain();
       return true;
@@ -1586,6 +1630,7 @@ async function doSave(tool, args, applyLocal){
     msg.textContent='✗ ' + e.message; msg.className='saved show errc';
     return false;
   }finally{
+    locked.forEach(el=>{ el.disabled = false; });
     btn.disabled=false;
     setTimeout(()=>msg.classList.remove('show'), 2500);
   }
@@ -1627,7 +1672,6 @@ function noticeToast(text){
    them open. Typing a value then manually restoring it still counts as dirty;
    that costs one extra confirm and never loses an edit. */
 let drawerDirty = false;
-let drawerDirtySeq = 0;      // bumped on every edit; see doSave
 let drawerReturnFocus = null;
 
 /* The scrim stops the MOUSE reaching the page. It does not stop the keyboard:
@@ -1808,7 +1852,7 @@ document.querySelectorAll('#filters button').forEach(b=>
    template and are never themselves replaced, only #dbody's contents are. */
 ['input','change'].forEach(ev=>
   document.getElementById('dbody').addEventListener(ev, ()=>{
-    drawerDirty = true; drawerDirtySeq++;
+    drawerDirty = true;
   }));
 
 /* Fallback for `inert`. It is Chrome/Edge 102+, so the operator's browser has

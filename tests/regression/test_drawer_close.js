@@ -23,6 +23,33 @@
 //     must route through openDrawer() or their scrim never appears and the
 //     dirty flag never resets, so the NEXT drawer inherits the last one's
 //     dirty state. Asserted against the generated bundle, not the template.
+//
+// WHAT THIS FILE CANNOT VERIFY
+// ---------------------------
+// Read this before trusting a green run. The harness is a hand-written DOM
+// shim (../lib/dom.js) running the real bundle under node. It models state you
+// ASSIGN well and behaviour that FOLLOWS from state not at all. Concretely:
+//
+//   * No Node.contains and no document.activeElement. The focusin fallback in
+//     build_view.py returns on its second line under this shim, so NOT ONE line
+//     of that handler has ever executed here. The check below confirms only
+//     that a listener was registered -- the handler body could be anything.
+//   * focus() is a no-op that records nothing, so drawerReturnFocus, the focus
+//     move into an opening drawer, and the restore on close are unassertable.
+//   * `inert` is a plain property with no semantics: assigning it does not
+//     affect focus, hit-testing or tab order. "a closed drawer is inert" below
+//     asserts that an assignment happened. It is NOT a test of tab order --
+//     the proposition and the assertion share a word and nothing else.
+//   * No CSS. Whether a refused save is actually VISIBLE depends on the .show
+//     class against `.saved{opacity:0}`, and nothing here can see that. The
+//     scrim's four checks are regexes over the stylesheet TEXT, not over any
+//     computed effect.
+//   * `disabled` has no semantics either: fire() reaches a disabled control.
+//     The save-time form lock is asserted by reading the property.
+//   * querySelectorAll answers tag-name selectors only (added for that lock).
+//
+// Anything in that list needs a real browser to test honestly. Until there is
+// one, treat these as change-detectors for the wiring, not proof of behaviour.
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -135,12 +162,6 @@ async function run(crmDir) {
   r.check(`all ${entryPoints.length} open* entry points are exercised below`,
     entryPoints.length === OPENERS.length,
     `bundle has ${entryPoints.length} (${entryPoints.join(',')}), OPENERS lists ${OPENERS.length}`);
-  // whitespace is NOT stripped here: the previous version stripped it and then
-  // searched for a pattern containing a space, so it returned "pass" on
-  // genuinely infinite recursion -- the exact bug it was written to catch
-  r.check('openDrawer does not call itself',
-    !/function\s+openDrawer\s*\(\s*\)\s*\{[^}]*\bopenDrawer\s*\(/.test(js),
-    'openDrawer() calling openDrawer() recurses forever on the first open');
 
   // ---- behavioural ----------------------------------------------------------
   const app = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
@@ -151,6 +172,22 @@ async function run(crmDir) {
   const dbody = app.doc.getElementById('dbody');
   const isOpen = () => drawer.classList.contains('open');
   const scrimOn = () => scrim.classList.contains('open');
+
+  // Checked by RUNNING openDrawer, not by pattern-matching the source. Two
+  // regex versions of this check were written and BOTH could never fail: the
+  // first stripped all whitespace then searched for a pattern containing a
+  // space; the second used [^}]*, which stops at the first `}` -- the close of
+  // an if-block four lines above the recursive call. A regex cannot answer
+  // this question about JavaScript; calling the function can.
+  const recursionOk = r.check('openDrawer does not recurse', (() => {
+    try { app.eval("openProject('4521'); closeDrawer();"); return true; }
+    catch (e) { return !/call stack/i.test(String((e && e.message) || e)); }
+  })(), 'openDrawer() calling openDrawer() blows the stack on the first open');
+  // Bail with a VERDICT rather than letting the next openProject take the
+  // process down. A module that dies prints no [PASS]/[FAIL] line, and both
+  // run_all.py and the mutation harness now (correctly) refuse to read a crash
+  // as a detection -- so without this the one real signal here is thrown away.
+  if (!recursionOk) { fs.rmSync(tmp, { recursive: true, force: true }); return r; }
 
   r.check('a listener is actually bound to the scrim',
     (scrim._listeners.click || []).length > 0, 'no handler -> clicking outside does nothing');
@@ -386,7 +423,8 @@ async function run(crmDir) {
     const m = failApp.doc.getElementById('savedMsg');
     r.check('a refused save leaves the form up', /4521/.test(t),
       `drawer retitled to: ${t} -- the reopen destroyed the failed form`);
-    r.check('a refused save keeps its error visible', /✗/.test(m.textContent || ''),
+    r.check('a refused save writes an error (VISIBILITY not verified -- no CSS)',
+      /✗/.test(m.textContent || ''),
       `savedMsg is now: ${JSON.stringify(m.textContent)}`);
   }
 
@@ -409,27 +447,32 @@ async function run(crmDir) {
       `drawer still titled: ${t} -- its buttons would act on the old number`);
   }
 
-  // 7. EDITS TYPED DURING THE ROUND TRIP ARE NOT MARKED SAVED. Only #saveBtn is
-  //    disabled while a save is in flight; every field stays editable, and
-  //    anything typed then was not in the payload.
+  // 7. THE FORM IS LOCKED FOR THE WHOLE ROUND TRIP. Callers read their fields
+  //    into the payload before doSave runs, so anything typed while the call is
+  //    in flight would not be sent -- and ten of the eleven callers close the
+  //    drawer from inside applyLocal, which clears the dirty flag, so those
+  //    keystrokes went with no prompt and no beforeunload warning. An earlier
+  //    attempt used a counter checked AFTER applyLocal, which could never fire
+  //    on those ten paths. The window is now closed rather than accounted for.
   {
     let release;
     const slow = launch({
       crmDir, storeDir: store, outDir: tmp, mode: 'http',
       onCall: () => new Promise(res => { release = () => res({ ok: true }); }),
     });
-    const sdbody = slow.doc.getElementById('dbody');
     slow.eval("select('acme'); openProject('4521');");
+    const rev = slow.doc.getElementById('f_revenue');
+    r.check('fields are editable before a save', rev.disabled !== true);
     const p = slow.eval("saveProject('4521')");     // in flight, not awaited
-    fire(sdbody, 'input', {});                      // operator keeps typing
+    r.check('fields are locked while the save is in flight', rev.disabled === true,
+      'an editable field here accepts keystrokes that are not in the payload');
+    r.check('so is the notes box', slow.doc.getElementById('f_notes').disabled === true);
     release();
     await p;
-    slow.resetConfirms();
-    slow.answerConfirm(false);
-    fire(slow.doc, 'keydown', { key: 'Escape' });
-    r.check('edits made DURING a save are still protected',
-      slow.confirms().length === 1,
-      'those keystrokes were never sent; clearing the flag discards them unasked');
+    r.check('fields are editable again afterwards', rev.disabled === false,
+      'a form left locked is a drawer that can never be corrected');
+    r.check('and so is the save button',
+      slow.doc.getElementById('saveBtn').disabled === false);
   }
 
   // 8. A CLOSED DRAWER IS OUT OF THE TAB ORDER. It is only translated
@@ -437,10 +480,11 @@ async function run(crmDir) {
   //    flag with nothing on screen, and beforeunload then blocked every reload
   //    with no visible cause.
   app.eval('closeDrawer();');
-  r.check('a closed drawer is inert', drawer.inert === true,
-    'otherwise Tab reaches the off-screen form and can jam beforeunload');
+  r.check('a closed drawer has inert set (tab order NOT verified -- see header)',
+    drawer.inert === true,
+    'the intent is to keep the off-screen form out of the tab order');
   app.eval("openProject('4521');");
-  r.check('an open drawer is not inert', drawer.inert === false,
+  r.check('an open drawer has inert cleared', drawer.inert === false,
     'an inert drawer cannot be typed into at all');
   app.eval('closeDrawer();');
 
@@ -465,9 +509,9 @@ async function run(crmDir) {
 
   // 9. FALLBACK IF inert IS UNSUPPORTED. `el.inert = true` on an older engine
   //    is a silent no-op expando, which returns the keyboard bug with no signal.
-  r.check('a focusin fallback is bound',
+  r.check('a focusin listener is registered (body NOT verified -- see header)',
     (app.doc._listeners.focusin || []).length > 0,
-    'inert is the only thing holding focus in; it needs a backstop');
+    'this only proves addEventListener ran; the shim cannot execute the body');
 
   // 10. beforeunload's legacy value must be NON-empty -- per the unload
   //     algorithm '' is precisely the value meaning "do not prompt".
@@ -482,6 +526,128 @@ async function run(crmDir) {
       `returnValue was ${JSON.stringify(ev.returnValue)} -- '' disables the prompt`);
     app.answerConfirm(true);
     app.eval('closeDrawer();');
+  }
+
+  // ---- the FAILURE branches, which had no assertions at all ----------------
+  // Every mutant in the first three rounds targeted a success path. A reviewer
+  // then showed that clearing the dirty flag on refusal, applying the local
+  // write on refusal, and letting a refused rename fall through all survived.
+
+  // 11. A REFUSED SAVE MUST LEAVE THE WORK PROTECTED. This is the moment the
+  //     guard matters most: the store rejected it, so the typed values exist
+  //     nowhere else.
+  {
+    const bad = launch({
+      crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: (t) => t === 'update_project' ? { ok: false, error: 'refused' } : { ok: true },
+    });
+    bad.eval("select('acme'); openProject('4521');");
+    fire(bad.doc.getElementById('dbody'), 'input', {});
+    await bad.eval("saveProject('4521')");
+    bad.resetConfirms();
+    bad.answerConfirm(false);
+    fire(bad.doc, 'keydown', { key: 'Escape' });
+    r.check('a refused save still prompts before discarding',
+      bad.confirms().length === 1,
+      'the store rejected it -- those values exist only on screen');
+    r.check('and the drawer stays open on cancel',
+      bad.doc.getElementById('drawer').classList.contains('open'));
+  }
+
+  // 11b. ...and the same when the call THROWS rather than returning ok:false.
+  //      A dropped connection is the likeliest way this happens on his machine,
+  //      and doSave's catch had no assertion at all.
+  {
+    const boom = launch({
+      crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: (t) => t === 'update_project'
+        ? Promise.reject(new Error('network down')) : { ok: true },
+    });
+    boom.eval("select('acme'); openProject('4521');");
+    fire(boom.doc.getElementById('dbody'), 'input', {});
+    await boom.eval("saveProject('4521')");
+    boom.resetConfirms();
+    boom.answerConfirm(false);
+    fire(boom.doc, 'keydown', { key: 'Escape' });
+    r.check('a save that threw still prompts before discarding',
+      boom.confirms().length === 1,
+      'a dropped connection must not be read as a successful write');
+  }
+
+  // 12. A REFUSED SAVE MUST NOT BE APPLIED LOCALLY. Otherwise the KPI row and
+  //     every list render show a figure the store never took, for the rest of
+  //     the session, while the error is displayed alongside it.
+  {
+    const bad2 = launch({
+      crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: (t) => t === 'update_project' ? { ok: false, error: 'refused' } : { ok: true },
+    });
+    bad2.eval("select('acme'); openProject('4521');");
+    bad2.eval("document.getElementById('f_revenue').value='250000';");
+    await bad2.eval("saveProject('4521')");
+    const rev = bad2.eval(
+      "String((DATA.projects.find(p=>String(p.project_no)==='4521')||{}).revenue)");
+    r.check('a refused save does not enter the in-memory ledger', rev === '100000',
+      `DATA now says ${rev} for a write the store refused`);
+  }
+
+  // 13. A REFUSED RENAME MUST ABORT THE WHOLE SAVE. Falling through renumbers
+  //     the project locally and then targets update_project at a number the
+  //     store does not have -- while reporting success.
+  {
+    const badRen = launch({
+      crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: (t) => t === 'rename_project'
+        ? { ok: false, error: 'number already in use' } : { ok: true },
+    });
+    badRen.eval("select('acme'); openProject('4521');");
+    badRen.eval("document.getElementById('f_pno').value='9999';");
+    await badRen.eval("saveProject('4521')");
+    const tools = badRen.calls().map(c => c.tool);
+    r.check('a refused rename does not go on to save fields',
+      !tools.includes('update_project'),
+      `called: ${tools.join(',')} -- update_project would target a phantom number`);
+    r.check('a refused rename leaves the local number alone',
+      badRen.eval("String((DATA.projects.find(p=>String(p.project_no)==='4521')||{}).project_no)") === '4521');
+    r.check('a refused rename re-enables the save button',
+      badRen.doc.getElementById('saveBtn').disabled === false,
+      'otherwise the operator cannot correct it without a reload');
+  }
+
+  // 14. A COMMITTED RENAME IS NOT FIRED TWICE. rename lands, field save is
+  //     refused, operator presses Save again: the old number is gone from the
+  //     store, so re-firing reports "rename failed" for a rename that worked.
+  {
+    let renames = 0;
+    const retry = launch({
+      crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: (t) => {
+        if (t === 'rename_project') { renames++; return { ok: true }; }
+        if (t === 'update_project') return { ok: false, error: 'refused' };
+        return { ok: true };
+      },
+    });
+    retry.eval("select('acme'); openProject('4521');");
+    retry.eval("document.getElementById('f_pno').value='9999';");
+    await retry.eval("saveProject('4521')");
+    await retry.eval("saveProject('4521')");        // the retry
+    r.check('a committed rename is not re-sent on retry', renames === 1,
+      `rename_project fired ${renames}x -- the second targets a number that is gone`);
+    const targets = retry.calls().filter(c => c.tool === 'update_project')
+      .map(c => String(c.args.project_no));
+    r.check('the retry saves fields against the NEW number',
+      targets.length === 2 && targets[1] === '9999',
+      `update_project targeted: ${targets.join(',')}`);
+  }
+
+  // 15. THE DRAWER IS OUT OF THE TAB ORDER ON A FRESHLY LOADED PAGE. Every
+  //     other inert assertion runs after closeDrawer(), which sets it itself,
+  //     so the page-load initialiser had no coverage.
+  {
+    const fresh = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
+    r.check('the drawer starts inert on a freshly loaded page',
+      fresh.doc.getElementById('drawer').inert === true,
+      'before anything is opened, Tab reaches the off-screen form');
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

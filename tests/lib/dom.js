@@ -47,7 +47,14 @@ function makeEl(id, doc) {
     },
     getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; },
     get innerHTML() { return this._html || ''; },
-    set innerHTML(h) { this._html = String(h); if (doc) doc._parse(this._html); },
+    // Keep the elements this markup produced, so querySelectorAll below can
+    // answer for real. Without it #dbody.querySelectorAll returned [] and
+    // anything iterating the form's controls -- doSave's save-time lock --
+    // was a no-op under test that no assertion could see.
+    set innerHTML(h) {
+      this._html = String(h);
+      this._parsed = doc ? doc._parse(this._html) : [];
+    },
     // Listeners are RECORDED, not just swallowed. A shim that drops them makes
     // every close-affordance test unable to fail: the handler never runs, the
     // drawer never closes, and an assertion of "still open" passes on code
@@ -58,7 +65,14 @@ function makeEl(id, doc) {
     },
     removeChild() {}, remove() {}, focus() {}, blur() {},
     insertAdjacentHTML(_pos, h) { if (doc) doc._parse(String(h)); },
-    querySelectorAll() { return []; }, querySelector() { return null; },
+    // Tag-name selectors only ("input,select,textarea"). Enough for the form
+    // lock; anything else still gets [], which is why the header of
+    // test_drawer_close.js lists what this shim cannot answer.
+    querySelectorAll(sel) {
+      const want = String(sel || '').split(',').map(s => s.trim().toUpperCase());
+      return (this._parsed || []).filter(e => want.includes(e.tagName));
+    },
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; },
     closest() { return null; },
     appendChild(c) { this.children.push(c); if (c && c.id && doc) doc._register(c); return c; },
   };
@@ -81,19 +95,23 @@ function createDocument() {
     // only ever reach elements via getElementById, behave as in a browser.
     _parse(html) {
       const tag = /<(input|select|textarea|button|div|span|p|a|td|tr)\b([^>]*)>/gi;
+      const made = [];
       let m;
       while ((m = tag.exec(html)) !== null) {
         const attrs = m[2];
         const idm = /\bid="([^"]*)"/.exec(attrs);
         if (!idm) continue;
         const el = doc.getElementById(idm[1]);
+        made.push(el);
         el.tagName = m[1].toUpperCase();
         const tm = /\btype="([^"]*)"/.exec(attrs);
         if (tm) el.type = tm[1];
         const vm = /\bvalue="([^"]*)"/.exec(attrs);
         // assign through the setter so date sanitization applies
         el.value = vm ? decodeEntities(vm[1]) : '';
+        el.disabled = false;   // a re-rendered control starts enabled
       }
+      return made;
     },
     getElementById(id) {
       if (!els[id]) { const e = makeEl(id, doc); els[id] = e; }

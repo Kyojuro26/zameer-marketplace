@@ -6,7 +6,7 @@ has drifted is reported as ANCHOR-MISSING and counted as a FAILURE, never as a
 pass -- a mutation script that silently no-ops produces a green run that proves
 nothing, which has happened twice in this repo already.
 """
-import shutil, subprocess, sys, os, tempfile
+import shutil, subprocess, sys, os, tempfile, re
 
 SRC = "plugins/unrivaled-solutions/skills/crm"
 F = "view/build_view.py"
@@ -43,14 +43,13 @@ M = [
 
  # ---- the dirty flag -----------------------------------------------------
  ("dirty listener never bound",
-  "['input','change'].forEach(ev=>\n  document.getElementById('dbody').addEventListener(ev, ()=>{\n    drawerDirty = true; drawerDirtySeq++;\n  }));", ""),
+  "['input','change'].forEach(ev=>\n  document.getElementById('dbody').addEventListener(ev, ()=>{\n    drawerDirty = true;\n  }));", ""),
  ("openDrawer forgets to reset dirty",
   "function openDrawer(){\n  drawerDirty = false;", "function openDrawer(){"),
  ("a successful save no longer clears the dirty flag",
-  "      if (drawerDirtySeq === seq) drawerDirty = false;\n", ""),
- ("dirty cleared regardless of edits during the round trip",
-  "if (drawerDirtySeq === seq) drawerDirty = false;", "drawerDirty = false;"),
- ("navFromDrawer clears dirty even though the opener may bail",
+  "      drawerDirty = false;\n      msg.textContent='\u2713 Saved';",
+  "      msg.textContent='\u2713 Saved';"),
+  ("navFromDrawer clears dirty even though the opener may bail",
   "  // clean, to be discarded later without asking.\n  open();",
   "  // clean, to be discarded later without asking.\n  open();\n  drawerDirty = false;"),
  ("+ Add shipment bypasses navFromDrawer again",
@@ -89,6 +88,29 @@ M = [
  ("beforeunload returnValue set to '' (the do-not-prompt value)",
   "e.returnValue = 'You have unsaved changes in the open record.';", "e.returnValue = '';"),
 
+ ("doSave clears the dirty flag on the FAILURE path",
+  "    msg.textContent='\u2717 ' + ((r && r.error) || 'save failed'); msg.className='saved show errc';\n    return false;",
+  "    msg.textContent='\u2717 ' + ((r && r.error) || 'save failed'); msg.className='saved show errc';\n    drawerDirty = false;\n    return false;"),
+ ("doSave clears the dirty flag in catch()",
+  "    msg.textContent='\u2717 ' + e.message; msg.className='saved show errc';\n    return false;",
+  "    msg.textContent='\u2717 ' + e.message; msg.className='saved show errc';\n    drawerDirty = false;\n    return false;"),
+ ("doSave applies the local write even when the store refused",
+  "    const r = await CRM.call(tool, args);\n    if (r && r.ok){\n      applyLocal(r);",
+  "    const r = await CRM.call(tool, args);\n    applyLocal(r);\n    if (r && r.ok){"),
+ ("a refused rename falls through instead of aborting",
+  "    const rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno});\n    if(!rr || !rr.ok){",
+  "    const rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno});\n    if(!rr){"),
+ ("a refused rename leaves the save button disabled",
+  "      msg.textContent='\u2717 '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';\n      btn.disabled=false;\n      return;\n    }\n    // Mirror the rename",
+  "      msg.textContent='\u2717 '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';\n      return;\n    }\n    // Mirror the rename"),
+ ("a committed rename is not recorded, so a retry re-fires it",
+  "    pnoEl.setAttribute('data-orig', newPno);\n", ""),
+  ("the drawer no longer starts inert at page load",
+  "document.getElementById('drawer').inert = true;\n", ""),
+ ("the save-time form lock is removed",
+  "    body.querySelectorAll('input,select,textarea').forEach(el=>{\n      if(!el.disabled){ el.disabled = true; locked.push(el); }\n    });\n", ""),
+ ("the form is never unlocked after a save",
+  "    locked.forEach(el=>{ el.disabled = false; });\n", ""),
  # ---- structural ---------------------------------------------------------
  ("a 12th opener added that bypasses openDrawer (double quotes)",
   "function closeDrawer(){",
@@ -142,14 +164,25 @@ for label, old, new in M:
     open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
     rc, out = run_against(dst)
     first = next((l.strip()[:86] for l in out.splitlines() if l.strip().startswith("x ")), "")
-    res.append((label, "CAUGHT" if rc else "SURVIVED", first))
+    # A non-zero exit is not a kill. The infinite-recursion mutant "passed" for
+    # two rounds purely because node died of a stack overflow with empty stdout
+    # -- no assertion was ever evaluated, and the assertion written for it was
+    # itself broken. Require a printed verdict.
+    reported = bool(re.search(r"^\[(PASS|FAIL)\] ", out, re.M))
+    if rc and not reported:
+        verdict = "CRASH-NOT-A-KILL"
+    elif rc:
+        verdict = "CAUGHT"
+    else:
+        verdict = "SURVIVED"
+    res.append((label, verdict, first))
     shutil.rmtree(tmp, ignore_errors=True)
 
 w = max(len(l) for l, _, _ in res); bad = 0
 for label, v, d in res:
     if v != "CAUGHT": bad += 1
     print(f"  {label.ljust(w)}  {v}{'' if v=='CAUGHT' else '   <<<<'}")
-    if d and v == "CAUGHT":
+    if d:
         print(f"  {' '*w}  {d}")
 print(f"\n  {len(res)-bad}/{len(res)} mutants caught")
 sys.exit(1 if bad else 0)

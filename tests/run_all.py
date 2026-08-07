@@ -18,6 +18,7 @@ Exit code is 0 only when every check passes.
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -96,10 +97,17 @@ def run_js(crm_dir, pattern):
         """
         p = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         sys.stdout.write(p.stdout)
-        if p.returncode != 0 and not p.stdout.strip():
-            print(f"[FAIL] {name}  (harness error)")
+        # "reported" means the module ran its checks and printed a verdict. A
+        # module that DIED -- stack overflow, TypeError in a render path --
+        # exits non-zero having evaluated nothing. Treating that as a failing
+        # test is how --positive-control came to certify this suite: against
+        # the old baseline the drawer module threw on an unrelated defect at
+        # its first behavioural line, and a crash was read as "detects it".
+        reported = bool(re.search(r"^\[(PASS|FAIL)\] ", p.stdout, re.M))
+        if not reported:
+            print(f"[FAIL] {name}  (harness error -- NO checks were evaluated)")
             print("        " + (p.stderr.strip().split("\n")[-1] if p.stderr else "?"))
-        out.append((name, p.returncode == 0))
+        out.append((name, p.returncode == 0, reported))
     return out
 
 
@@ -137,9 +145,16 @@ def main():
             for r in results:
                 r.report()
             js = run_js(str(crm), args.pattern)
+            # Only modules that actually EVALUATED checks and failed them count.
+            # A module that crashed proves the baseline is broken somewhere, not
+            # that this suite can detect the thing it claims to test.
+            crashed = [n for n, _ok, reported in js if not reported]
             failed_modules = [r.name for r in results if r.failed] + \
-                             [n for n, ok in js if not ok]
+                             [n for n, ok, reported in js if reported and not ok]
             print()
+            for n in crashed:
+                print(f"NOT COUNTED: {n} crashed against the baseline without "
+                      f"evaluating a single check. That is not evidence it works.")
             if failed_modules:
                 print(f"POSITIVE CONTROL PASSED -- the suite detects the baseline's "
                       f"defects in: {', '.join(failed_modules)}")
@@ -158,7 +173,7 @@ def main():
     results = run_python(str(crm), args.pattern)
     ok_py = all([r.report() for r in results])   # list: report ALL modules
     js = run_js(str(crm), args.pattern)
-    ok_js = all(o for _, o in js)
+    ok_js = all(o and rep for _, o, rep in js)
 
     total = sum(len(r.passed) + len(r.failed) for r in results)
     failed = sum(len(r.failed) for r in results)
