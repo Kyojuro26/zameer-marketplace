@@ -47,6 +47,11 @@ TEMPLATE = r"""<!DOCTYPE html>
   .kpi{text-align:right}
   .kpi .n{font-weight:700;font-size:16px}
   .kpi .l{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  .kpi.go{cursor:pointer;border-radius:8px;padding:2px 8px;margin:-2px -8px}
+  .kpi.go:hover{background:var(--bg)}
+  /* the stylesheet had no :focus rule at all -- a keyboard user could not
+     see where they were, which matters more now the drawer holds focus */
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
   .wrap{display:grid;grid-template-columns:320px 1fr;gap:0;height:calc(100vh - 59px)}
   .sidebar{border-right:1px solid var(--line);background:var(--panel);overflow-y:auto}
   .search{padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
@@ -54,10 +59,10 @@ TEMPLATE = r"""<!DOCTYPE html>
   .filters{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
   .filters button{min-width:56px}
   .subfilters{margin-top:8px;display:none;flex-direction:column;gap:6px}
-  .sfrow{display:flex;gap:5px;align-items:center}
+  .sfrow{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
   .sfrow .sfl{color:var(--muted);font-size:11px;min-width:64px}
-  .sfrow button{flex:1;padding:4px 6px;border:1px solid var(--line);background:#fff;
-                border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted)}
+  .sfrow button{flex:0 1 auto;padding:4px 8px;border:1px solid var(--line);background:#fff;
+                border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted);white-space:nowrap}
   .sfrow button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
   th.sortable{cursor:pointer;user-select:none}
   th.sortable:hover{color:var(--accent)}
@@ -75,10 +80,11 @@ TEMPLATE = r"""<!DOCTYPE html>
   .empty{color:var(--muted);text-align:center;margin-top:16vh}
   .co-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
   .co-head h1{font-size:22px;margin:0}
-  .badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;text-transform:capitalize}
+  .badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;text-transform:capitalize;white-space:nowrap;display:inline-block}
   .b-customer{background:var(--accent-soft);color:var(--accent)}
   .b-vendor{background:#eef0f3;color:var(--slate)}
   .b-lead{background:var(--amber-soft);color:var(--amber)}
+  .b-open{background:var(--accent-soft);color:var(--accent)}
   .due-group{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
              padding:10px 8px 4px;border-bottom:1px solid var(--line)}
   .due-group.od{color:var(--red)}
@@ -90,6 +96,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   .section h2{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
               margin:0 0 8px;border-bottom:1px solid var(--line);padding-bottom:6px}
   table{width:100%;border-collapse:collapse}
+  .section{overflow-x:auto}
   th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);
      padding:6px 8px;border-bottom:1px solid var(--line)}
   td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -97,7 +104,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   tr.click:hover{background:var(--bg)}
   .contact a{color:var(--accent);text-decoration:none}
   .contact a:hover{text-decoration:underline}
-  .num{font-variant-numeric:tabular-nums;text-align:right}
+  .num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
   .drawer{position:fixed;top:0;right:0;width:440px;max-width:92vw;height:100vh;background:var(--panel);
           border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(20,30,50,.08);
           transform:translateX(100%);transition:transform .18s ease;z-index:20;overflow-y:auto}
@@ -149,6 +156,7 @@ TEMPLATE = r"""<!DOCTYPE html>
         <button data-f="vendor">Vendors</button>
         <button data-f="lead">Leads</button>
         <button data-f="project">Projects</button>
+          <button data-f="receivable">Receivables</button>
       </div>
       <div class="subfilters" id="subfilters">
         <div class="sfrow" id="sf_status"><span class="sfl">Status</span></div>
@@ -457,13 +465,21 @@ function kpis(){
   const pend = curProjects.filter(p=>st(p.status)==='pending').reduce((a,p)=>a+num(p.revenue),0);
   const recv = curProjects.filter(p=>{const c=st(p.collection_status);return c && c!=='paid';})
                           .reduce((a,p)=>a+num(p.revenue),0);
+  // The receivables tile is the one he opens the app for, so it is the one
+  // that goes somewhere. Left as invoiced value, NOT net of deposits, so this
+  // number does not silently change meaning -- the Receivables view states the
+  // difference in its own summary line.
   document.getElementById('kpis').innerHTML = [
-    ['Companies', DATA.companies.length],
-    ['Open shipments', openShip],
-    [`Won revenue (${thisYear})`, money(won)],
-    [`Pending pipeline (${thisYear})`, money(pend)],
-    [`Open receivables (${thisYear})`, money(recv)],
-  ].map(([l,n])=>`<div class="kpi"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+    ['Companies', DATA.companies.length, null],
+    ['Open shipments', openShip, null],
+    [`Won revenue (${thisYear})`, money(won), null],
+    [`Pending pipeline (${thisYear})`, money(pend), null],
+    [`Open receivables (${thisYear})`, money(recv), 'receivable'],
+  ].map(([l,n,go])=>go
+    ? `<div class="kpi go" role="button" tabindex="0" onclick="setFilter('${jesc(go)}')"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setFilter('${jesc(go)}')}"
+       ><div class="n">${n}</div><div class="l">${l}</div></div>`
+    : `<div class="kpi"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
 }
 
 // Search fields can hold numbers as well as strings (a project or invoice number
@@ -575,6 +591,23 @@ function sfButtons(rowId, opts, cur, fn){
   });
 }
 function renderSubfilters(){
+  const sf2 = document.getElementById('sf_year'), sf3 = document.getElementById('sf_coll');
+  if(filter === 'receivable'){
+    // Receivables reuses the first sub-filter row for the due bucket and hides
+    // the other two, which are project-shaped (year, collection status).
+    const lab = document.getElementById('sf_status').querySelector('.sfl');
+    if(lab) lab.textContent = 'Show';
+    if(sf2) sf2.style.display = 'none';
+    if(sf3) sf3.style.display = 'none';
+    sfButtons('sf_status',
+      BUCKET_ORDER.map(b=>({value:b, label:`${b} (${recvCount(b)})`})),
+      recvBucket, v=>setRecvBucket(v));
+    return;
+  }
+  const lab = document.getElementById('sf_status').querySelector('.sfl');
+  if(lab) lab.textContent = 'Status';
+  if(sf2) sf2.style.display = '';
+  if(sf3) sf3.style.display = '';
   sfButtons('sf_status', [{value:'all',label:'All'},{value:'won',label:'Won'},
       {value:'pending',label:'Pending'},{value:'lost',label:'Lost'}],
     projStatus, v=>{ projStatus=v; renderSubfilters(); renderList(); renderMain(); });
@@ -621,6 +654,114 @@ function renderProjectsMain(){
     `</tbody></table></div>`;
   return h;
 }
+/* ------------------------------------------------------- receivables view --
+   Every open invoice across every customer, oldest debt first. Before this the
+   only way to answer "who owes me money" was to open each company in turn and
+   read its invoice table; the header's own receivables figure was not even
+   clickable.
+
+   Deliberately shows OUTSTANDING (net of anything already collected) rather
+   than the invoiced total: on a part-paid invoice those are different numbers
+   and the one worth chasing is the remainder. See the note in the summary
+   line -- the header KPI still totals invoiced value and is left alone. */
+let recvBucket = 'Overdue';
+function setRecvBucket(b){ recvBucket = b; renderSubfilters(); renderMain(); }
+
+function allInvoices(){
+  const today = todayISO(), soon = soonISO();
+  return (DATA.invoices||[]).map(v=>({
+    v, bucket: invoiceBucket(v, today, soon),
+    due: dueOn(v), late: daysLate(v, today), owed: outstanding(v),
+  }));
+}
+function recvRows(){
+  const rows = allInvoices().filter(r => r.bucket === recvBucket);
+  // oldest debt first; within the same day, largest first
+  rows.sort((a,b)=>{
+    const ad=st(a.due)||'9999-99-99', bd=st(b.due)||'9999-99-99';
+    if(ad!==bd) return ad.localeCompare(bd);
+    return (b.owed||0)-(a.owed||0);
+  });
+  return rows;
+}
+function recvCount(bucket){
+  const today = todayISO(), soon = soonISO();
+  return (DATA.invoices||[]).filter(v => invoiceBucket(v, today, soon) === bucket).length;
+}
+
+function renderReceivables(){
+  const rows = recvRows();
+  // an unlinked invoice has no amount anywhere in the store; it must not be
+  // silently counted as zero, and the total has to say so
+  const known = rows.filter(r => r.owed != null);
+  const unknown = rows.length - known.length;
+  const total = known.reduce((a,r)=>a+r.owed,0);
+
+  let h = `<div class="co-head"><h1>Receivables</h1>
+    <span class="muted">${rows.length} ${esc(recvBucket.toLowerCase())}</span>
+    <span class="muted">· ${money(total)} outstanding</span></div>`;
+  h += `<p class="muted" style="margin:2px 0 16px;font-size:12px">
+    Outstanding is what is left to collect — a part-paid invoice counts only its
+    remainder. The header total counts full invoiced value.</p>`;
+
+  if(!rows.length){
+    return h + `<div class="empty">Nothing ${esc(recvBucket.toLowerCase())}.</div>`;
+  }
+
+  h += `<div class="section"><table><thead><tr>
+    <th>Invoice</th><th>Customer</th><th>Project</th>
+    <th class="num">Outstanding</th><th class="num">Due</th><th class="num">Late</th>
+    <th>Status</th><th>Last note</th><th></th></tr></thead><tbody>`;
+
+  h += rows.map(r=>{
+    const v = r.v;
+    const co = companyById[v.company_id];
+    const coName = co ? (co.display_name||v.company_id) : st(v.company_id);
+    const pno = st(v.project_no);
+    const proj = pno
+      ? `<a href="#" onclick="event.stopPropagation();openProject('${jesc(pno)}');return false">${esc(pno)}</a>`
+      : '<span class="badge b-stage">Not linked</span>';
+    const lateCell = r.late == null ? '<span class="muted">—</span>'
+      : (r.late > 30 ? `<b style="color:var(--red)">${r.late}d</b>`
+        : r.late > 0 ? `<b style="color:var(--amber)">${r.late}d</b>`
+        : '<span class="muted">—</span>');
+    const owedCell = r.owed == null
+      ? '<span class="muted" title="no project linked, so no amount on file">—</span>'
+      : `<b>${money(r.owed)}</b>`;
+    return `<tr class="click" onclick="select('${jesc(v.company_id)}')">
+      <td><b>${esc(st(v.invoice_no)||'—')}</b></td>
+      <td>${esc(coName)}</td>
+      <td>${proj}</td>
+      <td class="num">${owedCell}</td>
+      <td class="num">${esc(fmtDate(r.due)||'—')}</td>
+      <td class="num">${lateCell}</td>
+      <td>${statusPill(v.payment_status)}</td>
+      <td class="muted" style="max-width:240px">${esc(st(v.payment_notes).slice(0,80))}</td>
+      <td><button class="pill-btn" style="padding:2px 8px;font-size:11px"
+          onclick="event.stopPropagation();select('${jesc(v.company_id)}');openEditInvoice('${jesc(v.company_id)}','${jesc(st(v.invoice_no))}')">Open</button></td>
+    </tr>`;
+  }).join('');
+
+  h += `</tbody><tfoot><tr>
+    <td colspan="3">Outstanding</td>
+    <td class="num">${money(total)}</td>
+    <td colspan="5" class="muted" style="font-weight:400">${
+      unknown ? esc(`excludes ${unknown} invoice${unknown>1?'s':''} with no amount on file`) : ''
+    }</td></tr></tfoot></table></div>`;
+  return h;
+}
+
+function renderReceivablesList(){
+  document.getElementById('clist').innerHTML = recvRows().slice(0,400).map(r=>{
+    const v=r.v, co=companyById[v.company_id];
+    return `<div class="citem" onclick="select('${jesc(v.company_id)}')">
+      <div class="cn">${esc(st(v.invoice_no)||'—')} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
+      <div class="cm"><span>${r.owed==null?'no amount':money(r.owed)}</span>${
+        r.late?`<span>· ${r.late}d late</span>`:''}</div>
+    </div>`;
+  }).join('') || '<div class="muted" style="padding:14px">Nothing here.</div>';
+}
+
 function renderProjectsList(){
   const rows = filteredProjects();
   document.getElementById('clist').innerHTML = rows.slice(0,400).map(p=>`
@@ -631,6 +772,7 @@ function renderProjectsList(){
 }
 
 function renderList(){
+  if(filter === 'receivable'){ renderReceivablesList(); return; }
   if(filter === 'project'){ renderProjectsList(); return; }
   const items = DATA.companies.filter(companyMatches)
     .sort((a,b)=>st(a.display_name).localeCompare(st(b.display_name)));
@@ -645,7 +787,7 @@ function renderList(){
 
 function select(id){
   selected=id;
-  if(filter === 'project'){ setFilter('all'); fetchEnrichment(id); return; }
+  if(filter === 'project' || filter === 'receivable'){ setFilter('all'); fetchEnrichment(id); return; }
   renderList(); renderMain(); fetchEnrichment(id);
 }
 
@@ -728,6 +870,91 @@ function isoDate(v){
   if(dt.getUTCFullYear()!==y || dt.getUTCMonth()!==mo-1 || dt.getUTCDate()!==d) return null;
   return String(y).padStart(4,'0')+'-'+String(mo).padStart(2,'0')+'-'+String(d).padStart(2,'0');
 }
+/* Display-only date formatting. Storage is NEVER touched by this -- the stored
+   form is load-bearing for the date-preservation work, and dateInput() below
+   still hands the raw string to a text box when it cannot be parsed.
+
+   Exists because the same column showed "2026-07-09" and "3/14/2026" side by
+   side: one shipment stored ISO, its neighbour stored the tracker's own
+   format, and both rendered raw. A date it cannot parse comes back unchanged
+   rather than blank or invented -- an unreadable date is information. */
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function fmtDate(v){
+  const t = st(v).trim();
+  if(!t) return '';
+  const iso = isoDate(t);
+  if(!iso) return t;                       // unparseable: show what is stored
+  const [y,m,d] = iso.split('-').map(Number);
+  return d + ' ' + MONTHS[m-1] + ' ' + y;
+}
+
+/* ---------------------------------------------------- receivables model --
+   ONE definition of which bucket an invoice is in, what it is worth, and how
+   late it is. The company page and the Receivables view both read these: a
+   cross-company total that disagreed with the per-company page about the same
+   invoice would be worse than having no total at all. */
+function todayISO(){ return new Date().toISOString().slice(0,10); }
+function soonISO(){ const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10); }
+
+const BUCKET_ORDER = ['Overdue','Due this week','Due later','No due date','Paid'];
+function invoiceBucket(v, today, soon){
+  today = today || todayISO(); soon = soon || soonISO();
+  if(st(v.payment_status).startsWith('paid')) return 'Paid';
+  const d = dueOn(v);
+  if(!d) return 'No due date';
+  if(d < today) return 'Overdue';
+  if(d <= soon) return 'Due this week';
+  return 'Due later';
+}
+
+/* Whole days past due; null when there is no usable due date. */
+function daysLate(v, today){
+  const d = dueOn(v); if(!d) return null;
+  const a = Date.parse(d + 'T00:00:00Z'), b = Date.parse((today||todayISO()) + 'T00:00:00Z');
+  if(isNaN(a) || isNaN(b)) return null;
+  const n = Math.round((b - a) / 86400000);
+  return n > 0 ? n : 0;
+}
+
+/* The invoice's value, which lives on the linked PROJECT -- invoices carry no
+   amount of their own. Returns null when there is no link or no revenue, and
+   callers must show that as "no amount on file" rather than as zero: an
+   unlinked invoice is a real thing in this store (one is 116 days late) and
+   silently counting it as $0 would hide it from the total. */
+function invoiceAmount(v){
+  const pno = st(v.project_no); if(!pno) return null;
+  const p = DATA.projects.find(x => String(x.project_no) === String(pno)
+                                 && st(x.company_id) === st(v.company_id));
+  if(!p || p.revenue == null || isNaN(Number(p.revenue))) return null;
+  return Number(p.revenue);
+}
+
+/* What is still to collect. "partial:30%" means 30% has been RECEIVED, so the
+   outstanding share is the remainder -- reading it the other way round would
+   understate every part-paid receivable. */
+function outstanding(v){
+  const amt = invoiceAmount(v); if(amt == null) return null;
+  const ps = st(v.payment_status).toLowerCase();
+  if(ps.startsWith('paid')) return 0;
+  const m = ps.match(/(\d+(?:\.\d+)?)\s*%/);
+  if(m){
+    const paidPct = Number(m[1]);
+    if(paidPct >= 0 && paidPct <= 100) return Math.round(amt * (1 - paidPct/100));
+  }
+  return amt;
+}
+
+function statusPill(ps){
+  const s = st(ps).trim();
+  if(!s) return '<span class="badge b-stage">—</span>';
+  const low = s.toLowerCase();
+  if(low.startsWith('paid')) return '<span class="badge b-won">Paid</span>';
+  const m = low.match(/(\d+(?:\.\d+)?)\s*%/);
+  if(low.startsWith('partial')) return `<span class="badge b-pending">Part paid${m?' '+m[1]+'%':''}</span>`;
+  if(low === 'open') return '<span class="badge b-open">Open</span>';
+  return `<span class="badge b-stage">${esc(s)}</span>`;
+}
+
 function dateInput(id, stored){
   const iso = isoDate(stored);
   if(iso === null){
@@ -761,6 +988,10 @@ function statusBadge(s){ s=st(s).toLowerCase(); const cls={won:'b-won',pending:'
   return s?`<span class="badge ${cls}">${esc(s)}</span>`:''; }
 
 function renderMain(){
+  if(filter === 'receivable'){
+    document.getElementById('main').innerHTML = renderReceivables();
+    return;
+  }
   if(filter === 'project'){
     document.getElementById('main').innerHTML = renderProjectsMain();
     return;
@@ -824,18 +1055,10 @@ function renderMain(){
 
   const invs=invoicesByCo[selected]||[];
   if(invs.length){
-    const todayStr = new Date().toISOString().slice(0,10);
-    const soonStr = (()=>{const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10);})();
-    const bucketOf = (v)=>{
-      const ps=st(v.payment_status);
-      if(ps.startsWith('paid')) return 'Paid';
-      const d=dueOn(v);
-      if(!d) return 'No due date';
-      if(d<todayStr) return 'Overdue';
-      if(d<=soonStr) return 'Due this week';
-      return 'Due later';
-    };
-    const BUCKET_ORDER=['Overdue','Due this week','Due later','No due date','Paid'];
+    // shared with the Receivables view -- see invoiceBucket(). Two definitions
+    // of "is this overdue" is two different answers about the same money.
+    const todayStr = todayISO(), soonStr = soonISO();
+    const bucketOf = (v)=> invoiceBucket(v, todayStr, soonStr);
     const grouped={}; invs.forEach(v=>{(grouped[bucketOf(v)]=grouped[bucketOf(v)]||[]).push(v);});
     Object.values(grouped).forEach(list=>list.sort((a,b)=>(st(dueOn(a))||'9999').localeCompare(st(dueOn(b))||'9999')));
     let invRows='';
@@ -1836,11 +2059,14 @@ function setFilter(f){
   const sf = document.getElementById('subfilters');
   const add = document.getElementById('addrow');
   const isProj = (f === 'project');
-  if(sf) sf.style.display = isProj ? 'flex' : 'none';
-  if(add) add.style.display = isProj ? 'none' : 'flex';
-  if(isProj) renderSubfilters();
+  const isRecv = (f === 'receivable');
+  // both cross-company views own the sub-filter row and neither wants the
+  // "+ Add customer/vendor/lead" buttons, which act on the company list
+  if(sf) sf.style.display = (isProj || isRecv) ? 'flex' : 'none';
+  if(add) add.style.display = (isProj || isRecv) ? 'none' : 'flex';
+  if(isProj || isRecv) renderSubfilters();
   renderList();
-  if(isProj) renderMain();
+  if(isProj || isRecv) renderMain();
   else if(selected) renderMain();
   else document.getElementById('main').innerHTML =
     '<div class="empty">Select a company to begin.</div>';

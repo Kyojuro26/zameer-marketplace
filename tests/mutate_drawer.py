@@ -6,7 +6,9 @@ has drifted is reported as ANCHOR-MISSING and counted as a FAILURE, never as a
 pass -- a mutation script that silently no-ops produces a green run that proves
 nothing, which has happened twice in this repo already.
 """
-import shutil, subprocess, sys, os, tempfile, re
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
+from mutate_lib import mutate
 
 SRC = "plugins/unrivaled-solutions/skills/crm"
 F = "view/build_view.py"
@@ -119,70 +121,4 @@ M = [
   "  d.classList.add('open');", "  openDrawer();"),
 ]
 
-def run_against(dirpath):
-    r = subprocess.run(["node", "-e",
-        f"const m=require('./tests/regression/test_drawer_close.js');"
-        f"Promise.resolve(m.run({dirpath!r})).then(r=>process.exit(r.report()?0:1))"
-        f".catch(e=>{{console.error(String(e).slice(0,300));process.exit(1)}});"],
-        capture_output=True, text=True, timeout=180)
-    return r.returncode, (r.stdout or "") + (r.stderr or "")
-
-
-# BASELINE FIRST. Without this, a test that also fails on the UNMUTATED tree is
-# scored CAUGHT for every mutant -- the harness then reports a perfect kill rate
-# while measuring nothing. That exact false positive happened on this file: a
-# broken fix left one assertion failing, and the run still printed 32/32.
-_tmp = tempfile.mkdtemp(prefix="base-"); _dst = os.path.join(_tmp, "crm")
-shutil.copytree(SRC, _dst)
-_rc, _out = run_against(_dst)
-shutil.rmtree(_tmp, ignore_errors=True)
-if _rc != 0:
-    print("  BASELINE FAILS on the unmutated tree -- every result below would be a"
-          " false positive.\n")
-    for line in _out.splitlines():
-        if line.strip().startswith("x ") or line.startswith("["):
-            print("   ", line.strip())
-    sys.exit(2)
-print("  baseline passes on the unmutated tree\n")
-
-res = []
-for label, old, new in M:
-    tmp = tempfile.mkdtemp(prefix="mut-"); dst = os.path.join(tmp, "crm")
-    shutil.copytree(SRC, dst); p = os.path.join(dst, F)
-    s = open(p, encoding="utf-8").read()
-    n = s.count(old)
-    if n == 0:
-        res.append((label, "ANCHOR-MISSING", "mutation never applied -- proves nothing"))
-        shutil.rmtree(tmp, ignore_errors=True); continue
-    if n > 1:
-        # replace(old,new,1) takes the FIRST match, which may not be the one
-        # meant. A 6-space "      return true;" anchor silently matched inside a
-        # 12-space line elsewhere in the file, mutating an unrelated function
-        # and scoring the real code SURVIVED.
-        res.append((label, "ANCHOR-AMBIGUOUS", f"{n} matches -- would mutate the wrong one"))
-        shutil.rmtree(tmp, ignore_errors=True); continue
-    open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
-    rc, out = run_against(dst)
-    first = next((l.strip()[:86] for l in out.splitlines() if l.strip().startswith("x ")), "")
-    # A non-zero exit is not a kill. The infinite-recursion mutant "passed" for
-    # two rounds purely because node died of a stack overflow with empty stdout
-    # -- no assertion was ever evaluated, and the assertion written for it was
-    # itself broken. Require a printed verdict.
-    reported = bool(re.search(r"^\[(PASS|FAIL)\] ", out, re.M))
-    if rc and not reported:
-        verdict = "CRASH-NOT-A-KILL"
-    elif rc:
-        verdict = "CAUGHT"
-    else:
-        verdict = "SURVIVED"
-    res.append((label, verdict, first))
-    shutil.rmtree(tmp, ignore_errors=True)
-
-w = max(len(l) for l, _, _ in res); bad = 0
-for label, v, d in res:
-    if v != "CAUGHT": bad += 1
-    print(f"  {label.ljust(w)}  {v}{'' if v=='CAUGHT' else '   <<<<'}")
-    if d:
-        print(f"  {' '*w}  {d}")
-print(f"\n  {len(res)-bad}/{len(res)} mutants caught")
-sys.exit(1 if bad else 0)
+sys.exit(mutate(SRC, "./tests/regression/test_drawer_close.js", F, M))
