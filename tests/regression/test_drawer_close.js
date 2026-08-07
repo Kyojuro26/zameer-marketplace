@@ -338,9 +338,16 @@ async function run(crmDir) {
   // 2. IN-DRAWER NAVIGATION ASKS. "+ Add shipment" sits inside the project
   //    drawer and replaces the form; the openers swap #dbody before calling
   //    openDrawer, so the reset would hide the loss.
-  r.check('the in-drawer button routes through navFromDrawer',
-    /onclick="navFromDrawer\(\(\)=>openNewShipment/.test(html),
-    'calling the opener directly discards the project form silently');
+  // EVERY call site, not "at least one". A second + Add shipment button was
+  // added later (the shipments empty state), and the old any-one-of form then
+  // passed with the in-drawer button reverted to a bare opener.
+  {
+    const calls = (js.match(/onclick="[^"]*?openNewShipment\(/g) || []);
+    const wrapped = calls.filter(c => /navFromDrawer\(\(\)=>openNewShipment\($/.test(c));
+    r.check(`all ${calls.length} openNewShipment call sites route through navFromDrawer`,
+      calls.length > 0 && wrapped.length === calls.length,
+      `${wrapped.length}/${calls.length} wrapped -- an unwrapped one discards the open form silently`);
+  }
   app.eval("closeDrawer(); openProject('4521');");
   fire(dbody, 'input', {});
   app.resetConfirms();

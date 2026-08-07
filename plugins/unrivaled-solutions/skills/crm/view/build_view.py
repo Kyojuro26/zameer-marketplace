@@ -32,7 +32,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 <title>Unrivaled CRM</title>
 <style>
   :root{
-    --bg:#f6f7f9; --panel:#ffffff; --ink:#1a2230; --muted:#697588; --line:#e4e8ee;
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#1a2230; --muted:#5a687c; --line:#e4e8ee;
     --accent:#2563eb; --accent-soft:#eaf1ff; --green:#127a4b; --green-soft:#e4f5ec;
     --amber:#8a5a00; --amber-soft:#fdf1dc; --red:#a3282b; --red-soft:#fbe7e7; --slate:#475569;
   }
@@ -45,7 +45,8 @@ TEMPLATE = r"""<!DOCTYPE html>
   .brand span{color:var(--accent)}
   .kpis{display:flex;gap:22px;margin-left:auto;flex-wrap:wrap}
   .kpi{text-align:right}
-  .kpi .n{font-weight:700;font-size:16px}
+  .kpi .n{font-weight:700;font-size:26px;letter-spacing:-.02em;line-height:1.05;
+          font-variant-numeric:tabular-nums}
   .kpi .l{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
   .kpi.go{cursor:pointer;border-radius:8px;padding:2px 8px;margin:-2px -8px}
   .kpi.go:hover{background:var(--bg)}
@@ -57,7 +58,6 @@ TEMPLATE = r"""<!DOCTYPE html>
   .search{padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
   .search input{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-size:13px}
   .filters{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-  .filters button{min-width:56px}
   .subfilters{margin-top:8px;display:none;flex-direction:column;gap:6px}
   .sfrow{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
   .sfrow .sfl{color:var(--muted);font-size:11px;min-width:64px}
@@ -66,15 +66,21 @@ TEMPLATE = r"""<!DOCTYPE html>
   .sfrow button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
   th.sortable{cursor:pointer;user-select:none}
   th.sortable:hover{color:var(--accent)}
-  .filters button{flex:1;padding:6px;border:1px solid var(--line);background:#fff;border-radius:7px;
-                  font-size:12px;cursor:pointer;color:var(--muted)}
+  /* content-sized, not flex:1 with a min-width. The old rule pinned every
+     button to 56px and let the LABEL overflow it, which is why "Projects" sat
+     alone on a full-width second row and "Receivables" ran off the edge on a
+     narrow window. */
+  .filters button{flex:0 1 auto;padding:6px 10px;border:1px solid var(--line);background:#fff;
+                  border-radius:7px;font-size:12px;cursor:pointer;color:var(--muted);
+                  white-space:nowrap}
   .filters button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
   .clist{padding:6px}
   .citem{padding:9px 11px;border-radius:8px;cursor:pointer}
   .citem:hover{background:var(--bg)}
   .citem.sel{background:var(--accent-soft)}
   .citem .cn{font-weight:600}
-  .citem .cm{color:var(--muted);font-size:12px;display:flex;gap:8px;margin-top:2px}
+  .citem .cm{color:var(--muted);font-size:12px;display:flex;gap:8px;margin-top:2px;flex-wrap:wrap}
+  .citem .owed{color:var(--red);font-weight:600}
   .main{overflow-y:auto;padding:22px 26px}
   .muted{color:var(--muted)}
   .empty{color:var(--muted);text-align:center;margin-top:16vh}
@@ -93,8 +99,43 @@ TEMPLATE = r"""<!DOCTYPE html>
   .b-lost{background:var(--red-soft);color:var(--red)}
   .b-stage{background:#eef0f3;color:var(--slate)}
   .section{margin-top:22px}
-  .section h2{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
-              margin:0 0 8px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  /* was 12px uppercase muted -- SMALLER than the body text it headed, so a
+     section title read as quieter than its own contents */
+  .section h2{font-size:13.5px;font-weight:650;letter-spacing:-.005em;color:var(--ink);
+              margin:0 0 8px;border-bottom:1px solid var(--line);padding-bottom:6px;
+              text-transform:none}
+  .co-sum{margin:2px 0 4px;font-size:13.5px;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+  .co-sum .late{color:var(--red)}
+  .co-sum .ok{color:var(--green);font-weight:600}
+  .co-sum a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
+  .empty-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 0;color:var(--muted)}
+  .pill-btn.pri{background:var(--accent);color:#fff}
+  .pill-btn.ghost{background:transparent;color:var(--muted);font-size:15px;line-height:1;padding:5px 9px}
+  .pill-btn.ghost:hover{background:var(--bg);color:var(--ink)}
+  .more{position:relative;display:inline-block}
+  .more-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);z-index:22;
+             background:var(--panel);border:1px solid var(--line);border-radius:9px;
+             box-shadow:0 8px 24px rgba(20,30,50,.14);padding:5px;min-width:190px}
+  .more.show .more-menu{display:block}
+  .more-menu button{display:block;width:100%;text-align:left;border:0;background:none;
+                    font:inherit;font-size:13px;color:var(--ink);padding:7px 10px;
+                    border-radius:6px;cursor:pointer;white-space:nowrap}
+  .more-menu button:hover{background:var(--bg)}
+  .more-menu button.danger{color:var(--red)}
+  .more-menu button.danger:hover{background:var(--red-soft)}
+  tfoot td{border-top:1px solid var(--line);border-bottom:0;font-weight:650;padding-top:10px}
+  .nw{white-space:nowrap}
+  /* The stylesheet had no breakpoint at all: at 1024px table cells wrapped
+     mid-value and below ~700px the sidebar and main pane fought for width. */
+  @media (max-width:900px){
+    .wrap{grid-template-columns:1fr;height:auto}
+    .sidebar{border-right:0;border-bottom:1px solid var(--line);max-height:42vh}
+    .main{height:auto}
+    header{flex-wrap:wrap;gap:10px}
+    .kpis{margin-left:0;gap:14px;width:100%}
+    .kpi .n{font-size:20px}
+    .co-head h1{font-size:19px}
+  }
   table{width:100%;border-collapse:collapse}
   .section{overflow-x:auto}
   th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);
@@ -492,6 +533,13 @@ function sv(v){ return v===null||v===undefined ? '' : String(v).toLowerCase(); }
 // hold a number if it was created through the MCP tools with a numeric value,
 // and .localeCompare / !== against a trimmed input string both misbehave then.
 function st(v){ return v===null||v===undefined ? '' : String(v); }
+// Module-scope numeric coercion. kpis() has a local `num` for the same job
+// and another function shadows that name with an unrelated predicate, so a
+// distinct name here rather than relying on whichever is in scope. Stored
+// revenue may be a STRING (anything written through the MCP tools keeps the
+// caller's type) and `a + (p.revenue||0)` on a string concatenates -- one
+// such row once turned $17,000 into $120,005,000.
+function numv(v){ const n = Number(v); return isNaN(n) ? 0 : n; }
 // Sibling of st() for the list-shaped fields. owner/annotations are arrays in
 // every record the importer and the tools write, but nothing validates their
 // type, and a string there makes .join/.some throw inside renderMain -- which
@@ -774,13 +822,23 @@ function renderProjectsList(){
 function renderList(){
   if(filter === 'receivable'){ renderReceivablesList(); return; }
   if(filter === 'project'){ renderProjectsList(); return; }
+  const today = todayISO(), soon = soonISO();
   const items = DATA.companies.filter(companyMatches)
     .sort((a,b)=>st(a.display_name).localeCompare(st(b.display_name)));
   document.getElementById('clist').innerHTML = items.slice(0,400).map(c=>{
     const np=(projectsByCo[c.company_id]||[]).length, ns=(shipsByCo[c.company_id]||[]).length;
+    // What they owe, in the list. "customer · 2 projects · 2 shipments" is true
+    // and answers nothing he opens this app to ask.
+    const invs=(invoicesByCo[c.company_id]||[]).filter(v=>invoiceBucket(v,today,soon)!=='Paid');
+    const owed=invs.map(outstanding).filter(x=>x!=null).reduce((a,b)=>a+b,0);
+    const lates=invs.map(v=>daysLate(v,today)).filter(x=>x!=null&&x>0);
+    const late=lates.length?Math.max.apply(null,lates):0;
     return `<div class="citem ${c.company_id===selected?'sel':''}" onclick="select('${jesc(c.company_id)}')">
       <div class="cn">${esc(c.display_name||c.company_id)}</div>
-      <div class="cm"><span>${esc(c.role)}</span>${np?`<span>· ${np} project${np>1?'s':''}</span>`:''}${ns?`<span>· ${ns} shipment${ns>1?'s':''}</span>`:''}</div>
+      <div class="cm">${owed?`<span class="owed">${money(owed)} owed</span>`:`<span>${esc(c.role)}</span>`}${
+        late?`<span class="owed">· ${late}d late</span>`:''}${
+        !owed&&np?`<span>· ${np} project${np>1?'s':''}</span>`:''}${
+        !owed&&ns?`<span>· ${ns} shipment${ns>1?'s':''}</span>`:''}</div>
     </div>`;
   }).join('') || '<div class="muted" style="padding:14px">No matches.</div>';
 }
@@ -999,22 +1057,34 @@ function renderMain(){
   const c=companyById[selected]; if(!c){return;}
   const cts=contactsByCo[selected]||[], prs=projectsByCo[selected]||[], sps=shipsByCo[selected]||[];
   const draftAll = cts.filter(x=>x.email)[0];
+  // A vendor is someone we BUY from -- offering "+ New invoice" there invited
+  // a receivable against a supplier. Invoices and projects belong to the
+  // people who owe us money.
+  const sells = (c.role==='customer' || c.role==='lead');
   let h=`<div class="co-head"><h1>${esc(c.display_name||c.company_id)}</h1>
     <span class="badge b-${esc(c.role)}">${esc(c.role)}</span>
     ${c.primary_location?`<span class="muted">${esc(c.primary_location)}</span>`:''}
-    <span style="margin-left:auto;display:flex;gap:8px">
-      <button class="pill-btn" onclick="openEditCompany('${jesc(c.company_id)}')">Edit company</button>
-      <button class="pill-btn" onclick="openNewProject('${jesc(c.company_id)}')">+ New project</button>
-      <button class="pill-btn" onclick="openNewInvoice('${jesc(c.company_id)}')">+ New invoice</button>
+    <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+      ${sells?`<button class="pill-btn pri" onclick="openNewInvoice('${jesc(c.company_id)}')">+ New invoice</button>`:''}
+      ${sells?`<button class="pill-btn" onclick="openNewProject('${jesc(c.company_id)}')">+ New project</button>`:''}
       <button class="pill-btn" onclick="openNewContact('${jesc(c.company_id)}')">+ Add contact</button>
-      ${c.role==='vendor'?`<button class="pill-btn" onclick="openEditVendor('${jesc(c.company_id)}')">Edit vendor</button>`:''}
       ${c.role==='lead'?`<button class="pill-btn" style="background:var(--green-soft);color:var(--green)" onclick="convertLead('${jesc(c.company_id)}')">Convert to customer</button>`:''}
       ${draftAll?`<button class="pill-btn" onclick="draft('${jesc(draftAll.email)}','${jesc(draftAll.name||'')}')">✉ Draft email</button>`:''}
-      <button class="pill-btn" style="background:var(--red-soft);color:var(--red)" onclick="deleteCompany('${jesc(c.company_id)}')">Delete</button>
+      <span class="more">
+        <button class="pill-btn ghost" aria-haspopup="true" aria-expanded="false"
+                title="More actions" onclick="toggleMore(event)">⋯</button>
+        <span class="more-menu" role="menu">
+          <button role="menuitem" onclick="closeMore();openEditCompany('${jesc(c.company_id)}')">Edit company</button>
+          ${c.role==='vendor'?`<button role="menuitem" onclick="closeMore();openEditVendor('${jesc(c.company_id)}')">Edit vendor details</button>`:''}
+          <button role="menuitem" class="danger" onclick="closeMore();deleteCompany('${jesc(c.company_id)}')">Delete ${esc(c.role)}…</button>
+        </span>
+      </span>
     </span>
   </div>`;
 
-  h+=enrichmentSection(selected);
+  // What this customer owes, before any table. Reading it off the invoice list
+  // and doing the arithmetic was the operator's job until now.
+  h += companySummary(c);
 
   if(c.role==='vendor'){
     const v=vendorById[selected]||{};
@@ -1037,9 +1107,10 @@ function renderMain(){
   h+= cts.length?`<table><thead><tr><th>Name</th><th>Title</th><th>Email</th><th>Phone</th><th>Last action</th><th></th></tr></thead><tbody>`+
     cts.map(x=>`<tr><td>${esc(x.name||'—')}</td><td class="muted">${esc(x.title||'')}</td>
       <td class="contact">${x.email?`<a href="#" onclick="draft('${jesc(x.email)}','${jesc(x.name||'')}');return false">${esc(x.email)}</a>`:'—'}</td>
-      <td class="muted">${esc(x.phone||'')}</td><td class="muted">${esc(st(x.last_action).slice(0,10))}</td>
+      <td class="muted nw">${esc(x.phone||'')}</td><td class="muted num">${esc(fmtDate(x.last_action))}</td>
       <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditContact('${jesc(selected)}','${jesc(x.email||'')}','${jesc(x.name||'')}')">Edit</button></td></tr>`).join('')+
-    `</tbody></table>`:'<div class="muted">No contacts.</div>';
+    `</tbody></table>`:emptyState('No contacts yet.',
+      `<button class="pill-btn" onclick="openNewContact('${jesc(selected)}')">+ Add contact</button>`);
   h+=`</div>`;
 
   h+=`<div class="section"><h2>Projects (${prs.length})</h2>`;
@@ -1049,8 +1120,13 @@ function renderMain(){
       <td><b>${esc(p.project_no||'—')}</b></td><td>${esc(p.description||'')}</td>
       <td>${statusBadge(p.status)}</td><td>${esc(arr(p.owner).join(', '))||'—'}</td>
       <td class="num">${money(p.revenue)}</td><td class="num">${pct(p.margin)}</td>
-      <td class="muted">${esc(p.collection_status||'')}</td></tr>`).join('')+
-    `</tbody></table>`:'<div class="muted">No projects.</div>';
+      <td>${statusPill(p.collection_status)}</td></tr>`).join('')+
+    `</tbody><tfoot><tr><td colspan="4">Total</td>
+      <td class="num">${money(prs.reduce((a,p)=>a+numv(p.revenue),0))}</td>
+      <td class="num"></td><td></td></tr></tfoot></table>`
+    :emptyState('No projects yet.', sells
+      ? `<button class="pill-btn" onclick="openNewProject('${jesc(selected)}')">+ New project</button>`
+      : '<span class="muted">Projects belong to customers, not suppliers.</span>');
   h+=`</div>`;
 
   const invs=invoicesByCo[selected]||[];
@@ -1064,18 +1140,21 @@ function renderMain(){
     let invRows='';
     BUCKET_ORDER.forEach(bk=>{
       const list=grouped[bk]; if(!list||!list.length) return;
-      invRows+=`<tr><td colspan="7" class="due-group${bk==='Overdue'?' od':''}">${esc(bk)} (${list.length})</td></tr>`;
+      invRows+=`<tr><td colspan="8" class="due-group${bk==='Overdue'?' od':''}">${esc(bk)} (${list.length})</td></tr>`;
       invRows+=list.map(v=>{const ps=st(v.payment_status);const cls=ps==='paid'?'b-won':(ps.startsWith('partial')?'b-pending':'b-lost');
         const due=dueOn(v); const overdue = bk==='Overdue';
-        return `<tr><td><b>${esc(v.invoice_no||'—')}</b></td><td class="muted">${esc(v.client_po_raw||'')}</td>
-        <td class="muted">${esc(st(v.invoice_date).slice(0,10))}</td>
-        <td><span class="badge ${cls}">${esc(ps||'—')}</span></td>
-        <td class="${overdue?'':'muted'}" ${overdue?'style="color:var(--red);font-weight:600"':''}>${esc(due||'—')}</td>
+        const owed = outstanding(v); const late = daysLate(v);
+        return `<tr><td><b class="nw">${esc(v.invoice_no||'—')}</b></td><td class="muted nw">${esc(v.client_po_raw||'')}</td>
+        <td class="muted num">${esc(fmtDate(v.invoice_date))}</td>
+        <td class="num">${owed==null?'<span class="muted">—</span>':(owed?`<b>${money(owed)}</b>`:'<span class="muted">—</span>')}</td>
+        <td>${statusPill(ps)}</td>
+        <td class="num ${overdue?'':'muted'}" ${overdue?'style="color:var(--red);font-weight:600"':''}>${esc(fmtDate(due)||'—')}${
+          overdue&&late?`<div style="font-size:11px;font-weight:400">${late} days late</div>`:''}</td>
         <td class="muted" style="max-width:280px">${esc(st(v.payment_notes).slice(0,90))}</td>
         <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('');
     });
     h+=`<div class="section"><h2>Invoices / customer orders (${invs.length})</h2>
-      <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th>Invoiced</th><th>Status</th><th>Due on</th><th>Notes</th><th></th></tr></thead><tbody>`+
+      <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th class="num">Invoiced</th><th class="num">Outstanding</th><th>Status</th><th class="num">Due on</th><th>Notes</th><th></th></tr></thead><tbody>`+
       invRows+
       `</tbody></table></div>`;
   }
@@ -1085,11 +1164,68 @@ function renderMain(){
     sps.map(s=>`<tr class="click" onclick="openShipment('${jesc(s.shipment_id||'')}')">
       <td>${esc(s.project_no||'—')}</td><td>${esc(s.vendor_po_raw||'')}</td>
       <td><span class="badge b-stage">${esc(s.stage||'—')}</span></td>
-      <td class="muted">${esc(st(s.ship_date).slice(0,10))}</td></tr>`).join('')+
-    `</tbody></table>`:'<div class="muted">No shipments.</div>';
+      <td class="muted num">${esc(fmtDate(s.ship_date))}</td></tr>`).join('')+
+    `</tbody></table>`:emptyState('No shipments yet.', prs.length
+      ? `<button class="pill-btn" onclick="navFromDrawer(()=>openNewShipment('${jesc(st(prs[0].project_no))}'))">+ Add shipment</button>`
+      : '<span class="muted">Add a project first — shipments hang off one.</span>');
   h+=`</div>`;
+
+  // Outlook LAST. It used to open every company page with "No Outlook signal
+  // on file", putting an empty section above the money on the screen he opens
+  // to look at the money.
+  h+=enrichmentSection(selected);
   document.getElementById('main').innerHTML=h;
 }
+
+/* One line under the customer's name: what they owe and how late it is.
+   Uses the same outstanding()/invoiceBucket() the Receivables screen does, so
+   the two cannot disagree about the same customer. */
+function companySummary(c){
+  const invs = invoicesByCo[c.company_id]||[];
+  if(!invs.length) return '';
+  const today = todayISO(), soon = soonISO();
+  const open = invs.filter(v=>invoiceBucket(v,today,soon)!=='Paid');
+  if(!open.length) return `<p class="co-sum"><span class="ok">All settled</span>
+    <span class="muted">· nothing outstanding</span></p>`;
+  const known = open.map(outstanding).filter(x=>x!=null);
+  const owed = known.reduce((a,b)=>a+b,0);
+  const lates = open.map(v=>daysLate(v,today)).filter(x=>x!=null && x>0);
+  const oldest = lates.length ? Math.max.apply(null, lates) : 0;
+  const missing = open.length - known.length;
+  return `<p class="co-sum">
+    <b class="${oldest?'late':''}">${money(owed)} outstanding</b>
+    ${oldest?`<span class="late">· oldest ${oldest} days late</span>`:'<span class="muted">· none overdue</span>'}
+    ${missing?`<span class="muted">· ${missing} with no amount on file</span>`:''}
+    <a href="#" class="muted" onclick="setFilter('receivable');return false">see all receivables</a>
+  </p>`;
+}
+
+function emptyState(text, action){
+  return `<div class="empty-row"><span class="muted">${esc(text)}</span>${action||''}</div>`;
+}
+
+/* Overflow menu for the destructive/rare actions. Delete used to sit in the
+   main row as a peer of "Draft email", last in line, which is exactly where
+   the cursor ends up. */
+function closeMore(){
+  document.querySelectorAll('.more.show').forEach(el=>{
+    el.classList.remove('show');
+    const b = el.querySelector('button[aria-haspopup]');
+    if(b) b.setAttribute('aria-expanded','false');
+  });
+}
+function toggleMore(ev){
+  ev.stopPropagation();
+  const wrap = ev.currentTarget.parentNode;
+  const wasOpen = wrap.classList.contains('show');
+  closeMore();
+  if(!wasOpen){
+    wrap.classList.add('show');
+    ev.currentTarget.setAttribute('aria-expanded','true');
+  }
+}
+document.addEventListener('click', closeMore);
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeMore(); });
 
 /* ------------------------------------------------------- project drawer -- */
 function openProject(pno){
