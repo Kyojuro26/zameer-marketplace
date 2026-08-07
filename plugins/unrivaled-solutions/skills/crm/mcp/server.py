@@ -151,7 +151,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.28"
+SERVER_VERSION = "0.1.29"
 
 
 class StoreError(Exception):
