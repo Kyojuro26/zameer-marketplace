@@ -7,3 +7,8 @@ tests/.positive-control-ran
 
 # built .plugin artifacts -- built on demand, never committed
 dist/
+
+# macOS Finder metadata -- unreadable binary, and the PII sweep must fail
+# closed on anything it cannot read. Only the pre-commit hook was stopping
+# these from being staged by a `git add -A`.
+.DS_Store
