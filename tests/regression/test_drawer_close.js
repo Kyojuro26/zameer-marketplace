@@ -115,9 +115,18 @@ async function run(crmDir) {
   // no drawer may open by touching the class directly -- that bypasses the
   // scrim, the dirty reset, inert and focus. Quote-agnostic: the single-quote
   // -only form missed a double-quoted twelfth opener.
-  const strayOpens = (js.match(/getElementById\(['"]drawer['"]\)\.classList\.add\(['"]open['"]\)/g) || []).length;
-  r.check('every drawer opens through openDrawer()', strayOpens === 1,
-    `${strayOpens} direct .add('open') calls; expected exactly 1 (inside openDrawer)`);
+  // Matched on the ACT of adding the class, not on one spelling of how the
+  // element was fetched: an earlier version keyed on the literal
+  // `getElementById('drawer').classList.add('open')` and silently matched
+  // nothing the moment that line was refactored to a local `const d`.
+  const openBody = /function openDrawer\(\)\s*\{([\s\S]*?)\n\}/.exec(js);
+  r.check('openDrawer() is findable in the bundle', !!openBody);
+  const addsAll = (js.match(/\.classList\.add\((['"])open\1\)/g) || []).length;
+  const addsInside = openBody
+    ? (openBody[1].match(/\.classList\.add\((['"])open\1\)/g) || []).length : -1;
+  r.check('the open class is only ever set inside openDrawer()',
+    addsAll === addsInside && addsInside === 2,
+    `${addsAll} in the bundle, ${addsInside} inside openDrawer (expect 2 = drawer + scrim)`);
   // every open* entry point is accounted for by OPENERS below; a new one added
   // later must be added there too, or this fails
   const entryPoints = (js.match(/^function open[A-Z]\w*\(/gm) || [])
@@ -351,7 +360,128 @@ async function run(crmDir) {
     ev = { prevented: false, preventDefault() { this.prevented = true; }, returnValue: null };
     bu[0](ev);
     r.check('dirty drawer blocks a reload', ev.prevented);
-    r.check('and sets returnValue for older browsers', ev.returnValue === '');
+  }
+
+  // ---- defects found by the review of the FIXES ---------------------------
+
+  // 6. A FAILED SAVE MUST NOT BE PAPERED OVER. Renaming a project is two calls:
+  //    the rename can land while the field update is refused. doSave reports
+  //    failure by writing into #savedMsg and never throws, so the reopen ran
+  //    regardless -- wiping the error AND the typed values, and redrawing from
+  //    data the failed save never updated. The operator saw the new number with
+  //    the old figures and no error.
+  r.check('saveProject only reopens when the save succeeded',
+    /if\(renamed && ok\) openProject/.test(js),
+    'reopening after a refused save destroys the error and the typed values');
+  {
+    const failApp = launch({
+      crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: (tool) => tool === 'update_project'
+        ? { ok: false, error: 'refused' } : { ok: true },
+    });
+    failApp.eval("select('acme'); openProject('4521');");
+    failApp.eval("document.getElementById('f_pno').value='9999';");
+    await failApp.eval("saveProject('4521')");
+    const t = failApp.doc.getElementById('dtitle').textContent;
+    const m = failApp.doc.getElementById('savedMsg');
+    r.check('a refused save leaves the form up', /4521/.test(t),
+      `drawer retitled to: ${t} -- the reopen destroyed the failed form`);
+    r.check('a refused save keeps its error visible', /✗/.test(m.textContent || ''),
+      `savedMsg is now: ${JSON.stringify(m.textContent)}`);
+  }
+
+  // 6b. ...and the reopen must STILL happen when the save succeeds. It exists
+  //     because a rename changes the project_no baked into this drawer's own
+  //     Delete and "+ Add shipment" handlers; without it they keep acting on a
+  //     number that no longer exists. Guarding the reopen on `ok` is only
+  //     correct if `ok` is genuinely true on success.
+  {
+    const okApp = launch({
+      crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: () => ({ ok: true }),
+    });
+    okApp.eval("select('acme'); openProject('4521');");
+    okApp.eval("document.getElementById('f_pno').value='9999';");
+    await okApp.eval("saveProject('4521')");
+    const t = okApp.doc.getElementById('dtitle').textContent;
+    r.check('a successful rename reopens the drawer on the new number',
+      /9999/.test(t),
+      `drawer still titled: ${t} -- its buttons would act on the old number`);
+  }
+
+  // 7. EDITS TYPED DURING THE ROUND TRIP ARE NOT MARKED SAVED. Only #saveBtn is
+  //    disabled while a save is in flight; every field stays editable, and
+  //    anything typed then was not in the payload.
+  {
+    let release;
+    const slow = launch({
+      crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: () => new Promise(res => { release = () => res({ ok: true }); }),
+    });
+    const sdbody = slow.doc.getElementById('dbody');
+    slow.eval("select('acme'); openProject('4521');");
+    const p = slow.eval("saveProject('4521')");     // in flight, not awaited
+    fire(sdbody, 'input', {});                      // operator keeps typing
+    release();
+    await p;
+    slow.resetConfirms();
+    slow.answerConfirm(false);
+    fire(slow.doc, 'keydown', { key: 'Escape' });
+    r.check('edits made DURING a save are still protected',
+      slow.confirms().length === 1,
+      'those keystrokes were never sent; clearing the flag discards them unasked');
+  }
+
+  // 8. A CLOSED DRAWER IS OUT OF THE TAB ORDER. It is only translated
+  //    off-screen, so its fields stayed focusable; typing in them set the dirty
+  //    flag with nothing on screen, and beforeunload then blocked every reload
+  //    with no visible cause.
+  app.eval('closeDrawer();');
+  r.check('a closed drawer is inert', drawer.inert === true,
+    'otherwise Tab reaches the off-screen form and can jam beforeunload');
+  app.eval("openProject('4521');");
+  r.check('an open drawer is not inert', drawer.inert === false,
+    'an inert drawer cannot be typed into at all');
+  app.eval('closeDrawer();');
+
+  // 8b. navFromDrawer must not clear the flag until the opener has actually
+  //     swapped the form. Several openers bail on a missing record; clearing
+  //     first leaves the old form on screen, edits intact, marked clean --
+  //     discarded later with no prompt. openNewShipment (the only wired
+  //     caller today) cannot bail, so this is asserted against the contract
+  //     directly rather than through it.
+  app.eval("closeDrawer(); openProject('4521');");
+  fire(dbody, 'input', {});
+  app.answerConfirm(true);
+  app.eval('navFromDrawer(function(){ return; })');   // an opener that bails
+  app.resetConfirms();
+  app.answerConfirm(false);
+  fire(scrim, 'click', {});
+  r.check('a bailing opener leaves the form still protected',
+    app.confirms().length === 1,
+    'the flag was cleared before the opener ran, so the untouched form reads clean');
+  app.answerConfirm(true);
+  app.eval('closeDrawer();');
+
+  // 9. FALLBACK IF inert IS UNSUPPORTED. `el.inert = true` on an older engine
+  //    is a silent no-op expando, which returns the keyboard bug with no signal.
+  r.check('a focusin fallback is bound',
+    (app.doc._listeners.focusin || []).length > 0,
+    'inert is the only thing holding focus in; it needs a backstop');
+
+  // 10. beforeunload's legacy value must be NON-empty -- per the unload
+  //     algorithm '' is precisely the value meaning "do not prompt".
+  {
+    const bu2 = (app.sandbox.window._listeners.beforeunload || []);
+    app.eval("closeDrawer(); openProject('4521');");
+    fire(dbody, 'input', {});
+    const ev = { prevented: false, preventDefault() { this.prevented = true; }, returnValue: null };
+    if (bu2.length) bu2[0](ev);
+    r.check('beforeunload sets a non-empty returnValue',
+      typeof ev.returnValue === 'string' && ev.returnValue.length > 0,
+      `returnValue was ${JSON.stringify(ev.returnValue)} -- '' disables the prompt`);
+    app.answerConfirm(true);
+    app.eval('closeDrawer();');
   }
 
   fs.rmSync(tmp, { recursive: true, force: true });

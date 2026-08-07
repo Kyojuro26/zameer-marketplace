@@ -975,7 +975,7 @@ async function saveProject(pno){
     pno = newPno;
     renamed = true;
   }
-  await doSave('update_project', {project_no: pno, fields}, (r)=>{
+  const ok = await doSave('update_project', {project_no: pno, fields}, (r)=>{
     const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
     Object.assign(p, r.project || fields);
   });
@@ -983,7 +983,14 @@ async function saveProject(pno){
   // handlers (Delete, + Add shipment) -- reopen so they point at the new
   // number. Only done on rename: reopening on every ordinary save would
   // wipe the "Saved" flash (it replaces the #savedMsg node doSave just set).
-  if(renamed) openProject(pno);
+  //
+  // ONLY when the field save also succeeded. The rename and the field update
+  // are two calls: the rename can land and the update be refused. Reopening
+  // then replaced #dbody, which destroyed BOTH the error message doSave had
+  // just written and every typed value -- redrawing from DATA the failed save
+  // never updated. The operator saw the new project number with the old
+  // figures, no error and no prompt, and would reasonably conclude it saved.
+  if(renamed && ok) openProject(pno);
 }
 
 async function deleteProject(pno){
@@ -1544,27 +1551,40 @@ async function saveShipment(sid){
 }
 
 /* ------------------------------------------------------------ save core -- */
+/* Returns TRUE only when the store actually took the write. Callers that do
+   something irreversible afterwards -- saveProject's reopen-after-rename --
+   must branch on this: doSave reports failure by writing into #savedMsg and
+   never throws, so `await doSave(...)` alone cannot tell the two apart. */
 async function doSave(tool, args, applyLocal){
   const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
   btn.disabled=true; msg.className='saved';
+  // Only #saveBtn is disabled during the round trip -- every field stays
+  // editable. Anything typed while the call is in flight was NOT sent, so
+  // clearing the flag unconditionally on success would mark those keystrokes
+  // saved and let them be discarded with no prompt. The counter says whether
+  // any input arrived after we committed to this payload.
+  const seq = drawerDirtySeq;
   try{
     const r = await CRM.call(tool, args);
     if (r && r.ok){
       applyLocal(r);
-      // The work is on disk, so the drawer is no longer dirty. Not every save
-      // path closes -- saveProject deliberately stays open so the "Saved" flash
-      // survives -- and without this the flag stayed TRUE over a written record,
-      // so the next Escape asked "discard your unsaved changes?" about changes
-      // that were already saved. The danger is not the wrong prompt, it is that
-      // it trains the operator to dismiss the prompt that is real.
-      drawerDirty = false;
+      // The work is on disk, so the drawer is no longer dirty -- unless the
+      // operator typed more while we waited. Not every save path closes
+      // (saveProject deliberately stays open so the "Saved" flash survives),
+      // and without this the flag stayed TRUE over a written record, so the
+      // next Escape asked "discard your unsaved changes?" about changes that
+      // were already saved. The danger is not the wrong prompt, it is that it
+      // trains the operator to dismiss the prompt that is real.
+      if (drawerDirtySeq === seq) drawerDirty = false;
       msg.textContent='✓ Saved'; msg.className='saved show okc';
       kpis(); renderMain();
-    } else {
-      msg.textContent='✗ ' + ((r && r.error) || 'save failed'); msg.className='saved show errc';
+      return true;
     }
+    msg.textContent='✗ ' + ((r && r.error) || 'save failed'); msg.className='saved show errc';
+    return false;
   }catch(e){
     msg.textContent='✗ ' + e.message; msg.className='saved show errc';
+    return false;
   }finally{
     btn.disabled=false;
     setTimeout(()=>msg.classList.remove('show'), 2500);
@@ -1607,6 +1627,7 @@ function noticeToast(text){
    them open. Typing a value then manually restoring it still counts as dirty;
    that costs one extra confirm and never loses an edit. */
 let drawerDirty = false;
+let drawerDirtySeq = 0;      // bumped on every edit; see doSave
 let drawerReturnFocus = null;
 
 /* The scrim stops the MOUSE reaching the page. It does not stop the keyboard:
@@ -1651,26 +1672,38 @@ function leaveDrawerOk(){
    drawer is the only such button; any future one must use this too. */
 function navFromDrawer(open){
   if(!leaveDrawerOk()) return;
-  drawerDirty = false;
+  // Deliberately does NOT clear the flag. openDrawer() resets it, and the
+  // openers only reach openDrawer() once they have actually swapped the form;
+  // several bail first on a missing record (`if(!x) return;`). Clearing here
+  // -- before OR after open(), since a bail is an ordinary return -- would
+  // leave the untouched form on screen with its edits intact but marked
+  // clean, to be discarded later without asking.
   open();
 }
 
 function openDrawer(){
   drawerDirty = false;
-  if(!document.getElementById('drawer').classList.contains('open')){
+  const d = document.getElementById('drawer');
+  if(!d.classList.contains('open')){
     drawerReturnFocus = document.activeElement || null;
   }
-  document.getElementById('drawer').classList.add('open');
+  d.inert = false;                       // must precede focus()
+  d.classList.add('open');
   document.getElementById('scrim').classList.add('open');
   pageInert(true);
-  const d = document.getElementById('drawer');
   if(d.focus) d.focus();
 }
 function closeDrawer(){
   drawerDirty = false;
-  document.getElementById('drawer').classList.remove('open');
+  const d = document.getElementById('drawer');
+  d.classList.remove('open');
   document.getElementById('scrim').classList.remove('open');
   pageInert(false);
+  // A closed drawer is only translated off-screen (transform:translateX(100%)),
+  // not hidden -- so its fields stayed in the tab order. Tabbing into that
+  // off-screen form and typing set drawerDirty with nothing on screen, which
+  // then made beforeunload block every reload with no visible cause.
+  d.inert = true;
   // restore focus AFTER clearing inert -- focusing an inert element is a no-op
   if(drawerReturnFocus && drawerReturnFocus.focus) drawerReturnFocus.focus();
   drawerReturnFocus = null;
@@ -1774,7 +1807,21 @@ document.querySelectorAll('#filters button').forEach(b=>
 /* Drawer close affordances. Bound once -- #dbody and #scrim are in the static
    template and are never themselves replaced, only #dbody's contents are. */
 ['input','change'].forEach(ev=>
-  document.getElementById('dbody').addEventListener(ev, ()=>{ drawerDirty = true; }));
+  document.getElementById('dbody').addEventListener(ev, ()=>{
+    drawerDirty = true; drawerDirtySeq++;
+  }));
+
+/* Fallback for `inert`. It is Chrome/Edge 102+, so the operator's browser has
+   it -- but an engine without it takes `el.inert = true` as a meaningless
+   expando: no error, no effect, and the keyboard route back to the page
+   silently returns. This costs four lines and makes the guarantee hold either
+   way: focus that lands outside an open drawer is sent straight back. */
+document.addEventListener('focusin', e=>{
+  const d = document.getElementById('drawer');
+  if(!d.classList.contains('open')) return;
+  if(!d.contains || d.contains(e.target)) return;
+  if(d.focus) d.focus();
+});
 
 /* `detail` is the click count of the sequence. The scrim becomes clickable the
    instant the drawer opens while the dim is still fading in over .18s, so the
@@ -1794,14 +1841,21 @@ document.addEventListener('keydown', e=>{
 });
 
 /* Same loss, different exit: Cmd-W or a reload discards typed edits with no
-   prompt. The browser shows its own generic wording -- returnValue is only a
-   legacy trigger, its text is ignored. */
+   prompt. Modern engines show their own generic wording and ignore this text,
+   but it must be NON-EMPTY: per the unload algorithm the dialog appears when
+   the event is canceled OR returnValue is not the empty string, so assigning
+   '' is the value that means "do not prompt" on any engine still relying on
+   the legacy path. */
 window.addEventListener('beforeunload', e=>{
   if(!drawerDirty) return;
   e.preventDefault();
-  e.returnValue = '';
-  return '';
+  e.returnValue = 'You have unsaved changes in the open record.';
+  return e.returnValue;
 });
+
+// the drawer starts closed and off-screen; keep it out of the tab order until
+// something opens it (openDrawer clears this)
+document.getElementById('drawer').inert = true;
 
 reindex(); kpis(); renderList();
 CRM.detect();
