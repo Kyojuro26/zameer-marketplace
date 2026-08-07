@@ -43,8 +43,14 @@ function launch(opts) {
       sandbox.__confirms.push(String(m));
       return sandbox.__confirmReturn;
     },
+    // window listeners are RECORDED for the same reason element ones are: a
+    // swallowed beforeunload makes its test pass on code that never binds it
     window: {
-      addEventListener() {}, location: { href: '', search: '' },
+      _listeners: Object.create(null),
+      addEventListener(type, fn) {
+        (sandbox.window._listeners[type] || (sandbox.window._listeners[type] = [])).push(fn);
+      },
+      location: { href: '', search: '' },
       matchMedia: () => ({ matches: false, addEventListener() {} }),
     },
     fetch: () => new Promise(() => {}),          // never resolves by default

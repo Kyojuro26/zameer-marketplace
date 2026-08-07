@@ -135,11 +135,11 @@ TEMPLATE = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-<header>
+<header id="apphdr">
   <div class="brand">Unrivaled <span>CRM</span></div>
   <div class="kpis" id="kpis"></div>
 </header>
-<div class="wrap">
+<div class="wrap" id="appwrap">
   <aside class="sidebar">
     <div class="search">
       <input id="q" placeholder="Search companies, contacts, projects, invoice #, vendor PO…" autocomplete="off"/>
@@ -166,7 +166,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   <main class="main" id="main"><div class="empty">Select a company to begin.</div></main>
 </div>
 <div class="scrim" id="scrim"></div>
-<div class="drawer" id="drawer"><div class="dh"><h3 id="dtitle"></h3><button class="x" onclick="requestCloseDrawer()">&times;</button></div><div class="db" id="dbody"></div></div>
+<div class="drawer" id="drawer" tabindex="-1"><div class="dh"><h3 id="dtitle"></h3><button class="x" id="drawerX" onclick="requestCloseDrawer()">&times;</button></div><div class="db" id="dbody"></div></div>
 <div class="mvp" id="modePill">Connecting…</div>
 
 <script>
@@ -912,7 +912,7 @@ function openProject(pno){
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
     <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc(arr(p.annotations).join('\n'))}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}')">Save changes</button>
-    <button class="btn ghost" onclick="openNewShipment('${jesc(pno)}')" style="margin-left:8px">+ Add shipment</button>
+    <button class="btn ghost" onclick="navFromDrawer(()=>openNewShipment('${jesc(pno)}'))" style="margin-left:8px">+ Add shipment</button>
     <button class="pill-btn" style="background:var(--red-soft);color:var(--red);margin-left:8px" onclick="deleteProject('${jesc(pno)}')">Delete project</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px" id="drawerNote"></p>`;
@@ -1551,6 +1551,13 @@ async function doSave(tool, args, applyLocal){
     const r = await CRM.call(tool, args);
     if (r && r.ok){
       applyLocal(r);
+      // The work is on disk, so the drawer is no longer dirty. Not every save
+      // path closes -- saveProject deliberately stays open so the "Saved" flash
+      // survives -- and without this the flag stayed TRUE over a written record,
+      // so the next Escape asked "discard your unsaved changes?" about changes
+      // that were already saved. The danger is not the wrong prompt, it is that
+      // it trains the operator to dismiss the prompt that is real.
+      drawerDirty = false;
       msg.textContent='✓ Saved'; msg.className='saved show okc';
       kpis(); renderMain();
     } else {
@@ -1600,18 +1607,76 @@ function noticeToast(text){
    them open. Typing a value then manually restoring it still counts as dirty;
    that costs one extra confirm and never loses an edit. */
 let drawerDirty = false;
+let drawerReturnFocus = null;
+
+/* The scrim stops the MOUSE reaching the page. It does not stop the keyboard:
+   without this, Tab out of a drawer lands in the search box and the filter
+   buttons underneath, and Enter there repaints the main pane to a different
+   company while the drawer is still editing the previous one -- saving then
+   writes to a record the screen is no longer showing. `inert` removes the
+   whole page from focus and hit-testing for as long as a drawer is open.
+   #modePill is left alone: it is a status label with no handler. */
+function pageInert(on){
+  ['apphdr','appwrap'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.inert = !!on;
+  });
+}
+
+function drawerTitle(){
+  const t = document.getElementById('dtitle');
+  return (t && t.textContent || '').trim();
+}
+
+/* Named after the record, and explicit that the loss is permanent -- the other
+   confirms in this file all name what they act on and all say the outcome is
+   reversible. This one is the exception, so it has to say so. */
+function confirmDiscard(){
+  const what = drawerTitle();
+  return confirm('Discard your unsaved changes to '
+    + (what ? '"' + what + '"' : 'this record')
+    + "?\n\nWhat you typed has not been saved and cannot be recovered.");
+}
+
+/* True when it is safe to replace or close the drawer's contents. */
+function leaveDrawerOk(){
+  return !drawerDirty || confirmDiscard();
+}
+
+/* Navigation from a button INSIDE the drawer to another drawer.
+   The openers replace #dbody before calling openDrawer(), so by then the typed
+   values are already gone and openDrawer's reset would hide the loss. The ask
+   has to happen before the swap, which is why this wraps the opener rather
+   than living inside openDrawer(). Today "+ Add shipment" on the project
+   drawer is the only such button; any future one must use this too. */
+function navFromDrawer(open){
+  if(!leaveDrawerOk()) return;
+  drawerDirty = false;
+  open();
+}
+
 function openDrawer(){
   drawerDirty = false;
+  if(!document.getElementById('drawer').classList.contains('open')){
+    drawerReturnFocus = document.activeElement || null;
+  }
   document.getElementById('drawer').classList.add('open');
   document.getElementById('scrim').classList.add('open');
+  pageInert(true);
+  const d = document.getElementById('drawer');
+  if(d.focus) d.focus();
 }
 function closeDrawer(){
   drawerDirty = false;
   document.getElementById('drawer').classList.remove('open');
   document.getElementById('scrim').classList.remove('open');
+  pageInert(false);
+  // restore focus AFTER clearing inert -- focusing an inert element is a no-op
+  if(drawerReturnFocus && drawerReturnFocus.focus) drawerReturnFocus.focus();
+  drawerReturnFocus = null;
 }
 function requestCloseDrawer(){
-  if(drawerDirty && !confirm('Discard your unsaved changes to this record?')) return;
+  if(!leaveDrawerOk()) return;
   closeDrawer();
 }
 
@@ -1710,11 +1775,32 @@ document.querySelectorAll('#filters button').forEach(b=>
    template and are never themselves replaced, only #dbody's contents are. */
 ['input','change'].forEach(ev=>
   document.getElementById('dbody').addEventListener(ev, ()=>{ drawerDirty = true; }));
-document.getElementById('scrim').addEventListener('click', requestCloseDrawer);
+
+/* `detail` is the click count of the sequence. The scrim becomes clickable the
+   instant the drawer opens while the dim is still fading in over .18s, so the
+   SECOND click of a double-click on a project/shipment/invoice row lands on
+   the scrim and shuts the drawer the first click just opened -- it looks like
+   the record refuses to open. Ignoring detail>1 fixes that without a timing
+   window: a genuine double-click on the scrim still closes on its first click. */
+document.getElementById('scrim').addEventListener('click', e=>{
+  if(e && e.detail > 1) return;
+  requestCloseDrawer();
+});
+
 document.addEventListener('keydown', e=>{
   if(e.key === 'Escape' && document.getElementById('drawer').classList.contains('open')){
     requestCloseDrawer();
   }
+});
+
+/* Same loss, different exit: Cmd-W or a reload discards typed edits with no
+   prompt. The browser shows its own generic wording -- returnValue is only a
+   legacy trigger, its text is ignored. */
+window.addEventListener('beforeunload', e=>{
+  if(!drawerDirty) return;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
 });
 
 reindex(); kpis(); renderList();

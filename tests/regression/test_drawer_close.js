@@ -69,7 +69,9 @@ const OPENERS = [
   ["openShipment('4521-L1')", 'shipment'],
 ];
 
-function run(crmDir) {
+// async: one assertion needs a real save to have completed before it can ask
+// whether the drawer is still dirty. run_all.py's runner awaits the result.
+async function run(crmDir) {
   const r = makeResult('drawer-close');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmdrawer-'));
   const store = seedStore(path.join(tmp, 'store'));
@@ -81,24 +83,55 @@ function run(crmDir) {
   const { js, html } = buildBundle(crmDir, store, tmp);
 
   r.check('scrim element is in the page', /id="scrim"/.test(html));
+
+  // Anchored to the DRAWER's own X (id=drawerX), not to "any element with
+  // class=x anywhere on the page" -- the looser form was satisfied by a decoy
+  // button elsewhere in the document while the real X had been reverted.
   r.check('the X routes through the guard, not a bare close',
-    /class="x"[^>]*onclick="requestCloseDrawer\(\)"/.test(html),
+    /id="drawerX"[^>]*onclick="requestCloseDrawer\(\)"|onclick="requestCloseDrawer\(\)"[^>]*id="drawerX"/.test(html),
     'the X must ask about unsaved edits too -- it discards just as much');
+
+  // The scrim's four load-bearing properties. Each of these was mutated and
+  // survived the first version of this file, and each has a distinct
+  // user-visible failure, so each is asserted separately.
+  r.check('scrim is inert when closed',
+    /\.scrim\{[^}]*pointer-events:none/.test(html),
+    'without the base rule an invisible scrim swallows EVERY click in the app');
   r.check('scrim becomes clickable only when open',
     /\.scrim\.open\{[^}]*pointer-events:auto/.test(html));
+  r.check('scrim actually covers the viewport',
+    /\.scrim\{[^}]*inset:0/.test(html),
+    'a zero-size scrim blocks nothing and the stale-record bug returns');
   r.check('scrim sits under the drawer but over the page',
     (() => {
       const s = /\.scrim\{[^}]*z-index:(\d+)/.exec(html);
       const d = /\.drawer\{[^}]*z-index:(\d+)/.exec(html);
-      return s && d && +s[1] < +d[1];
-    })(), 'a scrim above the drawer would swallow every click in the form');
+      // the page layer that matters: the sticky header. A scrim beneath it
+      // leaves the topbar clicking through to the page under an open drawer.
+      const h = /header\{[^}]*z-index:(\d+)/.exec(html);
+      return s && d && h && +s[1] < +d[1] && +s[1] > +h[1];
+    })(), 'must be above the sticky header and below the drawer');
 
-  // no drawer may open by touching the class directly -- that bypasses both
-  // the scrim and the dirty reset
-  const strayOpens = (js.match(/getElementById\('drawer'\)\.classList\.add\('open'\)/g) || []).length;
+  // no drawer may open by touching the class directly -- that bypasses the
+  // scrim, the dirty reset, inert and focus. Quote-agnostic: the single-quote
+  // -only form missed a double-quoted twelfth opener.
+  const strayOpens = (js.match(/getElementById\(['"]drawer['"]\)\.classList\.add\(['"]open['"]\)/g) || []).length;
   r.check('every drawer opens through openDrawer()', strayOpens === 1,
     `${strayOpens} direct .add('open') calls; expected exactly 1 (inside openDrawer)`);
-  r.check('openDrawer does not call itself', !/function openDrawer\(\)\{[^}]*openDrawer\(\)/.test(js.replace(/\s+/g, '')));
+  // every open* entry point is accounted for by OPENERS below; a new one added
+  // later must be added there too, or this fails
+  const entryPoints = (js.match(/^function open[A-Z]\w*\(/gm) || [])
+    .map(s => s.replace(/^function /, '').replace(/\($/, ''))
+    .filter(n => n !== 'openDrawer');
+  r.check(`all ${entryPoints.length} open* entry points are exercised below`,
+    entryPoints.length === OPENERS.length,
+    `bundle has ${entryPoints.length} (${entryPoints.join(',')}), OPENERS lists ${OPENERS.length}`);
+  // whitespace is NOT stripped here: the previous version stripped it and then
+  // searched for a pattern containing a space, so it returned "pass" on
+  // genuinely infinite recursion -- the exact bug it was written to catch
+  r.check('openDrawer does not call itself',
+    !/function\s+openDrawer\s*\(\s*\)\s*\{[^}]*\bopenDrawer\s*\(/.test(js),
+    'openDrawer() calling openDrawer() recurses forever on the first open');
 
   // ---- behavioural ----------------------------------------------------------
   const app = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
@@ -147,11 +180,23 @@ function run(crmDir) {
     'this is the whole point -- a stray click must not lose typed work');
   r.check('dirty drawer: answering no keeps the scrim up', scrimOn());
 
-  // ...answering YES discards and closes
+  // ...answering YES discards and closes -- and MUST still have asked.
+  // Without the "was asked" half, clearing the flag before prompting passes:
+  // cancel once and the second stray click discards silently, unasked.
   app.resetConfirms();
   app.answerConfirm(true);
   fire(scrim, 'click', {});
   r.check('dirty drawer: answering yes closes it', !isOpen());
+  r.check('dirty drawer: the second attempt still asks', app.confirms().length === 1,
+    'a guard that clears the flag before prompting stops asking after one cancel');
+
+  // the wording itself, not just that something was asked. An inverted prompt
+  // ("Keep editing?") means OK does the opposite of what the operator reads.
+  const msg = app.confirms()[0] || '';
+  r.check('the prompt says discard', /discard/i.test(msg), msg);
+  r.check('the prompt names the record', /Edit invoice/.test(msg),
+    `should name what is being discarded; got: ${msg}`);
+  r.check('the prompt says the loss is permanent', /cannot be recovered/i.test(msg), msg);
 
   // Escape must behave identically -- the fix-by-instance trap
   app.eval("openEditInvoice('acme','9001');");
@@ -173,11 +218,25 @@ function run(crmDir) {
   r.check('other keys do not close the drawer', isOpen());
   r.check('other keys do not prompt', app.confirms().length === 0);
 
-  // Escape with NO drawer open must not prompt about anything
+  // Escape with NO drawer open must do nothing at all. Asserting only "no
+  // prompt" was tautological -- closeDrawer() clears the flag, so a guard that
+  // had lost its is-open check would still not prompt. The real claim is that
+  // the page is not left inert and focus is not stolen.
+  // A sentinel, because the obvious assertions are all tautological here:
+  // closeDrawer() clears the dirty flag, so "no prompt" holds whether or not
+  // the handler ran, and closing an already-closed drawer looks like a no-op.
+  // The one thing that DOES differ is that closeDrawer() writes the page's
+  // inert state -- so a value only it would overwrite proves it never ran.
   app.eval('closeDrawer();');
   app.resetConfirms();
+  app.eval("document.getElementById('apphdr').inert = 'UNTOUCHED';");
   fire(app.doc, 'keydown', { key: 'Escape' });
-  r.check('Escape with no drawer open is inert', app.confirms().length === 0);
+  r.check('Escape with no drawer open does not prompt', app.confirms().length === 0);
+  r.check('Escape with no drawer open runs nothing at all',
+    app.doc.getElementById('apphdr').inert === 'UNTOUCHED',
+    'the handler must check the drawer is open before doing any work');
+  r.check('Escape with no drawer open does not open one', !isOpen());
+  app.eval("document.getElementById('apphdr').inert = false;");
 
   // the save path must never be interrupted, even while dirty
   app.eval("openEditInvoice('acme','9001');");
@@ -206,6 +265,94 @@ function run(crmDir) {
   fire(scrim, 'click', {});
   r.check('switching drawers directly resets dirt',
     !isOpen() && app.confirms().length === 0);
+
+  // ---- the four defects found by review of the first version ---------------
+
+  // 1. A SAVE CLEARS THE FLAG. saveProject deliberately does not close (it
+  //    keeps the "Saved" flash), so without this the flag stayed true over a
+  //    written record and the next Escape asked about saved changes. The harm
+  //    is habituation: an operator taught to dismiss a false prompt dismisses
+  //    the real one.
+  app.eval("closeDrawer(); openProject('4521');");
+  fire(dbody, 'input', {});
+  app.resetCalls();
+  await app.eval("saveProject('4521')");
+  r.check('a successful save was actually attempted',
+    app.calls().some(c => c.tool === 'update_project'),
+    `tools called: ${app.calls().map(c => c.tool).join(',') || 'none'}`);
+  r.check('the drawer stays open after a project save', isOpen(),
+    'saveProject keeps it open on purpose -- if this changed, the test below is moot');
+  app.resetConfirms();
+  app.answerConfirm(false);
+  fire(app.doc, 'keydown', { key: 'Escape' });
+  r.check('no false prompt after a successful save', app.confirms().length === 0,
+    'the record is on disk; asking "discard unsaved changes?" here is a lie');
+  r.check('and it closes', !isOpen());
+
+  // 2. IN-DRAWER NAVIGATION ASKS. "+ Add shipment" sits inside the project
+  //    drawer and replaces the form; the openers swap #dbody before calling
+  //    openDrawer, so the reset would hide the loss.
+  r.check('the in-drawer button routes through navFromDrawer',
+    /onclick="navFromDrawer\(\(\)=>openNewShipment/.test(html),
+    'calling the opener directly discards the project form silently');
+  app.eval("closeDrawer(); openProject('4521');");
+  fire(dbody, 'input', {});
+  app.resetConfirms();
+  app.answerConfirm(false);
+  app.eval("navFromDrawer(()=>openNewShipment('4521'))");
+  r.check('leaving a dirty project form asks first', app.confirms().length === 1);
+  r.check('answering no keeps the project form', /Project/.test(app.doc.getElementById('dtitle').textContent),
+    `title is now: ${app.doc.getElementById('dtitle').textContent}`);
+  app.answerConfirm(true);
+  app.eval("navFromDrawer(()=>openNewShipment('4521'))");
+  r.check('answering yes navigates', /shipment/i.test(app.doc.getElementById('dtitle').textContent));
+  app.resetConfirms();
+  fire(scrim, 'click', {});
+  r.check('the new form starts clean', !isOpen() && app.confirms().length === 0);
+
+  // 3. DOUBLE-CLICK. The scrim goes live the instant the drawer opens while the
+  //    dim is still fading, so click 2 of a double-click on a row lands on it
+  //    and shuts what click 1 opened.
+  app.eval("closeDrawer(); openProject('4521');");
+  app.resetConfirms();
+  fire(scrim, 'click', { detail: 2 });
+  r.check('the second click of a double-click does not close the drawer', isOpen(),
+    'otherwise every double-clicked row looks like it refuses to open');
+  fire(scrim, 'click', { detail: 1 });
+  r.check('an ordinary single click still closes it', !isOpen());
+
+  // 4. THE PAGE IS INERT WHILE A DRAWER IS OPEN. The scrim stops the mouse;
+  //    only inert stops Tab reaching the search box and filter buttons, where
+  //    Enter repaints the main pane under the open drawer.
+  app.eval("closeDrawer();");
+  const hdr = app.doc.getElementById('apphdr'), wrap = app.doc.getElementById('appwrap');
+  r.check('page is interactive with no drawer open',
+    hdr.inert !== true && wrap.inert !== true);
+  app.eval("openProject('4521');");
+  r.check('header goes inert when a drawer opens', hdr.inert === true,
+    'without this, Tab reaches the KPIs and the search box under the scrim');
+  r.check('sidebar and main go inert when a drawer opens', wrap.inert === true,
+    'this is what stops Enter on a filter button repainting under the drawer');
+  app.eval("closeDrawer();");
+  r.check('header is interactive again after close', hdr.inert !== true);
+  r.check('sidebar and main are interactive again after close', wrap.inert !== true,
+    'a page left inert is an app that cannot be clicked at all');
+
+  // 5. RELOAD/CLOSE-TAB. Same loss, different exit.
+  const bu = (app.sandbox.window._listeners.beforeunload || []);
+  r.check('a beforeunload guard is bound', bu.length > 0);
+  if (bu.length) {
+    app.eval("closeDrawer(); openProject('4521');");
+    let ev = { prevented: false, preventDefault() { this.prevented = true; }, returnValue: null };
+    bu[0](ev);
+    r.check('clean drawer does not block a reload', !ev.prevented,
+      'prompting on every reload trains the operator to ignore it');
+    fire(dbody, 'input', {});
+    ev = { prevented: false, preventDefault() { this.prevented = true; }, returnValue: null };
+    bu[0](ev);
+    r.check('dirty drawer blocks a reload', ev.prevented);
+    r.check('and sets returnValue for older browsers', ev.returnValue === '');
+  }
 
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;

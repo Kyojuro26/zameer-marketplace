@@ -86,10 +86,13 @@ def run_js(crm_dir, pattern):
     for relpath, name in JS_MODULES:
         if pattern and pattern not in name:
             continue
+        # Promise.resolve handles both sync and async run() -- one module needs
+        # to await a real save before it can assert on the drawer's state.
         script = f"""
         const m = require({str(ROOT / relpath)!r});
-        const r = m.run({str(crm_dir)!r});
-        process.exit(r.report() ? 0 : 1);
+        Promise.resolve(m.run({str(crm_dir)!r}))
+          .then(r => process.exit(r.report() ? 0 : 1))
+          .catch(e => {{ console.error(e && e.stack || String(e)); process.exit(1); }});
         """
         p = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         sys.stdout.write(p.stdout)
