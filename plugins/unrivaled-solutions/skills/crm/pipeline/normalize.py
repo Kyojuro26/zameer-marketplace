@@ -93,26 +93,74 @@ ROW_CAP = 20000
 
 
 def _cap_check(ws, cap, label, review, min_row=1):
-    """Flag loudly if the sheet holds data beyond the row bound."""
+    """Flag loudly if the sheet holds real DATA beyond the row bound.
+
+    max_row alone is not the question. Excel reports a used range covering
+    every formatted cell, so the operator's 2026 deal log claims 35,139 rows
+    while its last real content is at row 172. Flagging on the count alone
+    would fire on both sales-tracker sheets every import and say 15,000 rows
+    were dropped when none were -- the same unactionable noise this pass
+    exists to remove. So: look, and only flag if something is actually there."""
     try:
         beyond = ws.max_row or 0
     except Exception:                                 # noqa: BLE001
         return
-    if beyond > cap:
-        review.append({
-            "type": "sheet_truncated",
-            "detail": (f"{label}: the sheet has {beyond} rows but only the first "
-                       f"{cap} were read. Rows {cap + 1}-{beyond} were NOT "
-                       f"imported. Raise ROW_CAP in normalize.py and re-run."),
-            "sheet_row": cap,
-        })
+    if beyond <= cap:
+        return
+    last_real = None
+    try:
+        for i, row in enumerate(ws.iter_rows(min_row=cap + 1, max_row=beyond,
+                                             values_only=True), start=cap + 1):
+            if row and any(has_value(c) for c in row):
+                last_real = i
+    except Exception:                                 # noqa: BLE001
+        last_real = beyond      # cannot tell -> assume the worst and flag
+    if last_real is None:
+        return                  # formatted-empty padding, nothing was lost
+    review.append({
+        "type": "sheet_truncated",
+        "detail": (f"{label}: real data found at row {last_real}, but only the "
+                   f"first {cap} rows were read. Rows {cap + 1}-{last_real} "
+                   f"were NOT imported. Raise ROW_CAP in normalize.py and "
+                   f"re-run."),
+        "sheet_row": last_real,
+    })
 
 
 def clean(v):
+    """String-coercion for IDENTIFIERS. Deliberately returns "0" for a literal
+    zero: a project or invoice number of 0 is a real key and has to survive.
+    Do not "fix" this to return None for zero -- see has_value() below."""
     if v is None:
         return None
     s = str(v).strip()
     return s if s else None
+
+
+def has_value(v):
+    """Presence test for a DATA cell -- a different question from clean().
+
+    clean() answers "what is the string form of this key", and its answer for
+    numeric 0 is "0", which is truthy. Using it as a presence test on a
+    financial column therefore reads every formatted-but-empty row whose cached
+    formula result is 0 as "this row carries values". On the operator's live
+    workbook that produced 39,726 spurious needs_review entries out of 39,872 --
+    99.6% of the file -- burying the ~140 real ones at roughly 280:1 and making
+    the whole mechanism useless.
+
+    So this is the presence test, and clean() stays exactly as it is. A cell is
+    considered to hold something when it is not empty AND not numerically zero;
+    anything non-numeric (a stray "N/A", a note) counts as present, because it
+    is content a person put there."""
+    if v is None:
+        return False
+    s = str(v).strip()
+    if not s:
+        return False
+    try:
+        return float(s.replace(",", "")) != 0.0
+    except ValueError:
+        return True
 
 
 # A parenthetical counts as an OWNER (rep) only if it looks like initials:
@@ -409,6 +457,13 @@ def run(workbook, outdir, force=False, mode="merge"):
     # ---- Sales Tracker sheets (deals -> projects) ----
     for sheet in [s for s in wb.sheetnames if s.lower().startswith("sales tracker")]:
         ws = wb[sheet]
+        # The deal log was the ONE sheet with no cap check: contacts, vendors
+        # and the project tracker all had one, so a sales-tracker sheet growing
+        # past ROW_CAP would have truncated in complete silence. His 2026 sheet
+        # already reports 35,139 rows against a 20,000 cap -- all of it
+        # formatted-empty today, so nothing is being lost, but the only reason
+        # anyone knows that is that it was measured.
+        _cap_check(ws, ROW_CAP, f'{sheet} sheet', review)
         year = 2025 if "2025" in sheet else (2026 if "2026" in sheet else None)
         # find header row (cell A == "Project#")
         hrow = None
@@ -441,18 +496,30 @@ def run(workbook, outdir, force=False, mode="merge"):
         c_marg = col(hm, "margain", "margin")
         c_notes = col(hm, "notes")
 
-        for row in ws.iter_rows(min_row=hrow + 1, max_row=ROW_CAP, values_only=True):
+        # enumerate: the body reports the offending sheet row, and without a
+        # binding here `rn` resolved to nothing at all -- UnboundLocalError, the
+        # whole import dead, no store written. Reached by any row carrying a
+        # financial value but neither a customer nor a project number, which the
+        # operator's live workbook contains. Introduced in 6f7d3e7 and shipped
+        # in 0.1.29; 0.1.25 (what he runs) binds rn at every site and imports
+        # fine, so the published version is the broken one.
+        for rn, row in enumerate(ws.iter_rows(min_row=hrow + 1, max_row=ROW_CAP,
+                                              values_only=True), start=hrow + 1):
             def g(ci):
                 return row[ci - 1] if ci and ci - 1 < len(row) else None
             cust = clean(g(c_cust))
             pno_raw = g(c_pno)
             if not cust and pno_raw in (None, ""):
-                if any(clean(g(c)) for c in (c_rev, c_gp, c_cost) if c):
+                # has_value, not clean: these are financial columns, and a
+                # formatted-but-empty row whose cached formula result is 0 is
+                # not a row carrying values. See has_value().
+                if any(has_value(g(c)) for c in (c_rev, c_gp, c_cost) if c):
                     review.append({
                         "type": "deal_row_without_keys",
                         "detail": ("row carries financial values but has neither "
                                    "a customer nor a project number, so it was "
                                    "not imported"),
+                        "sheet": sheet,
                         "sheet_row": rn,
                     })
                 continue
@@ -468,6 +535,7 @@ def run(workbook, outdir, force=False, mode="merge"):
             # phantom customer.
             if cust and not (pno or status_val or (rev_val not in (None, 0, 0.0))):
                 review.append({"type": "label_row_skipped", "sheet": sheet,
+                               "sheet_row": rn,
                                "customer": str(cust)[:60]})
                 continue
             clean_name, owners, annos = strip_rep_tags(cust) if cust else (None, [], [])
@@ -502,6 +570,7 @@ def run(workbook, outdir, force=False, mode="merge"):
                 raw = g(ci)
                 if raw is not None and num(raw) is None:
                     review.append({"type": "non_numeric_financial", "field": label,
+                                   "sheet_row": rn,
                                    "project_no": pno, "sheet": sheet,
                                    "value": str(raw)[:40]})
             if pno and pno in projects:
@@ -526,7 +595,8 @@ def run(workbook, outdir, force=False, mode="merge"):
             elif pno:
                 projects[pno] = rec
             else:
-                review.append({"type": "project_without_number", "customer": cust, "sheet": sheet})
+                review.append({"type": "project_without_number", "customer": cust,
+                               "sheet": sheet, "sheet_row": rn})
                 projects[f"noid-{len(projects)}"] = rec
 
     # ---- Client Contacts (people -> contacts + companies) ----
@@ -585,8 +655,13 @@ def run(workbook, outdir, force=False, mode="merge"):
             "company_id": cid, "display_name": display_company(comp),
             "hq_location": clean(g(vc["hq"])), "rep": rep, "email": email,
             "phone": clean(g(vc["phone"])), "offerings": clean(g(vc["offerings"])),
-            "po_routing": clean(g(vc["send_po"])), "invoice_routing": clean(g(vc["send_inv"])),
-            "po_routing_source": "sheet" if clean(g(vc["send_po"])) else "knowledge-base (to mine)",
+            # has_value for the source claim AND for the value itself: a cell
+            # holding 0 would otherwise store "0" as the routing address and
+            # then assert it came from the sheet, which is a lie about
+            # provenance on a field used to decide where POs get sent.
+            "po_routing": clean(g(vc["send_po"])) if has_value(g(vc["send_po"])) else None,
+            "invoice_routing": clean(g(vc["send_inv"])) if has_value(g(vc["send_inv"])) else None,
+            "po_routing_source": "sheet" if has_value(g(vc["send_po"])) else "knowledge-base (to mine)",
         }
         if rep or email:
             contacts.append({"company_id": cid, "company_name": display_company(comp),
@@ -665,7 +740,7 @@ def run(workbook, outdir, force=False, mode="merge"):
     # --- Table 1: open orders ---
     for r in all_rows[1:inv_header_idx]:
         if not r or r[0] is None:
-            if r and any(c is not None and str(c).strip() for c in r[1:]):
+            if r and any(has_value(c) for c in r[1:]):
                 review.append({
                     "type": "open_order_row_without_project",
                     "detail": ("row has content but no project number, so its "
@@ -713,7 +788,7 @@ def run(workbook, outdir, force=False, mode="merge"):
             # needs_review entry -- and that is exactly what a merged cell, or
             # an order not yet invoiced, looks like. A row carrying any other
             # content is a real receivable that would simply never exist.
-            if r and any(c is not None and str(c).strip() for c in r[1:]):
+            if r and any(has_value(c) for c in r[1:]):
                 review.append({
                     "type": "invoice_row_without_number",
                     "detail": ("row has content but no invoice number, so it was "

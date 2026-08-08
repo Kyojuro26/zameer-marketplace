@@ -17,11 +17,29 @@ import os, re, shutil, subprocess, sys, tempfile
 
 
 def run_against(test_rel, crm_dir):
-    r = subprocess.run(["node", "-e",
-        f"const m=require({test_rel!r});"
-        f"Promise.resolve(m.run({crm_dir!r})).then(r=>process.exit(r.report()?0:1))"
-        f".catch(e=>{{console.error(String(e).slice(0,300));process.exit(1)}});"],
-        capture_output=True, text=True, timeout=180)
+    """Drive one test module against a (possibly mutated) plugin copy.
+
+    Dispatches on extension: the suite has both node and python modules, and a
+    second copy of this runner for python would be one more thing to drift.
+    Both paths must print a [PASS]/[FAIL] line -- the caller reads its absence
+    as "crashed, not a kill"."""
+    if test_rel.endswith(".js"):
+        cmd = ["node", "-e",
+               f"const m=require({test_rel!r});"
+               f"Promise.resolve(m.run({crm_dir!r})).then(r=>process.exit(r.report()?0:1))"
+               f".catch(e=>{{console.error(String(e).slice(0,300));process.exit(1)}});"]
+    else:
+        cmd = ["python3", "-c",
+               "import importlib.util,sys\n"
+               "sys.path.insert(0,'tests')\n"
+               f"spec=importlib.util.spec_from_file_location('m',{test_rel!r})\n"
+               "m=importlib.util.module_from_spec(spec)\n"
+               "spec.loader.exec_module(m)\n"
+               "import inspect\n"
+               f"n=len(inspect.signature(m.run).parameters)\n"
+               f"res=m.run(None,{crm_dir!r}) if n>1 else m.run(None)\n"
+               "sys.exit(0 if res.report() else 1)"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
