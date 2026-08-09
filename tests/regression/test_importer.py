@@ -194,6 +194,12 @@ def run(server, crm_dir=None):
             # reports it, has_value does not. Same bug as the deal log, at a
             # site that never touches clean() -- grepping for clean missed it.
             _pt.append([None, 0, 0, 0, 0, 0, 0, 0])
+            # a keyed row AFTER it, so the all-zero row is inside the data
+            # region. The legend/footer boundary skips everything below the last
+            # keyed row, so without this the row above is never presence-tested
+            # and the assertion about it silently stops meaning anything.
+            _pt.append(["9002", "PO-5502", None, "Brightwater Fabrication",
+                        "Dayton OH", "second job", "VPO-2", None])
             _pt.append(["Invoice Number:", "PO#", "Invoice Date", "DUE Date",
                         "Client", "Notes"])
             _cc = _wb.create_sheet("Client Contacts")
