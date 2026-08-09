@@ -54,7 +54,12 @@ KEYS = {
 }
 # needs_review is regenerated wholesale every import: it is the importer's own
 # commentary on THIS run, not operator data.
-REGENERATED = {"needs_review.json"}
+# tracker_buckets/tracker_unlinked join it: both are the importer's reading of
+# the Project Tracker sheet on THIS run -- the bucket labels come from the
+# legend, the unlinked rows are ones that could not be matched to a project.
+# Neither is operator data, and neither has a stable key to merge on.
+REGENERATED = {"needs_review.json", "tracker_buckets.json",
+               "tracker_unlinked.json"}
 
 # how Store.log names each entity, and how it builds the key it logs under
 CHANGELOG_ENTITY = {

@@ -79,6 +79,12 @@ PROJECT_FIELDS = {
     "location", "annotations", "status", "po_flag", "client_po_no", "invoice_no",
     "collection_status", "revenue", "total_cost", "gross_profit", "margin",
     "notes", "year", "archived", "archived_at",
+    # Live Tracker. tracker_status is the status bucket, stored under a neutral
+    # key (the human label lives in tracker_buckets.json, read from the sheet's
+    # own legend). open_orders_notes is the row's note: it used to exist only on
+    # shipments, duplicated across every leg, and absent entirely from a row
+    # with no legs.
+    "tracker_status", "open_orders_notes", "tracker_row",
 }
 SHIPMENT_FIELDS = {
     "shipment_id", "project_no", "all_project_nos", "vendor_po_raw", "ship_date",

@@ -78,6 +78,14 @@ function seedStore(dir) {
     payment_status: 'partial:30%', payment_notes: '30% deposit',
     invoice_date: '2026-06-09' }]);
   w('vendors', []); w('needs_review', []);
+  // a tracker row with no project number: the 12th drawer adopts it into the
+  // CRM, and without a row to adopt that opener would bail before opening
+  w('tracker_unlinked', [{ sheet_row: 4, reason: 'no project number',
+    client: 'Ace Manufacturing', client_po: 'PO-9', start_date: '2026-05-01',
+    location: 'Dallas TX', open_orders_notes: 'waiting on frames',
+    tracker_status: 'awaiting_materials', legs: [] }]);
+  w('tracker_buckets', [{ key: 'awaiting_materials', label: 'Waiting on materials',
+    argb: 'FF00FFFF', legend_row: 19 }]);
   return dir;
 }
 
@@ -94,6 +102,7 @@ const OPENERS = [
   ["openNewInvoice('acme')", 'new invoice'],
   ["openEditInvoice('acme','9001')", 'edit invoice'],
   ["openShipment('4521-L1')", 'shipment'],
+  ["openAdoptTrackerRow(0)", 'adopt tracker row'],
 ];
 
 // async: one assertion needs a real save to have completed before it can ask

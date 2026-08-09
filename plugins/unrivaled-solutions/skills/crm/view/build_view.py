@@ -91,6 +91,28 @@ TEMPLATE = r"""<!DOCTYPE html>
   .b-vendor{background:#eef0f3;color:var(--slate)}
   .b-lead{background:var(--amber-soft);color:var(--amber)}
   .b-open{background:var(--accent-soft);color:var(--accent)}
+  /* Live Tracker. The swatches echo the sheet's own colours so the grouping
+     reads the way it does in Excel, without reproducing the raw magenta. */
+  .b-admin{background:#fbe4f7;color:#8a2378}
+  .b-owner{background:#fdf3d0;color:#7a5a00}
+  .b-await{background:#dff2f6;color:#0f5f70}
+  .swatch{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
+  .swatch.b-admin{background:#c0389f} .swatch.b-owner{background:#e0a800}
+  .swatch.b-await{background:#2296ad} .swatch.b-stage{background:var(--muted)}
+  .lt-head{display:flex;align-items:center;gap:9px;margin:0 0 10px;
+           border-bottom:1px solid var(--line);padding-bottom:6px}
+  .lt-head h2{font-size:13.5px;font-weight:650;color:var(--ink)}
+  .lt-card{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+           padding:12px 14px;margin-bottom:10px}
+  .lt-card.lt-unlinked{border-style:dashed}
+  .lt-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13.5px}
+  /* the note is the substance of this screen -- never truncated, wraps freely */
+  .lt-note{margin:8px 0 0;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
+  .lt-legs{margin-top:9px;display:flex;flex-direction:column;gap:4px}
+  .lt-leg{display:flex;gap:10px;align-items:center;font-size:12.5px;flex-wrap:wrap}
+  .lt-po{color:var(--muted);min-width:190px}
+  .lt-bad{color:var(--red);font-weight:600}
+  .lt-warn{color:var(--amber);font-weight:600}
   .due-group{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
              padding:10px 8px 4px;border-bottom:1px solid var(--line)}
   .due-group.od{color:var(--red)}
@@ -192,7 +214,8 @@ TEMPLATE = r"""<!DOCTYPE html>
     <div class="search">
       <input id="q" placeholder="Search companies, contacts, projects, invoice #, vendor PO…" autocomplete="off"/>
       <div class="filters" id="filters">
-        <button data-f="all" class="on">All</button>
+        <button data-f="live" class="on">Live</button>
+          <button data-f="all">All</button>
         <button data-f="customer">Customers</button>
         <button data-f="vendor">Vendors</button>
         <button data-f="lead">Leads</button>
@@ -479,7 +502,9 @@ const jesc = (s)=> (s==null?'':String(s)).replace(/[^a-zA-Z0-9_]/g,c=>{
 // Only allow http(s)/mailto hrefs; neutralize javascript:, data:, etc.
 const safeUrl = (u)=>{ const s=String(u||'').trim(); return /^(https?:|mailto:)/i.test(s) ? s : '#'; };
 
-let filter='all', selected=null, query='';
+// 'live' is the landing screen: the daily what-is-moving view, not the
+// company list. Every other tab is still one click away.
+let filter='live', selected=null, query='';
 // Projects view (own tab): sub-filter + sort state, independent of the
 // company list's own filter/query so switching tabs doesn't lose either.
 let projStatus='all', projYear='all', projColl='all';
@@ -810,6 +835,261 @@ function renderReceivablesList(){
   }).join('') || '<div class="muted" style="padding:14px">Nothing here.</div>';
 }
 
+/* ------------------------------------------------------- live tracker --
+   The daily "whose court is the ball in" screen, and the landing screen.
+
+   Status is the sheet's fill colour, decoded at import into a neutral key; the
+   LABEL is whatever he wrote in the legend, read from the workbook and stored,
+   never hardcoded here. A bucket with no legend row still groups correctly and
+   falls back to its key rather than showing nothing. */
+function trackerBuckets(){
+  const seen = (DATA.tracker_buckets||[]).filter(b=>b && b.key);
+  if(seen.length) return seen;
+  // no legend was found at all: still group, using the keys themselves
+  return [{key:'action_admin'},{key:'action_owner'},{key:'awaiting_materials'}];
+}
+function bucketLabel(key){
+  const b = (DATA.tracker_buckets||[]).find(x=>x && x.key===key);
+  if(b && b.label) return b.label;
+  return st(key).replace(/_/g,' ').replace(/^\w/, c=>c.toUpperCase());
+}
+function bucketClass(key){
+  return {action_admin:'b-admin', action_owner:'b-owner',
+          awaiting_materials:'b-await'}[key] || 'b-stage';
+}
+
+/* A ship-date cell is a date about half the time. The rest are "EST 8/03/26",
+   "US Pickup", or empty. Never invent one: parse what is parseable, show the
+   rest exactly as stored, and say plainly which it is -- an unknown date is
+   the thing he most needs to see. */
+function legDate(raw){
+  const t = st(raw).trim();
+  if(!t) return {kind:'none', text:'no date'};
+  const est = /^\s*est\.?\s+/i.test(t);
+  const iso = isoDate(t.replace(/^\s*est\.?\s+/i, ''));
+  if(!iso) return {kind:'text', text:t};
+  const late = iso < todayISO();
+  return {kind: late ? (est?'est-passed':'passed') : 'ok', text: fmtDate(iso),
+          est: est, iso: iso};
+}
+function legPaid(po){
+  const m = st(po).match(/\((\s*\d+%\s*)?\s*paid\s*\)/i);
+  if(!m) return null;
+  return m[1] ? m[1].trim() + ' paid' : 'paid';
+}
+/* Everything on this row that needs a person: a ship date already past, an EST
+   that has come and gone, a leg with no date at all, a start date of TBD. */
+function liveFlags(p, legs){
+  const out = [];
+  const start = st(p.date || p.start_date).trim();
+  if(/^tbd$/i.test(start)) out.push('start TBD');
+  legs.forEach(l=>{
+    const d = legDate(l.ship_date);
+    if(d.kind==='passed') out.push('ship date passed');
+    else if(d.kind==='est-passed') out.push('EST passed');
+    else if(d.kind==='none') out.push('leg with no date');
+  });
+  return [...new Set(out)];
+}
+
+function liveRows(){
+  const rows = (DATA.projects||[])
+    .filter(p=>p && !p.archived && st(p.tracker_status))
+    .map(p=>{
+      const legs = (DATA.shipments||[]).filter(s=>
+        st(s.company_id)===st(p.company_id) &&
+        _shipmentProjectNos(s).has(st(p.project_no)));
+      return {p, legs, flags: liveFlags(p, legs)};
+    });
+  rows.sort((a,b)=>{
+    if(a.flags.length !== b.flags.length) return b.flags.length - a.flags.length;
+    return st(a.p.project_no).localeCompare(st(b.p.project_no));
+  });
+  return rows;
+}
+
+function renderLiveMain(){
+  const rows = liveRows();
+  const unlinked = (DATA.tracker_unlinked||[]).filter(u=>u);
+  const flagged = rows.filter(r=>r.flags.length).length;
+
+  let h = `<div class="co-head"><h1>Live projects</h1>
+    <span class="muted">${rows.length} active</span>
+    ${flagged?`<span class="badge b-lost">${flagged} need a look</span>`:''}</div>`;
+  h += `<p class="muted" style="margin:2px 0 16px;font-size:12px">
+    Grouped by the status colours from your tracker. Anything late, estimated
+    and passed, or missing a date is called out on the row.</p>`;
+
+  trackerBuckets().forEach(b=>{
+    const mine = rows.filter(r=>st(r.p.tracker_status)===b.key);
+    if(!mine.length) return;
+    h += `<div class="section"><div class="lt-head">
+      <span class="swatch ${bucketClass(b.key)}"></span>
+      <h2 style="border:0;padding:0;margin:0">${esc(bucketLabel(b.key))}</h2>
+      <span class="muted">${mine.length}</span></div>`;
+    h += mine.map(r=>liveCard(r)).join('');
+    h += `</div>`;
+  });
+
+  if(unlinked.length){
+    h += `<div class="section"><div class="lt-head">
+      <span class="swatch b-stage"></span>
+      <h2 style="border:0;padding:0;margin:0">Not in the CRM yet</h2>
+      <span class="muted">${unlinked.length}</span></div>
+      <p class="muted" style="font-size:12px;margin:0 0 10px">
+        These are live rows from your tracker that have no project number the
+        CRM can match. Give one a number and it becomes a normal project you
+        can edit here.</p>`;
+    h += unlinked.map((u,i)=>unlinkedCard(u,i)).join('');
+    h += `</div>`;
+  }
+  if(!rows.length && !unlinked.length){
+    h += `<div class="empty">No live projects yet.</div>`;
+  }
+  return h;
+}
+
+function liveCard(r){
+  const p = r.p, co = companyById[p.company_id];
+  const legs = r.legs.map(l=>{
+    const d = legDate(l.ship_date), paid = legPaid(l.vendor_po_raw);
+    const cls = (d.kind==='passed'||d.kind==='none') ? 'lt-bad'
+              : (d.kind==='est-passed' ? 'lt-warn' : 'muted');
+    return `<div class="lt-leg">
+      <span class="lt-po">${esc(st(l.vendor_po_raw)||'—')}</span>
+      <span class="${cls} nw">${esc(d.text)}${d.est&&d.kind!=='est-passed'?' (est)':''}</span>
+      ${paid?`<span class="badge b-won">${esc(paid)}</span>`:''}
+    </div>`;
+  }).join('') || '<div class="muted" style="font-size:12px">No vendor legs.</div>';
+
+  return `<div class="lt-card">
+    <div class="lt-top">
+      <b class="nw">${esc(st(p.project_no)||'—')}</b>
+      <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(p.company_id)}')">${esc(co?(co.display_name||p.company_id):st(p.company_id))}</a>
+      ${p.invoice_no?`<span class="muted nw">inv ${esc(st(p.invoice_no))}</span>`:''}
+      <span class="muted nw">${esc(fmtDate(p.date)||st(p.date)||'no start date')}</span>
+      ${r.flags.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}
+      <span style="margin-left:auto"><button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}')">Edit</button></span>
+    </div>
+    <div class="lt-note">${esc(st(p.open_orders_notes)||'')||'<span class="muted">no note</span>'}</div>
+    <div class="lt-legs">${legs}</div>
+  </div>`;
+}
+
+function unlinkedCard(u, i){
+  const legs = (u.legs||[]).map(l=>{
+    const d = legDate(l.ship_date), paid = legPaid(l.vendor_po_raw);
+    return `<div class="lt-leg"><span class="lt-po">${esc(st(l.vendor_po_raw)||'—')}</span>
+      <span class="muted nw">${esc(d.text)}</span>
+      ${paid?`<span class="badge b-won">${esc(paid)}</span>`:''}</div>`;
+  }).join('') || '<div class="muted" style="font-size:12px">No vendor legs.</div>';
+  return `<div class="lt-card lt-unlinked">
+    <div class="lt-top">
+      <span class="badge b-stage nw">tracker row ${esc(st(u.sheet_row))}</span>
+      <b>${esc(st(u.client)||'unknown client')}</b>
+      ${u.raw_key?`<span class="muted nw">keyed ${esc(st(u.raw_key))}</span>`:''}
+      <span class="muted nw">${esc(fmtDate(u.start_date)||st(u.start_date)||'no start date')}</span>
+      <span style="margin-left:auto"><button class="pill-btn pri" onclick="openAdoptTrackerRow(${i})">Add to CRM</button></span>
+    </div>
+    <div class="lt-note">${esc(st(u.open_orders_notes)||'')||'<span class="muted">no note</span>'}</div>
+    <div class="lt-legs">${legs}</div>
+  </div>`;
+}
+
+/* Adopt a tracker row into the CRM.
+
+   The row came off the sheet with no project number the CRM could match, so it
+   has no key and cannot be edited. Rather than mint one -- a synthetic key
+   would silently mis-attach a later edit if two such rows ever shuffled -- he
+   supplies the number here, and the row becomes an ordinary project. That is
+   the migration direction: the fix lives in the CRM, not back in Excel.
+
+   Writes go through create_project like every other project. Nothing new. */
+function openAdoptTrackerRow(i){
+  const u = (DATA.tracker_unlinked||[])[i];
+  if(!u) return;
+  const cid = u.client ? _slugGuess(u.client) : '';
+  document.getElementById('dtitle').textContent =
+    'Add tracker row ' + st(u.sheet_row) + ' to the CRM';
+  document.getElementById('dbody').innerHTML = `
+    <p class="muted" style="margin-top:0;font-size:12px">From your Project
+      Tracker, row ${esc(st(u.sheet_row))}. Give it a project number and it
+      becomes a normal project you can edit here.</p>
+    <div class="field"><label>Project # <span class="muted"
+      style="text-transform:none;font-weight:400">(required)</span></label>
+      <input id="a_pno" placeholder="e.g. 1500"/></div>
+    <div class="field"><label>Customer</label>
+      <select id="a_cid">${
+        // No blind default. With no name match the browser selects the FIRST
+        // option, which silently files the row under an arbitrary company --
+        // and one of his is an address string the importer read as a customer.
+        // An empty selection is refused on save, so he has to choose.
+        cid ? '' : '<option value="">— choose a customer —</option>'}${
+        (DATA.companies||[]).filter(c=>st(c.role)!=='vendor')
+          .sort((a,b)=>st(a.display_name).localeCompare(st(b.display_name)))
+          .map(c=>`<option value="${esc(c.company_id)}" ${
+            c.company_id===cid?'selected':''}>${esc(c.display_name||c.company_id)}</option>`)
+          .join('')}</select></div>
+    <div class="field"><label>Description</label>
+      <input id="a_desc" value="${esc(st(u.client_po))}"/></div>
+    <div class="field"><label>Open orders note</label>
+      <textarea id="a_note" style="min-height:96px">${esc(st(u.open_orders_notes))}</textarea></div>
+    <button class="btn" id="saveBtn" onclick="saveAdoptTrackerRow(${i})">Add to CRM</button>
+    <span class="saved" id="savedMsg"></span>
+    <p class="muted" style="margin-top:14px;font-size:12px">Its ${
+      (u.legs||[]).length} vendor leg(s) stay on the tracker row until the
+      project exists; add them from the project once it does.</p>`;
+  openDrawer();
+}
+/* Best-effort match of a tracker client name to an existing company. Only ever
+   preselects a dropdown -- a wrong guess costs one click, never a mis-filed
+   record, and the operator confirms before anything is written. */
+function _slugGuess(name){
+  const n = sv(name).replace(/[^a-z0-9]+/g, '');
+  const hit = (DATA.companies||[]).find(c=>
+    sv(c.display_name).replace(/[^a-z0-9]+/g, '') === n);
+  return hit ? hit.company_id : '';
+}
+async function saveAdoptTrackerRow(i){
+  const u = (DATA.tracker_unlinked||[])[i];
+  const msg = document.getElementById('savedMsg');
+  const pno = document.getElementById('a_pno').value.trim();
+  if(!pno){ msg.textContent='✗ project # is required';
+            msg.className='saved show errc'; return; }
+  const cid = document.getElementById('a_cid').value;
+  if(!cid){ msg.textContent='✗ pick a customer';
+            msg.className='saved show errc'; return; }
+  const fields = {
+    project_no: pno, company_id: cid,
+    company_name: (companyById[cid]||{}).display_name,
+    description: document.getElementById('a_desc').value.trim() || null,
+    open_orders_notes: document.getElementById('a_note').value.trim() || null,
+    tracker_status: u && u.tracker_status ? u.tracker_status : null,
+    date: u && u.start_date ? u.start_date : null,
+    location: u && u.location ? u.location : null,
+    status: 'won', year: new Date().getFullYear(),
+  };
+  const ok = await doSave('create_project', {fields}, (r)=>{
+    DATA.projects.push(r.project || fields);
+    // it is a project now, so it must stop appearing as an unadopted row
+    DATA.tracker_unlinked = (DATA.tracker_unlinked||[])
+      .filter(x=>x !== u);
+    reindex(); renderList(); renderMain(); closeDrawer();
+  });
+  return ok;
+}
+
+function renderLiveList(){
+  const rows = liveRows();
+  document.getElementById('clist').innerHTML = rows.slice(0,400).map(r=>{
+    const co = companyById[r.p.company_id];
+    return `<div class="citem" onclick="openProject('${jesc(st(r.p.project_no))}')">
+      <div class="cn">${esc(st(r.p.project_no)||'—')} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
+      <div class="cm">${r.flags.length?`<span class="owed">${r.flags.length} flag${r.flags.length>1?'s':''}</span>`:`<span>${esc(bucketLabel(r.p.tracker_status)).slice(0,28)}</span>`}</div>
+    </div>`;
+  }).join('') || '<div class="muted" style="padding:14px">No live projects.</div>';
+}
+
 function renderProjectsList(){
   const rows = filteredProjects();
   document.getElementById('clist').innerHTML = rows.slice(0,400).map(p=>`
@@ -820,6 +1100,7 @@ function renderProjectsList(){
 }
 
 function renderList(){
+  if(filter === 'live'){ renderLiveList(); return; }
   if(filter === 'receivable'){ renderReceivablesList(); return; }
   if(filter === 'project'){ renderProjectsList(); return; }
   const today = todayISO(), soon = soonISO();
@@ -845,7 +1126,7 @@ function renderList(){
 
 function select(id){
   selected=id;
-  if(filter === 'project' || filter === 'receivable'){ setFilter('all'); fetchEnrichment(id); return; }
+  if(filter === 'project' || filter === 'receivable' || filter === 'live'){ setFilter('all'); fetchEnrichment(id); return; }
   renderList(); renderMain(); fetchEnrichment(id);
 }
 
@@ -1046,6 +1327,10 @@ function statusBadge(s){ s=st(s).toLowerCase(); const cls={won:'b-won',pending:'
   return s?`<span class="badge ${cls}">${esc(s)}</span>`:''; }
 
 function renderMain(){
+  if(filter === 'live'){
+    document.getElementById('main').innerHTML = renderLiveMain();
+    return;
+  }
   if(filter === 'receivable'){
     document.getElementById('main').innerHTML = renderReceivables();
     return;
@@ -2196,13 +2481,14 @@ function setFilter(f){
   const add = document.getElementById('addrow');
   const isProj = (f === 'project');
   const isRecv = (f === 'receivable');
+  const isLive = (f === 'live');
   // both cross-company views own the sub-filter row and neither wants the
   // "+ Add customer/vendor/lead" buttons, which act on the company list
   if(sf) sf.style.display = (isProj || isRecv) ? 'flex' : 'none';
-  if(add) add.style.display = (isProj || isRecv) ? 'none' : 'flex';
+  if(add) add.style.display = (isProj || isRecv || isLive) ? 'none' : 'flex';
   if(isProj || isRecv) renderSubfilters();
   renderList();
-  if(isProj || isRecv) renderMain();
+  if(isProj || isRecv || isLive) renderMain();
   else if(selected) renderMain();
   else document.getElementById('main').innerHTML =
     '<div class="empty">Select a company to begin.</div>';
@@ -2264,6 +2550,10 @@ window.addEventListener('beforeunload', e=>{
 document.getElementById('drawer').inert = true;
 
 reindex(); kpis(); renderList();
+// The landing screen is a cross-company view, so it has to paint itself: the
+// template ships "Select a company to begin." in #main, and renderMain() is
+// otherwise only reached by selecting a company or switching tabs.
+if(filter === 'live') renderMain();
 CRM.detect();
 </script>
 </body>
@@ -2277,7 +2567,11 @@ def render_html(store_dir, token=""):
     silently talk to an unauthenticated bridge). Returns (html, counts)."""
     data = {}
     problems = []
-    for name in ["companies", "contacts", "projects", "shipments", "invoices", "vendors"]:
+    # tracker_buckets/tracker_unlinked are Live Tracker inputs. Their absence is
+    # normal on any store seeded before the tracker shipped, so they are loaded
+    # with the same per-file degradation and never treated as a broken store.
+    for name in ["companies", "contacts", "projects", "shipments", "invoices",
+                 "vendors", "tracker_buckets", "tracker_unlinked"]:
         path = os.path.join(store_dir, f"{name}.json")
         # Degrade per-file: a missing or corrupt store file (OneDrive
         # conflicted copy, half-written temp) must not kill the whole build.
@@ -2286,7 +2580,7 @@ def render_html(store_dir, token=""):
                 data[name] = json.load(f)
         except FileNotFoundError:
             data[name] = []
-            if name != "invoices":  # invoices.json is server-created; absence is normal
+            if name not in ("invoices", "tracker_buckets", "tracker_unlinked"):
                 problems.append(f"{name}.json missing -- built with 0 {name}")
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as ex:
             data[name] = []

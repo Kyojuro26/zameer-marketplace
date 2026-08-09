@@ -91,6 +91,25 @@ ONE_NUM_RE = re.compile(r"\d{2,6}")
 # re-read with the SAME numbers, so it could not catch it either.
 ROW_CAP = 20000
 
+# The Project Tracker's status buckets. The COLOURS live here because a hex
+# code identifies nobody; the human LABEL for each is read from the legend in
+# the sheet at import time and stored, never committed -- the legend names real
+# people and this repo is public.
+#
+# FF00FF00 (green) is registered deliberately as NOT a bucket: it marks the
+# section headers of the second table. Without an entry it would read as an
+# unknown colour and raise a review flag on every import.
+BUCKET_BY_ARGB = {
+    "FFFF00FF": "action_admin",          # magenta
+    "FFFFFF00": "action_owner",          # yellow
+    "FF00FFFF": "awaiting_materials",    # cyan
+}
+NON_BUCKET_ARGB = {
+    "FF00FF00": "section header of the second table",
+    "FF000000": "black title bar",
+}
+TRACKER_BUCKET_KEYS = set(BUCKET_BY_ARGB.values())
+
 
 def _cap_check(ws, cap, label, review, min_row=1):
     """Flag loudly if the sheet holds real DATA beyond the row bound.
@@ -690,6 +709,66 @@ def run(workbook, outdir, force=False, mode="merge"):
                                  "Tracker; invoice table skipped."})
         inv_header_idx = len(all_rows)
 
+    # ---- status is a FILL COLOUR, and every import until now threw it away --
+    #
+    # There is no status column. A project's state is the background fill of its
+    # Open Orders Notes cell, decoded against a legend printed in the same column
+    # below the table. values_only=True returns raw tuples and never materialises
+    # a cell, so the single most meaningful field on the sheet was invisible.
+    #
+    # read_only=True is kept: it reads fills perfectly well (2.5s / 48MB on the
+    # real workbook) as long as cells are materialised. Turning read_only off to
+    # get at them costs 6.9s / 485MB and buys nothing.
+    #
+    # The colours are constants; the LABELS are read from the legend at import
+    # time and stored, never written into this file. They name real people, the
+    # repo is public, and if a bucket is retitled in the sheet the app follows.
+    fills = {}
+    try:
+        for i, cells in enumerate(ws.iter_rows(min_row=1, max_row=inv_header_idx + 8,
+                                               min_col=6, max_col=6)):
+            c = cells[0]
+            pat = getattr(c.fill, "patternType", None)
+            rgb = getattr(getattr(c.fill, "fgColor", None), "rgb", None)
+            if pat == "solid" and isinstance(rgb, str):
+                fills[i] = rgb.upper()
+    except Exception as exc:                              # noqa: BLE001
+        review.append({"type": "data_quality_note",
+                       "detail": f"status fills could not be read ({exc}); every "
+                                 f"live project will show no status bucket."})
+
+    # Where the data stops and the footer starts. The legend and the section
+    # labels sit BELOW the last row that carries a project key, separated by
+    # blanks. Anchoring on that boundary rather than on colour matters: a real
+    # unkeyed data row can carry a bucket colour too, and a colour-only rule
+    # would read the first such row as the legend and then treat the actual
+    # legend as live work. Both row numbers move every week; the boundary does
+    # not.
+    last_keyed = max((i for i in range(1, inv_header_idx)
+                      if all_rows[i] and all_rows[i][0] is not None), default=0)
+
+    tracker_buckets = []
+    seen_bucket = set()
+    for i in range(last_keyed + 1, inv_header_idx):
+        argb = fills.get(i)
+        key = BUCKET_BY_ARGB.get(argb)
+        row = all_rows[i] if i < len(all_rows) else ()
+        label = clean(row[5]) if len(row) > 5 else None
+        if not key or not label or key in seen_bucket:
+            continue    # skip-ok: scanning the footer for legend rows, not dropping data
+        seen_bucket.add(key)
+        tracker_buckets.append({"key": key, "label": label, "argb": argb,
+                                "legend_row": i + 1})
+    for key, argb in sorted((v, k) for k, v in BUCKET_BY_ARGB.items()):
+        if key not in seen_bucket:
+            review.append({
+                "type": "tracker_legend_missing",
+                "detail": (f"no legend row found for the {argb} bucket, so it has "
+                           f"no name to show. Its projects still group correctly."),
+            })
+            tracker_buckets.append({"key": key, "label": None, "argb": argb,
+                                    "legend_row": None})
+
     DATEISH_RE = re.compile(r"^\d{4}-\d\d-\d\d|^\d{1,2}/\d{1,2}/\d{2,4}$")
     PO_TOKEN_RE = re.compile(r"(?i)(\bp\.?o\.?\s*#?\s*\d|\bpo\b|^p\d{4,})")
 
@@ -738,15 +817,53 @@ def run(workbook, outdir, force=False, mode="merge"):
         })
 
     # --- Table 1: open orders ---
-    for r in all_rows[1:inv_header_idx]:
+    # These are the LIVE projects -- the rows he works out of every day. Each
+    # one's status bucket comes from the fill read above, and its Open Orders
+    # note is put on the PROJECT: the note is a property of the row, and copying
+    # it onto every vendor leg (5 of them on the busiest row) meant editing one
+    # left the others disagreeing, with no copy at all on a row that has no legs.
+    unlinked_rows = []
+    for _i, r in enumerate(all_rows[1:inv_header_idx], start=1):
+        row_no = _i + 1
+        argb = fills.get(_i)
+        bucket = BUCKET_BY_ARGB.get(argb)
+        if (_i <= last_keyed and argb and not bucket
+                and argb not in NON_BUCKET_ARGB and r and r[0] is not None):
+            review.append({
+                "type": "tracker_unknown_status_colour",
+                "detail": (f"the notes cell is filled {argb}, which is not one of "
+                           f"the three legend colours. Its status was left unset "
+                           f"rather than guessed."),
+                "sheet": "Project Tracker", "sheet_row": row_no,
+            })
         if not r or r[0] is None:
+            if _i > last_keyed:
+                continue    # skip-ok: the legend / section-label footer block
             if r and any(has_value(c) for c in r[1:]):
                 review.append({
                     "type": "open_order_row_without_project",
                     "detail": ("row has content but no project number, so its "
                                "shipment legs were not imported: "
                                + repr([clean(c) for c in list(r)[:6]])),
+                    "sheet": "Project Tracker", "sheet_row": row_no,
                 })
+                # It is a live project with real money against it. Keep the whole
+                # row so the tracker can show it and he can give it a number in
+                # the CRM -- no invented key is written to the store.
+                _c = list(r) + [None] * 24
+                unlinked_rows.append({
+                    "sheet_row": row_no, "reason": "no project number",
+                    "client": pick_client([_c[1], _c[2], _c[3], _c[4]]),
+                    "client_po": clean(_c[1]), "start_date": clean(_c[2]),
+                    "location": clean(_c[4]), "open_orders_notes": clean(_c[5]),
+                    "tracker_status": bucket,
+                    "legs": [{"vendor_po_raw": clean(_c[j]),
+                              "ship_date": clean(_c[j + 1])}
+                             for j in range(6, 22, 2)
+                             if clean(_c[j]) or clean(_c[j + 1])],
+                })
+            # skip-ok: recorded twice above -- a needs_review entry AND the full
+            # row in tracker_unlinked, so the Live Tracker can still show it
             continue
         raw_key = r[0]
         parsed = parse_project_key(raw_key)
@@ -760,14 +877,50 @@ def run(workbook, outdir, force=False, mode="merge"):
         row_company = projects[primary]["company_id"] if primary in projects else None
         if not row_company and picked_client:
             row_company = ensure_company(picked_client, "customer")
+        matched_any = False
         for pno in pnos:
             if pno and pno in projects:
+                matched_any = True
                 if parsed["invoice_no"] and not projects[pno]["invoice_no"]:
                     projects[pno]["invoice_no"] = parsed["invoice_no"]
                 if parsed["collection_status"]:
                     projects[pno]["collection_status"] = parsed["collection_status"]
+                # this row IS the live view of that project
+                projects[pno]["tracker_status"] = bucket
+                projects[pno]["tracker_row"] = row_no
+                if clean(cells[5]):
+                    projects[pno]["open_orders_notes"] = clean(cells[5])
+        if not matched_any:
+            # The row has a key, but nothing in the deal log answers to it. Real
+            # case: the tracker says "1419" while the deal log carries that job
+            # as "Proposal 1007 (1419)", so the two never met and both of its
+            # shipments already sat with linked_to_project=False. Surface the
+            # whole row rather than let a live job exist only as a dangling leg.
+            review.append({
+                "type": "tracker_row_without_matching_project",
+                "detail": (f"the tracker row keyed {str(raw_key)!r} does not match "
+                           f"any project in the deal log, so its status and notes "
+                           f"have nowhere to live. Give it a project number in the "
+                           f"CRM to bring it in."),
+                "sheet": "Project Tracker", "sheet_row": row_no,
+            })
+            unlinked_rows.append({
+                "sheet_row": row_no, "reason": "no matching project",
+                "raw_key": str(raw_key),
+                "client": picked_client, "client_po": clean(cells[1]),
+                "start_date": clean(cells[2]), "location": clean(cells[4]),
+                "open_orders_notes": clean(cells[5]),
+                "tracker_status": bucket,
+                "legs": [{"vendor_po_raw": clean(cells[j]),
+                          "ship_date": clean(cells[j + 1])}
+                         for j in range(6, 22, 2)
+                         if clean(cells[j]) or clean(cells[j + 1])],
+            })
         leg = 0
-        for j in range(6, 20, 2):   # G..T as PO/date pairs
+        # 6..22 not 6..20: the header defines vendor pairs through U/V (vendor
+        # 8) and the old bound stopped after S/T, so a filled column U would
+        # have been dropped silently. Latent today -- the busiest row uses five.
+        for j in range(6, 22, 2):   # G..V as PO/date pairs
             po_val, sd_val = clean(cells[j]), cells[j + 1]
             if not po_val and not sd_val:
                 continue    # skip-ok: an empty PO/date column pair, not a row
@@ -946,6 +1099,10 @@ def run(workbook, outdir, force=False, mode="merge"):
         "invoices.json": invoices,
         "vendors.json": list(vendors.values()),
         "needs_review.json": review,
+        # Both are the importer's own reading of the sheet, not operator data,
+        # so merge.py regenerates them wholesale -- see REGENERATED there.
+        "tracker_buckets.json": tracker_buckets,
+        "tracker_unlinked.json": unlinked_rows,
     }
     # Take the store's OWN write lock around the read-merge-write. Without it
     # the importer read the store, spent seconds merging, then replaced every
