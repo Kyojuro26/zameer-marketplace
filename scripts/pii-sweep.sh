@@ -12,7 +12,16 @@
 # sweep that found nothing.
 set -uo pipefail
 
-ROOT="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
+# Resolved to an ABSOLUTE path before anything else. The cd below changes what
+# a relative path means, and `$ROOT/.pii-names` is read AFTER it -- so
+# `pii-sweep.sh sometree` looked for `sometree/sometree/.pii-names`, found
+# nothing, and aborted with "FATAL: .pii-names is missing". Failing closed, so
+# never unsafe, but it aborts on the config branch rather than sweeping: a
+# positive control run that way proves the sweep can exit 1, not that it can
+# find a name. The pre-commit hook passes an absolute mktemp path, which is why
+# this survived.
+ROOT="$(cd "${1:-$(dirname "$0")/..}" 2>/dev/null && pwd)" \
+  || { echo "FATAL: cannot cd to ${1:-.}" >&2; exit 1; }
 cd "$ROOT" || { echo "FATAL: cannot cd to $ROOT" >&2; exit 1; }
 
 FAIL=0

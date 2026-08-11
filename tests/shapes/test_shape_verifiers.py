@@ -75,6 +75,32 @@ def run(server, crm_dir=None):
         for f in (tmp / "docs").iterdir():
             f.unlink()
         r.check("and it passes a genuinely clean tree", _sweep(tmp) == 0)
+
+        # ---- the sweep must actually SWEEP when handed a relative path ------
+        # It resolved $1 into a cd and then read "$ROOT/.pii-names" relative to
+        # the new cwd, so a relative root looked for tree/tree/.pii-names,
+        # missed, and aborted "FATAL: .pii-names is missing". That fails closed
+        # -- never unsafe -- but it exits 1 on the CONFIG branch, so anyone
+        # positive-controlling the sweep that way proves only that it can
+        # return 1, not that it can find a name. Shape 2: the check passes for
+        # a reason unrelated to what it claims to check. Both directions, from
+        # a different cwd, because one direction cannot tell the two apart.
+        rel_leak = tmp / "docs" / f"{needle}-rel.md"
+        rel_leak.write_text("nothing inside\n")
+        rel = subprocess.run(
+            [str(REPO / "scripts" / "pii-sweep.sh"), tmp.name],
+            cwd=str(tmp.parent), capture_output=True, text=True)
+        r.check("a RELATIVE root still finds a planted name",
+                rel.returncode != 0 and "missing or unreadable" not in rel.stderr,
+                f"rc={rel.returncode} stderr={rel.stderr.strip()[:120]!r} -- "
+                f"aborting on the config branch is not a sweep")
+        rel_leak.unlink()
+        rel = subprocess.run(
+            [str(REPO / "scripts" / "pii-sweep.sh"), tmp.name],
+            cwd=str(tmp.parent), capture_output=True, text=True)
+        r.check("and passes a clean tree given the same relative root",
+                rel.returncode == 0,
+                f"rc={rel.returncode} stderr={rel.stderr.strip()[:120]!r}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
