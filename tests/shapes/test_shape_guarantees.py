@@ -56,9 +56,32 @@ def run(server, crm_dir=None):
         # every `continue` inside a row loop should be accompanied by a
         # needs_review append somewhere in its vicinity
         lines = nrm_src.split("\n")
+        # Positive control for the pattern ITSELF. It read `\s+continue\s*$`
+        # for three releases, which silently skipped every commented skip and
+        # made the whole scan decorative. A pattern that cannot be shown to
+        # match the thing it is looking for is not a check, and this scan has
+        # no other way to fail visibly.
+        _pat = r"\s+continue\s*(#.*)?$"
+        for _probe, _want in (
+                ("            continue", True),
+                ("            continue    # skip-ok: a token loop", True),
+                ("            continue  # no reason given", True),
+                ("            continue_reading = True", False),
+                ("        # continue is mentioned in prose here", False)):
+            r.check(f"the skip scanner sees {_probe.strip()[:34]!r}",
+                    bool(re.match(_pat, _probe)) is _want,
+                    "the scanner's own pattern is what decides whether any of "
+                    "this runs; it has silently matched nothing before")
         unflagged = []
         for i, ln in enumerate(lines):
-            if re.match(r"\s+continue\s*$", ln):
+            # `\s*$` used to be the end of this pattern, which meant a
+            # `continue` with ANY trailing comment did not match at all -- so
+            # the skip-ok exemption below was dead code and every commented
+            # skip was exempt by accident, including ones that drop rows. That
+            # is this suite's own SHAPE 2: the verifier sharing the bug it
+            # exists to catch. The comment is now consumed explicitly, so only
+            # a deliberate `# skip-ok:` earns the exemption.
+            if re.match(r"\s+continue\s*(#.*)?$", ln):
                 window = "\n".join(lines[max(0, i - 12):i + 1])
                 # `# skip-ok: <reason>` marks a skip that drops nothing a
                 # store could hold -- a token or column-pair loop. It must be
