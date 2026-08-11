@@ -107,7 +107,18 @@ BUCKET_BY_ARGB = {
 NON_BUCKET_ARGB = {
     "FF00FF00": "section header of the second table",
     "FF000000": "black title bar",
+    # A solid pattern written with no explicit foreground -- openpyxl reports
+    # the default. It is "no colour", not a colour we failed to recognise, so
+    # it must not raise a flag on every import.
+    "00000000": "a solid fill with no foreground colour set",
 }
+# A fill IS present but its colour is not a literal ARGB string: a theme
+# colour, an indexed colour, or a non-solid pattern. openpyxl returns the RGB
+# *descriptor object* rather than a string for the first two. These used to be
+# dropped from the fills map entirely, which made `argb` falsy at the guard
+# below -- so the project got no bucket AND no review entry, and simply
+# disappeared off the Live screen. A fill we cannot read is not an absent fill.
+UNREADABLE_FILL = "unreadable"
 TRACKER_BUCKET_KEYS = set(BUCKET_BY_ARGB.values())
 
 
@@ -732,10 +743,21 @@ def run(workbook, outdir, force=False, mode="merge"):
             rgb = getattr(getattr(c.fill, "fgColor", None), "rgb", None)
             if pat == "solid" and isinstance(rgb, str):
                 fills[i] = rgb.upper()
+            elif pat is not None:
+                # isinstance() above is the right guard -- a theme or indexed
+                # colour makes .rgb hand back the descriptor object, and
+                # .upper() on that would invent a bucket name. But the cell IS
+                # filled, so record that rather than letting it read as bare.
+                fills[i] = UNREADABLE_FILL
     except Exception as exc:                              # noqa: BLE001
         review.append({"type": "data_quality_note",
-                       "detail": f"status fills could not be read ({exc}); every "
-                                 f"live project will show no status bucket."})
+                       "detail": f"status fills stopped being readable partway "
+                                 f"through ({exc}); rows after that point in the "
+                                 f"Project Tracker have no status bucket. "
+                                 f"{len(fills)} row(s) were read before it failed, "
+                                 f"so some cards WILL show a status and the rest "
+                                 f"are not marked -- do not read a few correct "
+                                 f"cards as the sheet being fine."})
 
     # Where the data stops and the footer starts. The legend and the section
     # labels sit BELOW the last row that carries a project key, separated by
@@ -744,8 +766,39 @@ def run(workbook, outdir, force=False, mode="merge"):
     # would read the first such row as the legend and then treat the actual
     # legend as live work. Both row numbers move every week; the boundary does
     # not.
+    #
+    # "A row carrying a key" means column A AND the shape of a job. A date
+    # stamp, a "TOTAL 123,456", or the text of a merged footer comment (a merge
+    # puts its text in the top-left cell, which is A) all put a value in column
+    # A, and any one of them dragged the boundary below the legend. That
+    # emptied the legend scan -- three unnamed buckets and three
+    # tracker_legend_missing entries -- and then re-admitted the legend rows
+    # themselves as unkeyed data, so the screen offered "Add to CRM" on a line
+    # of the operator's own legend. A keyed row with nothing else on it still
+    # imports normally; it just does not get to move the boundary.
+    def _job_shaped(row):
+        """Does this row describe a JOB, as opposed to a footer line?
+
+        "Has a key and something else" was the first attempt and it only
+        covered the column-A-only shape. A TOTAL row totals something, so it
+        carries a number beside the label and passed straight back through.
+        What actually separates the two is what a job is made of: a client, or
+        vendor legs. A totals row and a legend line have neither. Two leg cells
+        rather than one, so a single stray character in a footer's column G
+        does not manufacture a job with an invented vendor leg.
+        """
+        if not row:
+            return False
+        cells = list(row) + [None] * 24
+        if has_value(cells[3]):                       # a client name
+            return True
+        return sum(1 for j in range(6, 22) if has_value(cells[j])) >= 2
+
+    def _is_data_row(row):
+        return bool(row and row[0] is not None and _job_shaped(row))
+
     last_keyed = max((i for i in range(1, inv_header_idx)
-                      if all_rows[i] and all_rows[i][0] is not None), default=0)
+                      if _is_data_row(all_rows[i])), default=0)
 
     tracker_buckets = []
     seen_bucket = set()
@@ -754,6 +807,19 @@ def run(workbook, outdir, force=False, mode="merge"):
         key = BUCKET_BY_ARGB.get(argb)
         row = all_rows[i] if i < len(all_rows) else ()
         label = clean(row[5]) if len(row) > 5 else None
+        if argb == UNREADABLE_FILL and label:
+            # Otherwise this row is skipped and its bucket falls through to
+            # tracker_legend_missing -- "no legend row found" pointing at a
+            # legend row that is right there on the sheet. The unknown-colour
+            # flag cannot cover it either: that one requires a project key, and
+            # legend rows are unkeyed by definition.
+            review.append({
+                "type": "tracker_legend_unreadable_colour",
+                "detail": (f"a legend row reads {label!r} but its fill colour "
+                           f"cannot be read as a plain one, so the bucket it "
+                           f"names could not be identified."),
+                "sheet": "Project Tracker", "sheet_row": i + 1,
+            })
         if not key or not label or key in seen_bucket:
             continue    # skip-ok: scanning the footer for legend rows, not dropping data
         seen_bucket.add(key)
@@ -827,18 +893,37 @@ def run(workbook, outdir, force=False, mode="merge"):
         row_no = _i + 1
         argb = fills.get(_i)
         bucket = BUCKET_BY_ARGB.get(argb)
-        if (_i <= last_keyed and argb and not bucket
-                and argb not in NON_BUCKET_ARGB and r and r[0] is not None):
+        # No `_i <= last_keyed` term: a row with a key IS a data row wherever it
+        # sits, and tying the flag to the boundary meant a keyed row below it
+        # lost its flag as well as its status. The legend rows this used to
+        # exclude are unkeyed, so `r[0] is not None` already excludes them.
+        if argb and not bucket and argb not in NON_BUCKET_ARGB \
+                and r and r[0] is not None:
             review.append({
                 "type": "tracker_unknown_status_colour",
-                "detail": (f"the notes cell is filled {argb}, which is not one of "
-                           f"the three legend colours. Its status was left unset "
-                           f"rather than guessed."),
+                "detail": (
+                    (f"the notes cell is filled, but its colour cannot be read "
+                     f"as a plain one -- a theme colour, an indexed colour, or "
+                     f"a patterned rather than solid fill -- so it cannot be "
+                     f"matched against the legend.")
+                    if argb == UNREADABLE_FILL else
+                    (f"the notes cell is filled {argb}, which is not one of "
+                     f"the three legend colours.")
+                ) + " Its status was left unset rather than guessed.",
                 "sheet": "Project Tracker", "sheet_row": row_no,
             })
         if not r or r[0] is None:
-            if _i > last_keyed:
-                continue    # skip-ok: the legend / section-label footer block
+            # The footer skip is scoped to rows that carry NOTHING BUT a notes
+            # cell -- which is exactly what a legend row and a section label
+            # are. It used to skip on position alone, and that turned a real
+            # unkeyed job appended at the BOTTOM of the sheet (the normal way a
+            # row gets added before it has a number) from a flagged, adoptable
+            # row into a silent drop: no review entry, no unlinked card, its
+            # note and legs simply gone. Before this feature existed that row
+            # was flagged wherever it sat, so the boundary had made the
+            # importer quieter about real data than it used to be.
+            if _i > last_keyed and not _job_shaped(r):
+                continue    # skip-ok: a footer line -- no client, no legs, so no job
             if r and any(has_value(c) for c in r[1:]):
                 review.append({
                     "type": "open_order_row_without_project",
@@ -906,7 +991,16 @@ def run(workbook, outdir, force=False, mode="merge"):
             })
             unlinked_rows.append({
                 "sheet_row": row_no, "reason": "no matching project",
+                # raw_key is for DISPLAY -- it is what he will recognise on the
+                # sheet. parsed_keys is for MATCHING, and they are not the same
+                # string: a numeric key cell reaches str() as "1419.0" while the
+                # project side de-floats to "1419". Stripping ".0" at the
+                # comparison is not an option -- 0.1.28 made two numbers
+                # differing only by a trailing ".0" deliberately DISTINCT, after
+                # conflating them hid a live project's receivables. So store the
+                # keys the same parse produced, and match on those.
                 "raw_key": str(raw_key),
+                "parsed_keys": [p for p in pnos if p],
                 "client": picked_client, "client_po": clean(cells[1]),
                 "start_date": clean(cells[2]), "location": clean(cells[4]),
                 "open_orders_notes": clean(cells[5]),

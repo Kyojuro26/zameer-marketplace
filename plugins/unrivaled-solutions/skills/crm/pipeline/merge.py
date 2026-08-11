@@ -61,6 +61,25 @@ KEYS = {
 REGENERATED = {"needs_review.json", "tracker_buckets.json",
                "tracker_unlinked.json"}
 
+# Fields the WORKBOOK owns, refreshed (never removed) even in add-only mode.
+#
+# Add-only mode exists to protect operator edits when there is no changelog to
+# identify them. Withholding these meant an operator whose store has no
+# changelog.jsonl -- created lazily, so absent on any store that was imported
+# and never edited -- would upgrade, import, land on the new default screen and
+# read "No live projects yet" permanently, on every subsequent import too.
+#
+# They are NOT unwritable: tracker_status is in PROJECT_FIELDS and reachable
+# through update_project, and tracker_row is written by the adopt flow. So this
+# does trade away one thing -- in add-only mode a bucket the operator moved
+# through chat is overwritten by the sheet. That is the deliberate call: the
+# sheet is where the colour comes from, the bucket is re-derivable, and the
+# alternative is a screen with nothing on it. Non-conservative mode still
+# preserves such an edit normally, via `touched`.
+#
+# open_orders_notes is deliberately NOT here: it is the operator's own text.
+IMPORTER_OWNED = {"tracker_status", "tracker_row"}
+
 # how Store.log names each entity, and how it builds the key it logs under
 CHANGELOG_ENTITY = {
     "companies.json": "company", "contacts.json": "contact",
@@ -275,7 +294,9 @@ def merge_all(fresh_files, store_dir):
     operator = operator or {"edits": {}, "created": set(), "renamed_from": set()}
     if conservative:
         report_note = ("no changelog.jsonl: nothing already in the store was "
-                       "refreshed, only new rows were added")
+                       "refreshed, only new rows were added -- except the "
+                       "Project Tracker status colour, which the workbook owns "
+                       "outright and which nothing in the app can edit")
     else:
         report_note = None
     operator.setdefault("renamed_from", set())
@@ -333,7 +354,24 @@ def merge_all(fresh_files, store_dir):
                 continue
             used.add(k)
             if conservative:
-                out.append(prior)              # untouched; refresh nothing
+                # untouched, except for the fields the workbook owns outright.
+                #
+                # REFRESHED WHEN PRESENT, NEVER REMOVED. "Absent from the fresh
+                # record" does not mean "retired on the sheet": normalize only
+                # attaches these fields to a project a tracker row MATCHED, so
+                # every project is missing them whenever the tracker matched
+                # nothing -- an older copy of the workbook, a renamed sheet, a
+                # tracker not yet filled in for the week. Popping on absence
+                # emptied the Live screen off one such import, which is the
+                # exact failure this block exists to prevent, and it destroyed
+                # tracker_row on adopted projects, which the importer can never
+                # re-derive. A stale bucket is recoverable by importing the
+                # right workbook; a wiped one is not.
+                kept = dict(prior)
+                for field in IMPORTER_OWNED:
+                    if field in rec:
+                        kept[field] = rec[field]
+                out.append(kept)
                 report["untouched"] = report.get("untouched", 0) + 1
                 continue
             touched = operator["edits"].get((ent, _log_key(fname, prior)), set())
@@ -365,6 +403,49 @@ def merge_all(fresh_files, store_dir):
             out.append(prior)
 
         merged[fname] = out
+
+    # ---- a row he already adopted must not come back -----------------------
+    #
+    # tracker_unlinked is regenerated from the sheet on every run, and the sheet
+    # still has no CRM number on that row -- the number went into the CRM, which
+    # is the direction of travel. Without this the row he adopted last week
+    # returns beside the project it became, "Add to CRM" on the phantom fails
+    # with "project already exists", and saveAdoptTrackerRow only clears a card
+    # on SUCCESS, so the card is undismissable and returns every import.
+    #
+    # ONLY the exact key match. A first attempt also matched a numberless row on
+    # (tracker_row, note), and that heuristic was wrong three ways: both notes
+    # empty collapsed it to the row number alone -- which HIDES a live job, the
+    # outcome this file calls worse than a duplicate card; a note edited in the
+    # adopt form (which the form invites) never matched anyway; and rows move
+    # week to week. A numberless row genuinely has nothing stable to match on,
+    # so it is left showing. A duplicate card is visible and survivable; a
+    # dropped job is neither. See report["adopted"] and format_report.
+    #
+    # _idkey, not _s: a numeric key cell reaches JSON as 7011.0 and normalize
+    # stores raw_key with a bare str(). This module has been bitten by that
+    # exact ".0" mismatch before -- see the _idkey docstring.
+    unl = merged.get("tracker_unlinked.json")
+    if isinstance(unl, list):
+        by_key = {_idkey(p.get("project_no"))
+                  for p in (merged.get("projects.json") or [])
+                  if isinstance(p, dict) and _idkey(p.get("project_no"))}
+        kept_unl, adopted = [], []
+        for u in unl:
+            if not isinstance(u, dict):
+                continue    # skip-ok: a malformed entry is not a row to show
+            keys = [_idkey(k) for k in (u.get("parsed_keys") or [])]
+            if not keys:
+                keys = [_idkey(u.get("raw_key"))]
+            hit = next((k for k in keys if k and k in by_key), None)
+            if hit:
+                adopted.append(hit)
+                continue    # skip-ok: it IS a project now; listed in report["adopted"]
+            kept_unl.append(u)
+        merged["tracker_unlinked.json"] = kept_unl
+        if adopted:
+            report["adopted"] = adopted
+
     report["note"] = report_note
     return merged, report
 
@@ -396,6 +477,18 @@ def format_report(report):
                  f"the same record twice:")
         for a in report["renamed_away"][:20]:
             L.append(f"  {a['file']} {a['key']}")
+    if report.get("adopted"):
+        # A row dropped from the Live Tracker with nothing said is the same
+        # silence this module exists to end -- and the two `# skip-ok:` markers
+        # at the drop site claim it is reported here, which has to be true.
+        L.append(f"\nTOOK {len(report['adopted'])} tracker row(s) off the "
+                 f"\"Not in the CRM yet\" list: you already gave each of these a "
+                 f"project number, so the row is now a project and is no longer "
+                 f"offered for adoption:")
+        for a in report["adopted"][:40]:
+            L.append(f"  project {a}")
+        if len(report["adopted"]) > 40:
+            L.append(f"  ... and {len(report['adopted']) - 40} more")
     if report.get("untouched"):
         L.append(f"\n{report['untouched']} record(s) already in the store were "
                  f"left untouched (see the note above).")

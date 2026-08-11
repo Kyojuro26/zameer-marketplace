@@ -71,6 +71,13 @@ ENRICHMENT_FILE = "enrichment.json"
 ENRICHMENT_FIELDS = {"last_contact", "threads", "meetings", "refreshed_at", "source"}
 
 PROJECT_STATUSES = {"won", "pending", "lost"}
+# The Live Tracker's status buckets. Neutral keys: the human label for each is
+# read from the sheet's own legend at import (it names real people) and lives
+# in tracker_buckets.json, never in source. Kept in step with BUCKET_BY_ARGB in
+# pipeline/normalize.py -- tests/shapes/test_shape_parity.py asserts the two
+# agree, because a key accepted here and unknown to the view renders a live
+# project into no section at all.
+TRACKER_STATUSES = {"action_admin", "action_owner", "awaiting_materials"}
 SHIPMENT_STAGES = {"Ordered", "Shipped", "Delivered", "Installed", "On Hold", "Cancelled"}
 COLLECTION_RE = re.compile(r"^(paid|open|partial(:.+)?)$")
 
@@ -774,6 +781,17 @@ def _validate(fields, allowed, entity):
         raise StoreError(f"role must be one of {sorted(COMPANY_ROLES)}")
     if "stage" in fields and fields["stage"] not in SHIPMENT_STAGES:
         raise StoreError(f"stage must be one of {sorted(SHIPMENT_STAGES)}")
+    # tracker_status was the fourth state field and the only one with no check.
+    # It decides which section of the Live Tracker a project appears in, and a
+    # value no section knows about -- 'done', or 'action_admin' with a stray
+    # space -- left the project counted in the header's "N active" and rendered
+    # in no group at all, so a live job left the daily board while the sidebar
+    # still listed it. Every sibling enum is whitelisted here; this one is now
+    # too, against the same keys the importer decodes fills into.
+    if "tracker_status" in fields and fields["tracker_status"] is not None \
+            and fields["tracker_status"] not in TRACKER_STATUSES:
+        raise StoreError(
+            f"tracker_status must be one of {sorted(TRACKER_STATUSES)} or null")
     if "collection_status" in fields and fields["collection_status"] is not None \
             and not COLLECTION_RE.match(str(fields["collection_status"])):
         raise StoreError("collection_status must be paid | open | partial[:detail]")
@@ -1293,10 +1311,53 @@ def update_project(project_no: str, fields: dict) -> dict:
             target = [hit] if hit else []
             if not target:
                 return _err(f"project '{project_no}' not found")
+            # Moving a project to another company has to carry its shipments
+            # and invoices with it.
+            #
+            # rename_project cascades a number change; reassign_shipment
+            # carries a leg to its new project's customer (0.1.28). This did
+            # neither -- it wrote company_id onto the project alone, so every
+            # leg stayed filed under the old company. get_project matches legs
+            # on the number only and so still listed them, but the Live Tracker
+            # matches on company AND number (two customers can hold one number,
+            # and one customer's leg must never surface on another's card), so
+            # the card read "No vendor legs" and EVERY lateness flag on that
+            # job stopped firing -- silently, on the screen built to show
+            # exactly those flags.
+            old_cid = _key(target[0].get("company_id"))
+            new_cid = _key(fields["company_id"]) if "company_id" in fields \
+                else old_cid
             target[0].update(fields)
-            STORE.save("projects", projects)
+            updates = {"projects": projects}
+            moved_ship = moved_inv = 0
+            if new_cid != old_cid:
+                shipments = STORE.load("shipments")
+                for s in shipments:
+                    if _key(s.get("company_id")) == old_cid and \
+                            want in {_key(n) for n in
+                                     _as_list(s.get("all_project_nos"))
+                                     or [s.get("project_no")]}:
+                        s["company_id"] = fields["company_id"]
+                        if "company_name" in fields:
+                            s["client_name"] = fields["company_name"]
+                        moved_ship += 1
+                invoices = STORE.load("invoices")
+                for i in invoices:
+                    if _key(i.get("company_id")) == old_cid and \
+                            _key(i.get("project_no")) == want:
+                        i["company_id"] = fields["company_id"]
+                        moved_inv += 1
+                if moved_ship:
+                    updates["shipments"] = shipments
+                if moved_inv:
+                    updates["invoices"] = invoices
+            STORE.save_many(updates)
             STORE.log("update", "project", want, fields)
-            return {"ok": True, "interface_version": VERSION, "project": target[0]}
+            out = {"ok": True, "interface_version": VERSION, "project": target[0]}
+            if new_cid != old_cid:
+                out["shipments_moved"] = moved_ship
+                out["invoices_moved"] = moved_inv
+            return out
     except StoreError as e:
         return _err(e)
 

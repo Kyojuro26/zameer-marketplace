@@ -18,7 +18,7 @@ In modes 1–2 every save persists through the MCP's validated write path and
 the header pill shows "Live". Embedded data is always rendered instantly as
 bootstrap, then replaced by a live refresh when a backend is present.
 """
-import argparse, json, os, sys
+import argparse, json, os, re, sys
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -432,6 +432,12 @@ async function refreshData(){
     if (iv && iv.ok) DATA.invoices = iv.invoices;
     reindex(); kpis(); renderList();
     if (filter === 'project'){ renderSubfilters(); renderMain(); }
+    // 'live' is a cross-company view AND the landing screen, so `selected` is
+    // null on open -- without this the sidebar repainted from the refreshed
+    // store while the cards beside it kept showing the build-time snapshot,
+    // indefinitely. ('receivable' has the same gap; left alone here, it is
+    // pre-existing and reachable only after an explicit tab switch.)
+    else if (filter === 'live') renderMain();
     else if (selected) renderMain();
   }catch(e){
     console.warn('live refresh failed; keeping embedded data', e);
@@ -879,11 +885,20 @@ function legPaid(po){
 }
 /* Everything on this row that needs a person: a ship date already past, an EST
    that has come and gone, a leg with no date at all, a start date of TBD. */
+/* A leg that has ARRIVED is not late, whatever its date says. list_shipments
+   (overdue=True) has always excluded these three stages, and without the same
+   rule here the same store answered the same question two ways: chat said
+   nothing was overdue while the daily screen kept a red "ship date passed"
+   badge on a delivered leg -- and, because rows sort by flag count, kept that
+   project pinned to the top of the screen permanently. */
+const LEG_DONE = new Set(['delivered', 'installed', 'cancelled']);
+function legSettled(l){ return LEG_DONE.has(sv(l && l.stage).trim()); }
 function liveFlags(p, legs){
   const out = [];
   const start = st(p.date || p.start_date).trim();
   if(/^tbd$/i.test(start)) out.push('start TBD');
   legs.forEach(l=>{
+    if(legSettled(l)) return;
     const d = legDate(l.ship_date);
     if(d.kind==='passed') out.push('ship date passed');
     else if(d.kind==='est-passed') out.push('EST passed');
@@ -892,9 +907,28 @@ function liveFlags(p, legs){
   return [...new Set(out)];
 }
 
+/* The search box is the most prominent control on the screen the app now opens
+   on, and it did nothing here -- it filtered the company list, so typing on the
+   landing tab changed nothing and then silently filtered a list he had not
+   asked for the moment he clicked "All". Matches the fields this screen
+   actually shows: the number, the customer, and the note. */
+function liveMatches(p, q){
+  if(!q) return true;
+  const co = companyById[p.company_id];
+  return sv(p.project_no).includes(q)
+      || sv(co && co.display_name).includes(q)
+      || sv(p.description).includes(q)
+      || sv(p.open_orders_notes).includes(q);
+}
+function unlinkedMatches(u, q){
+  if(!q) return true;
+  return sv(u.client).includes(q) || sv(u.raw_key).includes(q)
+      || sv(u.open_orders_notes).includes(q) || sv(u.client_po).includes(q);
+}
 function liveRows(){
+  const q = sv(query).trim();
   const rows = (DATA.projects||[])
-    .filter(p=>p && !p.archived && st(p.tracker_status))
+    .filter(p=>p && !p.archived && st(p.tracker_status) && liveMatches(p, q))
     .map(p=>{
       const legs = (DATA.shipments||[]).filter(s=>
         st(s.company_id)===st(p.company_id) &&
@@ -908,9 +942,23 @@ function liveRows(){
   return rows;
 }
 
+// Same bound the company, Projects and Receivables lists use. Bounded today
+// (status comes off a fill colour on ~9 rows), but it is the operator's own
+// sheet: a week where he colours the whole table renders unbounded cards, each
+// with every leg, from an O(projects x shipments) scan run twice per repaint.
+const LIVE_CAP = 400;
 function renderLiveMain(){
   const rows = liveRows();
-  const unlinked = (DATA.tracker_unlinked||[]).filter(u=>u);
+  // Carry each row's index in the RAW array, not its position after filtering.
+  // openAdoptTrackerRow/saveAdoptTrackerRow both index DATA.tracker_unlinked
+  // directly, so a filtered-out entry shifted every card's number: the first
+  // button went dead (its handler bailed on `if(!u) return` with no message)
+  // and every later one opened the PREVIOUS row's client, note, status and
+  // dates under the number typed for the row that was clicked.
+  const q = sv(query).trim();
+  const unlinked = arr(DATA.tracker_unlinked)
+    .map((u, i)=>({u, i}))
+    .filter(x=>x.u && typeof x.u === 'object' && unlinkedMatches(x.u, q));
   const flagged = rows.filter(r=>r.flags.length).length;
 
   let h = `<div class="co-head"><h1>Live projects</h1>
@@ -920,6 +968,13 @@ function renderLiveMain(){
     Grouped by the status colours from your tracker. Anything late, estimated
     and passed, or missing a date is called out on the row.</p>`;
 
+  // Every row must land in exactly one section. A status no bucket knows about
+  // -- set through chat, or a bucket key that drifted from the importer's --
+  // used to be counted in "N active" above and then rendered nowhere at all,
+  // so a live job left the board while the sidebar still listed it. The
+  // leftovers get their own section rather than disappearing.
+  const known = new Set(trackerBuckets().map(b=>b.key));
+  const orphans = rows.filter(r=>!known.has(st(r.p.tracker_status)));
   trackerBuckets().forEach(b=>{
     const mine = rows.filter(r=>st(r.p.tracker_status)===b.key);
     if(!mine.length) return;
@@ -927,9 +982,30 @@ function renderLiveMain(){
       <span class="swatch ${bucketClass(b.key)}"></span>
       <h2 style="border:0;padding:0;margin:0">${esc(bucketLabel(b.key))}</h2>
       <span class="muted">${mine.length}</span></div>`;
-    h += mine.map(r=>liveCard(r)).join('');
+    h += mine.slice(0, LIVE_CAP).map(r=>liveCard(r)).join('');
+    if(mine.length > LIVE_CAP){
+      // Never a silent truncation. Every sibling list caps at 400 and this one
+      // did not; capping it without saying so would read as "that is all the
+      // work there is", which on the daily screen is the worse failure.
+      h += `<div class="muted" style="font-size:12px;padding:4px 2px">Showing
+        the first ${LIVE_CAP} of ${mine.length} — search to narrow this
+        down.</div>`;
+    }
     h += `</div>`;
   });
+
+  if(orphans.length){
+    h += `<div class="section"><div class="lt-head">
+      <span class="swatch b-stage"></span>
+      <h2 style="border:0;padding:0;margin:0">Status not recognised</h2>
+      <span class="muted">${orphans.length}</span></div>
+      <p class="muted" style="font-size:12px;margin:0 0 10px">
+        These carry a status the tracker legend does not name, so they could
+        not be grouped. They are live work — they are here rather than
+        hidden.</p>`;
+    h += orphans.map(r=>liveCard(r)).join('');
+    h += `</div>`;
+  }
 
   if(unlinked.length){
     h += `<div class="section"><div class="lt-head">
@@ -940,7 +1016,11 @@ function renderLiveMain(){
         These are live rows from your tracker that have no project number the
         CRM can match. Give one a number and it becomes a normal project you
         can edit here.</p>`;
-    h += unlinked.map((u,i)=>unlinkedCard(u,i)).join('');
+    h += unlinked.slice(0, LIVE_CAP).map(x=>unlinkedCard(x.u, x.i)).join('');
+    if(unlinked.length > LIVE_CAP){
+      h += `<div class="muted" style="font-size:12px;padding:4px 2px">Showing
+        the first ${LIVE_CAP} of ${unlinked.length}.</div>`;
+    }
     h += `</div>`;
   }
   if(!rows.length && !unlinked.length){
@@ -953,7 +1033,11 @@ function liveCard(r){
   const p = r.p, co = companyById[p.company_id];
   const legs = r.legs.map(l=>{
     const d = legDate(l.ship_date), paid = legPaid(l.vendor_po_raw);
-    const cls = (d.kind==='passed'||d.kind==='none') ? 'lt-bad'
+    // legSettled here too, not only in liveFlags: dropping the row's badge
+    // while leaving the leg itself bold red says the same wrong thing in a
+    // quieter voice, and this is the line he actually reads.
+    const cls = legSettled(l) ? 'muted'
+              : (d.kind==='passed'||d.kind==='none') ? 'lt-bad'
               : (d.kind==='est-passed' ? 'lt-warn' : 'muted');
     return `<div class="lt-leg">
       <span class="lt-po">${esc(st(l.vendor_po_raw)||'—')}</span>
@@ -967,7 +1051,7 @@ function liveCard(r){
       <b class="nw">${esc(st(p.project_no)||'—')}</b>
       <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(p.company_id)}')">${esc(co?(co.display_name||p.company_id):st(p.company_id))}</a>
       ${p.invoice_no?`<span class="muted nw">inv ${esc(st(p.invoice_no))}</span>`:''}
-      <span class="muted nw">${esc(fmtDate(p.date)||st(p.date)||'no start date')}</span>
+      <span class="muted nw">${esc(fmtDate(p.date||p.start_date)||st(p.date||p.start_date)||'no start date')}</span>
       ${r.flags.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}
       <span style="margin-left:auto"><button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}')">Edit</button></span>
     </div>
@@ -977,7 +1061,10 @@ function liveCard(r){
 }
 
 function unlinkedCard(u, i){
-  const legs = (u.legs||[]).map(l=>{
+  // arr(), not `||[]`: a legs value that is a string or an object makes .map
+  // throw inside renderMain, which doSave re-runs after EVERY save -- so one
+  // malformed row blanks the whole pane. Same rule as owner/annotations.
+  const legs = arr(u.legs).map(l=>{
     const d = legDate(l.ship_date), paid = legPaid(l.vendor_po_raw);
     return `<div class="lt-leg"><span class="lt-po">${esc(st(l.vendor_po_raw)||'—')}</span>
       <span class="muted nw">${esc(d.text)}</span>
@@ -1006,8 +1093,8 @@ function unlinkedCard(u, i){
 
    Writes go through create_project like every other project. Nothing new. */
 function openAdoptTrackerRow(i){
-  const u = (DATA.tracker_unlinked||[])[i];
-  if(!u) return;
+  const u = arr(DATA.tracker_unlinked)[i];
+  if(!u || typeof u !== 'object') return;
   const cid = u.client ? _slugGuess(u.client) : '';
   document.getElementById('dtitle').textContent =
     'Add tracker row ' + st(u.sheet_row) + ' to the CRM';
@@ -1034,40 +1121,95 @@ function openAdoptTrackerRow(i){
       <input id="a_desc" value="${esc(st(u.client_po))}"/></div>
     <div class="field"><label>Open orders note</label>
       <textarea id="a_note" style="min-height:96px">${esc(st(u.open_orders_notes))}</textarea></div>
+    <div class="row2">
+      <div class="field"><label>Status</label><select id="a_status">
+        ${opts(['won','pending','lost'], 'won')}</select></div>
+      <div class="field"><label>Year</label>
+        <input id="a_year" type="number" value="${esc(_adoptYear(u))}"/></div>
+    </div>
     <button class="btn" id="saveBtn" onclick="saveAdoptTrackerRow(${i})">Add to CRM</button>
     <span class="saved" id="savedMsg"></span>
-    <p class="muted" style="margin-top:14px;font-size:12px">Its ${
-      (u.legs||[]).length} vendor leg(s) stay on the tracker row until the
-      project exists; add them from the project once it does.</p>`;
+    <p class="muted" style="margin-top:14px;font-size:12px">${
+      // The two kinds of unlinked row differ in whether their legs were
+      // imported, and one sentence cannot be true of both. A numberless row
+      // returns from the importer BEFORE the vendor loop, so its legs exist
+      // nowhere; a keyed row's legs were imported, but under the sheet's own
+      // key and client, so they will not follow the number chosen here.
+      // Telling him not to re-add legs that do not exist is the worse error of
+      // the two: it suppresses the only action that would recover them.
+      arr(u.legs).length === 0 ? 'No vendor legs on this row.'
+      : st(u.raw_key)
+        ? `Its ${arr(u.legs).length} vendor leg(s) were imported under the
+           tracker's own number (${esc(st(u.raw_key))}), so they will not follow
+           this project. Check them against the new number afterwards.`
+        : `Its ${arr(u.legs).length} vendor leg(s) were NOT imported — a row
+           with no project number has nowhere to file them. Add them from the
+           project once it exists.`}</p>`;
   openDrawer();
 }
 /* Best-effort match of a tracker client name to an existing company. Only ever
    preselects a dropdown -- a wrong guess costs one click, never a mis-filed
    record, and the operator confirms before anything is written. */
+/* The year the WORK is in, taken from the tracker row's own start date. The
+   adoption date is not the deal date: a job started in December and adopted in
+   January was filed under the wrong year on every annual figure. */
+function _adoptYear(u){
+  const iso = isoDate(st(u && u.start_date));
+  return iso ? Number(iso.slice(0, 4)) : new Date().getFullYear();
+}
 function _slugGuess(name){
   const n = sv(name).replace(/[^a-z0-9]+/g, '');
+  if(!n) return '';
+  // Vendors are excluded HERE as well as from the dropdown. They used only to
+  // be filtered out of the option list, so a tracker row whose client name
+  // matched a VENDOR produced a truthy cid -- which suppressed the "choose a
+  // customer" placeholder -- while the matched company was absent from the
+  // options, so nothing carried `selected` and the browser fell back to the
+  // first customer. The !cid guard then passed on that fallback and filed the
+  // job under a company nobody chose. A guess that cannot be offered must not
+  // count as a guess.
   const hit = (DATA.companies||[]).find(c=>
+    st(c.role)!=='vendor' &&
     sv(c.display_name).replace(/[^a-z0-9]+/g, '') === n);
   return hit ? hit.company_id : '';
 }
 async function saveAdoptTrackerRow(i){
-  const u = (DATA.tracker_unlinked||[])[i];
+  const u = arr(DATA.tracker_unlinked)[i];
   const msg = document.getElementById('savedMsg');
+  // The opener bails on a missing row; this did not, and would have written a
+  // project with no status, no start date and no location -- so it would not
+  // have appeared on the screen it was adopted into, while the card it came
+  // from stayed put.
+  if(!u || typeof u !== 'object'){
+    msg.textContent='✗ that tracker row is no longer on the list — reload';
+    msg.className='saved show errc'; return false;
+  }
   const pno = document.getElementById('a_pno').value.trim();
   if(!pno){ msg.textContent='✗ project # is required';
-            msg.className='saved show errc'; return; }
+            msg.className='saved show errc'; return false; }
   const cid = document.getElementById('a_cid').value;
   if(!cid){ msg.textContent='✗ pick a customer';
-            msg.className='saved show errc'; return; }
+            msg.className='saved show errc'; return false; }
   const fields = {
     project_no: pno, company_id: cid,
     company_name: (companyById[cid]||{}).display_name,
     description: document.getElementById('a_desc').value.trim() || null,
     open_orders_notes: document.getElementById('a_note').value.trim() || null,
-    tracker_status: u && u.tracker_status ? u.tracker_status : null,
-    date: u && u.start_date ? u.start_date : null,
-    location: u && u.location ? u.location : null,
-    status: 'won', year: new Date().getFullYear(),
+    tracker_status: u.tracker_status || null,
+    // The sheet row it was adopted FROM. A numberless row has no key to match
+    // on, so this plus the note is how the next import knows the row is
+    // already a project and stops re-offering it for adoption.
+    tracker_row: u.sheet_row == null ? null : u.sheet_row,
+    date: u.start_date || null,
+    location: u.location || null,
+    // Neither is invented any more. Both were hardcoded -- status 'won' and
+    // whatever year the adoption happened to be done in -- so a job started in
+    // December and adopted in January landed in the wrong year's revenue
+    // reporting, and every adopted row counted as a $0 win in the "Won
+    // revenue" KPI whether it was won or not. Now: he picks the status, and
+    // the year defaults to the one the sheet's own start date is in.
+    status: document.getElementById('a_status').value || null,
+    year: numOrNull('a_year'),
   };
   const ok = await doSave('create_project', {fields}, (r)=>{
     DATA.projects.push(r.project || fields);
@@ -1079,13 +1221,21 @@ async function saveAdoptTrackerRow(i){
   return ok;
 }
 
+/* The sidebar must not present an unrecognised status as if it were one of
+   the legend's own buckets. bucketLabel's fallback title-cases the key, so a
+   status of 'done' read as "Done" beside a main pane saying the tracker cannot
+   name it -- the sidebar and the main pane disagreeing is the whole symptom. */
+function _liveListLabel(key){
+  const known = new Set(trackerBuckets().map(b=>b.key));
+  return known.has(st(key)) ? bucketLabel(key) : 'status not recognised';
+}
 function renderLiveList(){
   const rows = liveRows();
   document.getElementById('clist').innerHTML = rows.slice(0,400).map(r=>{
     const co = companyById[r.p.company_id];
     return `<div class="citem" onclick="openProject('${jesc(st(r.p.project_no))}')">
       <div class="cn">${esc(st(r.p.project_no)||'—')} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
-      <div class="cm">${r.flags.length?`<span class="owed">${r.flags.length} flag${r.flags.length>1?'s':''}</span>`:`<span>${esc(bucketLabel(r.p.tracker_status)).slice(0,28)}</span>`}</div>
+      <div class="cm">${r.flags.length?`<span class="owed">${r.flags.length} flag${r.flags.length>1?'s':''}</span>`:`<span>${esc(st(_liveListLabel(r.p.tracker_status)).slice(0,28))}</span>`}</div>
     </div>`;
   }).join('') || '<div class="muted" style="padding:14px">No live projects.</div>';
 }
@@ -1553,6 +1703,13 @@ function openProject(pno){
       <div class="field"><label>Margin (%)</label><input id="f_margin" type="number" step="0.1" value="${esc(marginPct)}"/></div>
     </div>
     <div class="field"><label>Owner (reps, comma-separated)</label><input id="f_owner" value="${esc(arr(p.owner).join(', '))}"/></div>
+    <div class="field"><label>Open orders note <span class="muted"
+      style="text-transform:none;font-weight:400">(the note shown on the Live
+      screen)</span></label>
+      <textarea id="f_oon" style="min-height:88px">${esc(p.open_orders_notes||'')}</textarea>
+      <p class="muted" style="margin:4px 0 0;font-size:11px">This is the job's
+        own note. Each vendor leg has a separate "Order notes" box of its
+        own — editing one of those does not change this.</p></div>
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
     <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc(arr(p.annotations).join('\n'))}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}')">Save changes</button>
@@ -1600,6 +1757,13 @@ async function saveProject(pnoArg){
     status: document.getElementById('f_status').value || null,
     collection_status: document.getElementById('f_coll').value || null,
     notes: document.getElementById('f_notes').value,
+    // The note the Live screen shows. It had no editor anywhere: the only
+    // writable copy was the shipment drawer's, which is a DIFFERENT field on a
+    // different record -- so he would edit "Order notes" on a leg, see "Saved",
+    // and watch the Live card not change. Sent as '' rather than null when
+    // cleared, so emptying it is a real edit the changelog records and the next
+    // re-import preserves; null would read as "never set".
+    open_orders_notes: document.getElementById('f_oon').value,
     owner: document.getElementById('f_owner').value.split(',').map(s=>s.trim()).filter(Boolean),
     annotations: document.getElementById('f_annos').value.split('\n').map(s=>s.trim()).filter(Boolean),
     revenue: numOrNull('f_revenue'),
@@ -2466,9 +2630,9 @@ async function replyToThread(companyId, messageId){
 
 document.getElementById('q').addEventListener('input',e=>{
   query=e.target.value.trim(); renderList();
-  // The Projects tab owns the main pane, so search has to repaint it too --
-  // renderList() alone only updates the sidebar.
-  if(filter === 'project') renderMain();
+  // The Projects tab and the Live tab both own the main pane, so search has to
+  // repaint it too -- renderList() alone only updates the sidebar.
+  if(filter === 'project' || filter === 'live') renderMain();
 });
 // Single owner of tab state. select() also routes through it, so clicking a
 // company from the Projects table actually lands on that company's page
@@ -2585,6 +2749,16 @@ def render_html(store_dir, token=""):
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as ex:
             data[name] = []
             problems.append(f"{name}.json unreadable ({type(ex).__name__}) -- built with 0 {name}")
+        # Valid JSON of the WRONG SHAPE is the case this missed. The archived
+        # scrub below iterates four of these files and would raise on a dict,
+        # which fails the build safely -- but the two tracker files are not in
+        # that loop, so a `{}` sailed into the page and threw at the very first
+        # statement of the bundle. The operator got an empty sidebar, "Select a
+        # company to begin.", and a mode pill stuck on "Connecting..." forever:
+        # no error, no clue, and every edit in the whole app impossible.
+        if not isinstance(data.get(name), list):
+            data[name] = []
+            problems.append(f"{name}.json is not a list -- built with 0 {name}")
     # A validly-empty companies.json (brand-new store, everything archived)
     # is fine -- only refuse to build over an actually missing/corrupt file.
     if any(p.startswith("companies.json") for p in problems):
@@ -2595,11 +2769,30 @@ def render_html(store_dir, token=""):
     for p in problems:
         print(f"WARNING: {p}", file=sys.stderr)
     # archived companies never ship into the demo bootstrap
+    _all_companies = list(data["companies"])      # before the filter below
     arch = {c["company_id"] for c in data["companies"] if c.get("archived")}
     data["companies"] = [c for c in data["companies"] if not c.get("archived")]
     for k in ["contacts", "projects", "shipments", "invoices"]:
         data[k] = [x for x in data[k] if x.get("company_id") not in arch]
     data["vendors"] = [v for v in data["vendors"] if not v.get("archived")]
+    # tracker_unlinked could not be caught by the loop above: its rows carry the
+    # sheet's raw client NAME, not a company_id -- that is precisely why they
+    # are unlinked. So an archived customer's tracker row kept rendering its
+    # name and its full note on the Live screen, with an "Add to CRM" button,
+    # after the operator had archived them. Archiving is this product's delete.
+    #
+    # Matched on a squashed name rather than a slug: build_view must not import
+    # the pipeline, and the comparison only ever HIDES a card, so a near-miss
+    # costs a visible row, never a wrong record.
+    def _squash(v):
+        return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
+
+    arch_names = {_squash(c.get("display_name")) for c in _all_companies
+                  if c.get("archived")}
+    arch_names.discard("")
+    data["tracker_unlinked"] = [
+        u for u in data["tracker_unlinked"]
+        if not (isinstance(u, dict) and _squash(u.get("client")) in arch_names)]
     # Embed as a JSON literal in an inline <script>. json.dumps does NOT
     # escape "</script>" or U+2028/2029, so a store value containing those
     # would break out of the script element. Neutralize them.

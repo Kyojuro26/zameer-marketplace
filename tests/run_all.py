@@ -43,13 +43,15 @@ PY_MODULES = [
     ("regression.test_merge", "regression/test_merge.py"),
     ("regression.test_importer", "regression/test_importer.py"),
     ("regression.test_readiness", "regression/test_readiness.py"),
+    ("regression.test_livetracker", "regression/test_livetracker.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
 ]
 JS_MODULES = [("regression/test_view.js", "view"),
               ("regression/test_drawer_close.js", "drawer-close"),
-              ("regression/test_receivables.js", "receivables")]
+              ("regression/test_receivables.js", "receivables"),
+              ("regression/test_livetracker.js", "live-tracker/view")]
 
 
 def _load(modname, relpath):
