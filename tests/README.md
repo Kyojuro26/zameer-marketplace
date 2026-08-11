@@ -33,7 +33,25 @@ not evidence. Re-run it after any change to the harness, and bump
 | `regression/test_visibility.py` | what archiving hides, and must never hide |
 | `regression/test_integrity.py` | links, cascades, identity, the store layer |
 | `regression/test_view.js` | render robustness, date preservation, saves |
+| `regression/test_livetracker.py` | the fill-colour decode, the legend boundary, unlinked rows, re-import |
+| `regression/test_livetracker.js` | the Live screen: lateness flags, adoption, the note |
 | `shapes/test_shape_*.py` | the three recurring failure shapes |
+
+`mutate_livetracker.py` runs **four** passes — normalize.py and merge.py and
+server.py against the python module, build_view.py against the node one. The
+Live Tracker spans all four files, and a single pass would leave whichever it
+did not name resting on its author's confidence.
+
+Two things that pass have to be re-earned, not assumed:
+
+- The node modules **cannot be positive-controlled**. Against `BASELINE_REF`
+  the whole bundle dies before any check runs, so `run_all.py` scores them
+  "NOT COUNTED" rather than counting a crash as detection. Their evidence is
+  the mutation suites, which is why every JS behaviour asserted here has a
+  mutant.
+- The Live Tracker's lateness answers are computed against **today**, so
+  `test_livetracker.js` freezes the clock. A test whose expected answers drift
+  with the wall clock stops asserting anything the week after it is written.
 
 Two harness rules, both learned expensively:
 
@@ -88,8 +106,19 @@ stopped being true.
 
 ## Current status
 
-The suite is **red on purpose**. Every failing check is a defect found by the
-full-codebase audit and not yet fixed — the receivables file silently
-recreated empty, no company-side liveness guard, `archived` writable as free
-text, the importer's paid-parsing, the PII sweep's blindness to binary and
-UTF-16, the unencoded `message_id`. It is the worklist. Green means done.
+**Green.** The worklist this file used to describe — the receivables file
+silently recreated empty, no company-side liveness guard, `archived` writable
+as free text, the importer's paid-parsing, the PII sweep's blindness to binary
+and UTF-16, the unencoded `message_id` — is closed. Those checks are still
+here; they are now regression tests rather than a to-do list.
+
+Green on its own is still not the claim. What makes it mean something:
+
+```bash
+python3 tests/run_all.py --positive-control   # must FAIL against BASELINE_REF
+python3 tests/mutate_drawer.py                # and the other three
+```
+
+`--positive-control` writes `.positive-control-ran`; until it exists,
+`run_all.py` says so and a green result is not evidence. Bump `BASELINE_REF`
+only when a version actually ships — not when one is merely tagged in source.
