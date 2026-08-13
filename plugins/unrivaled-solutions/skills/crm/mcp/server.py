@@ -92,6 +92,12 @@ PROJECT_FIELDS = {
     # shipments, duplicated across every leg, and absent entirely from a row
     # with no legs.
     "tracker_status", "open_orders_notes", "tracker_row",
+    # tracker_key is the key the SHEET carries for a row adopted through the
+    # Live Tracker, kept verbatim. It is how the next import knows the row has
+    # already become a project. It is deliberately NOT project_no: he chooses
+    # the CRM number, and on the real workbook one such row is keyed with a
+    # phrase rather than a number, which parses to nothing at all.
+    "tracker_key",
 }
 SHIPMENT_FIELDS = {
     "shipment_id", "project_no", "all_project_nos", "vendor_po_raw", "ship_date",
@@ -164,7 +170,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.31"
+SERVER_VERSION = "0.1.32"
 
 
 class StoreError(Exception):
@@ -363,6 +369,18 @@ class Store:
 
     def load(self, entity):
         return self._read_json(self.root / ENTITY_FILES[entity], [])
+
+    def load_side(self, filename):
+        """Read a store file that is NOT an entity file.
+
+        The tracker files are importer output, not records the tools own, so
+        they are outside ENTITY_FILES -- which drives the missing-file warning
+        and the manifest, and would flag their perfectly normal absence on any
+        store from before the tracker. Corruption still raises through
+        _read_json; only absence is quiet. A non-list is coerced, because the
+        one caller embeds it into a page that dies on the wrong type."""
+        v = self._read_json(self.root / filename, [])
+        return v if isinstance(v, list) else []
 
     @staticmethod
     def _read_json(path, default):
@@ -695,6 +713,10 @@ TEXT_FIELDS = {
     "email", "phone", "title", "notes", "payment_notes", "vendor_notes",
     "open_orders_notes", "action_notes", "offerings", "rep", "po_routing",
     "invoice_routing", "po_routing_source",
+    # coerced to text like every other identifier: the sheet's key cell can be
+    # a number, and a float 1419.0 stored here would never match the "1419.0"
+    # string the importer writes into the unlinked row
+    "tracker_key",
     # locations
     "location", "primary_location", "hq_location",
     # dates: stored as ISO strings and read with .slice()/.localeCompare()/
@@ -1358,6 +1380,28 @@ def update_project(project_no: str, fields: dict) -> dict:
                 out["shipments_moved"] = moved_ship
                 out["invoices_moved"] = moved_inv
             return out
+    except StoreError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def list_tracker() -> dict:
+    """The Live Tracker's two importer-written files: the status buckets read
+    from the sheet's own legend, and the rows the importer could not match to a
+    project. Read-only -- both are rewritten wholesale by every import.
+
+    Deliberately NOT in ENTITY_FILES: a missing entity file is a warning there,
+    and these two are legitimately absent from any store seeded before the
+    tracker shipped. Their absence is normal and returns empty lists.
+
+    Exists so the visual app can refresh them like everything else. Without it
+    refreshData pulled the other five and left the bucket headings and the
+    whole "Not in the CRM yet" section frozen at page-build time -- the screen
+    looked freshly refreshed while a third of it was not."""
+    try:
+        return {"ok": True, "interface_version": VERSION,
+                "tracker_buckets": STORE.load_side("tracker_buckets.json"),
+                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}
     except StoreError as e:
         return _err(e)
 

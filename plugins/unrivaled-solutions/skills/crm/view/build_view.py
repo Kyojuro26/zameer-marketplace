@@ -421,15 +421,25 @@ function embeddedCall(tool, args){   // demo fallback — session-only mutation
 
 async function refreshData(){
   try{
-    const [co, ct, pr, sh, iv] = await Promise.all([
+    const [co, ct, pr, sh, iv, tk] = await Promise.all([
       CRM.call('list_companies', {}), CRM.call('find_contacts', {}),
       CRM.call('list_projects', {}),  CRM.call('list_shipments', {}),
-      CRM.call('list_invoices', {})]);
+      CRM.call('list_invoices', {}),  CRM.call('list_tracker', {})]);
     if (co.ok) DATA.companies = co.companies;
     if (ct.ok) DATA.contacts  = ct.contacts;
     if (pr.ok) DATA.projects  = pr.projects;
     if (sh.ok) DATA.shipments = sh.shipments;
     if (iv && iv.ok) DATA.invoices = iv.invoices;
+    // Without these the landing screen refreshed five of its seven inputs: the
+    // bucket headings and the whole "Not in the CRM yet" section stayed frozen
+    // at page-build time while everything around them updated, so the screen
+    // LOOKED freshly refreshed with a third of it stale. Guarded because a
+    // server older than this tool returns ok:false, and an older app must not
+    // blank the section it cannot refresh.
+    if (tk && tk.ok){
+      if (Array.isArray(tk.tracker_buckets))  DATA.tracker_buckets  = tk.tracker_buckets;
+      if (Array.isArray(tk.tracker_unlinked)) DATA.tracker_unlinked = tk.tracker_unlinked;
+    }
     reindex(); kpis(); renderList();
     if (filter === 'project'){ renderSubfilters(); renderMain(); }
     // 'live' is a cross-company view AND the landing screen, so `selected` is
@@ -583,6 +593,23 @@ function arr(v){ return Array.isArray(v) ? v : (v===null||v===undefined||v==='' 
 // `partial:30%` invoice and pressing Save wrote the partial payment off as
 // "open". Same shape silently wiped collection_status and fabricated a project
 // status of "won" on a project stored with none.
+/* The bucket choices, named from the sheet's own legend. Only keys the legend
+   knows are offered: the server validates this field, so offering a stored
+   value it would reject makes the WHOLE save fail on an unrelated edit. An
+   unrecognised stored value is therefore called out in words beside the
+   control instead, and clearing or correcting it is one click. */
+function knownBucket(key){
+  return !st(key) || trackerBuckets().some(b=>b.key===st(key));
+}
+function trackerOpts(current){
+  const cur = st(current);
+  let h = `<option value=""${cur ? '' : ' selected'}>— none —</option>`;
+  trackerBuckets().forEach(b=>{
+    h += `<option value="${esc(b.key)}"${b.key===cur ? ' selected' : ''}>`
+       + `${esc(bucketLabel(b.key))}</option>`;
+  });
+  return h;
+}
 function opts(list, current){
   const cur = st(current);
   const all = list.map(st).includes(cur) ? list.map(st) : [cur, ...list.map(st)];
@@ -1200,6 +1227,13 @@ async function saveAdoptTrackerRow(i){
     // on, so this plus the note is how the next import knows the row is
     // already a project and stops re-offering it for adoption.
     tracker_row: u.sheet_row == null ? null : u.sheet_row,
+    // The key the SHEET carries for this row, verbatim, so the next import
+    // knows the row already became a project. Not the same as project_no --
+    // he chooses that, and a tracker row need not be keyed with a number at
+    // all: on the real workbook one is keyed with a phrase, which parses to
+    // nothing, so without this that card returned every import forever no
+    // matter what number he gave it.
+    tracker_key: st(u.raw_key) || null,
     date: u.start_date || null,
     location: u.location || null,
     // Neither is invented any more. Both were hardcoded -- status 'won' and
@@ -1694,6 +1728,17 @@ function openProject(pno){
       <div class="field"><label>Collection</label><select id="f_coll">
         ${opts(['','open','partial:50%','paid'], p.collection_status)}</select></div>
     </div>
+    <div class="field"><label>Live Tracker bucket</label>
+      <select id="f_tracker" data-orig="${esc(st(p.tracker_status))}">
+        ${trackerOpts(p.tracker_status)}</select>
+      ${knownBucket(p.tracker_status) ? '' : (st(p.tracker_status)
+        ? `<p class="muted" style="margin:4px 0 0;font-size:11px">This job is
+             stored as <b>${esc(st(p.tracker_status))}</b>, which your tracker's
+             legend does not name — it shows under "Status not recognised" on
+             the Live screen. Pick a bucket here to correct it.</p>`
+        : `<p class="muted" style="margin:4px 0 0;font-size:11px">Not on the
+             Live screen. The import sets this from the colour of the row's
+             notes cell in your tracker.</p>`)}</div>
     <div class="row2">
       <div class="field"><label>Revenue ($)</label><input id="f_revenue" type="number" step="0.01" value="${p.revenue==null?'':esc(p.revenue)}"/></div>
       <div class="field"><label>Total cost ($)</label><input id="f_cost" type="number" step="0.01" value="${p.total_cost==null?'':esc(p.total_cost)}"/></div>
@@ -1771,6 +1816,21 @@ async function saveProject(pnoArg){
     gross_profit: numOrNull('f_gp'),
     margin: marginRaw==null ? null : marginRaw/100,
   };
+  // Sent ONLY when he actually changed it. Every other field here is sent
+  // unconditionally, which is fine for fields the form always shows correctly
+  // -- but this one can hold a value the server now refuses, and resending
+  // that on an unrelated edit would fail the whole save with no way out from
+  // inside the app. Same rule the date fields already follow: never send a
+  // value the user did not touch.
+  // `|| ''` on BOTH sides. A select showing no selection reads as '' while a
+  // data-orig that was never written reads as null, and `'' !== null` is true
+  // -- so an untouched control looked edited and every unrelated save cleared
+  // the bucket. Comparing the normalised strings is right in the browser too:
+  // "empty" and "absent" mean the same thing here and must compare equal.
+  const trk = document.getElementById('f_tracker');
+  if(trk && (trk.value || '') !== (trk.getAttribute('data-orig') || '')){
+    fields.tracker_status = trk.value || null;
+  }
   let renamed = false;
   if(newPno && newPno !== pno){
     const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');

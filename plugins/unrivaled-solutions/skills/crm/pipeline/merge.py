@@ -427,17 +427,30 @@ def merge_all(fresh_files, store_dir):
     # exact ".0" mismatch before -- see the _idkey docstring.
     unl = merged.get("tracker_unlinked.json")
     if isinstance(unl, list):
-        by_key = {_idkey(p.get("project_no"))
-                  for p in (merged.get("projects.json") or [])
-                  if isinstance(p, dict) and _idkey(p.get("project_no"))}
+        projs = [p for p in (merged.get("projects.json") or [])
+                 if isinstance(p, dict)]
+        by_key = {_idkey(p.get("project_no")) for p in projs
+                  if _idkey(p.get("project_no"))}
+        # The sheet's OWN key, recorded on the project when the row was
+        # adopted. Needed because a tracker row does not have to be keyed with
+        # a number at all -- on the real workbook one is keyed with a phrase,
+        # which parses to no project number, so matching the parsed key against
+        # project_no could never retire it and the card came back every import
+        # no matter what number he gave it. This is exact: it only matches a
+        # row somebody actually adopted.
+        by_sheet_key = {_s(p.get("tracker_key")) for p in projs
+                        if _s(p.get("tracker_key"))}
         kept_unl, adopted = [], []
         for u in unl:
             if not isinstance(u, dict):
                 continue    # skip-ok: a malformed entry is not a row to show
+            raw = _s(u.get("raw_key"))
             keys = [_idkey(k) for k in (u.get("parsed_keys") or [])]
             if not keys:
-                keys = [_idkey(u.get("raw_key"))]
+                keys = [_idkey(raw)]
             hit = next((k for k in keys if k and k in by_key), None)
+            if not hit and raw and raw in by_sheet_key:
+                hit = raw
             if hit:
                 adopted.append(hit)
                 continue    # skip-ok: it IS a project now; listed in report["adopted"]

@@ -241,7 +241,7 @@ async function run(crmDir) {
   r.check('a live refresh repaints the main pane on the landing screen',
     /filter === 'live'\)\s*renderMain\(\);/.test(
       js.slice(js.indexOf('async function refreshData'),
-               js.indexOf('async function refreshData') + 1400)),
+               js.indexOf('async function refreshData') + 2600)),
     'the landing screen has no `selected`, so without this the sidebar '
     + 'repaints from the refreshed store while the cards beside it keep '
     + 'showing the build-time snapshot indefinitely');
@@ -752,6 +752,69 @@ async function run(crmDir) {
     'this is the case that motivated it');
   r.check('and falls back to this year when the row has no start date',
     ev("String(_adoptYear({}))") === '2026');
+
+  // ---- the bucket is correctable from the project itself -------------------
+  ev("openProject('4507');");            // tracker_status 'done' -- unrecognised
+  const orphanBody = app.doc.getElementById('dbody').innerHTML;
+  r.check('the project drawer offers a bucket selector',
+    /id="f_tracker"/.test(orphanBody),
+    'an unrecognised status could only be corrected from chat');
+  r.check('it offers the buckets the legend names',
+    /<option value="action_admin"/.test(orphanBody)
+    && /<option value="awaiting_materials"/.test(orphanBody));
+  r.check('and a way to clear it',
+    /<option value="">— none —<\/option>/.test(orphanBody));
+  r.check('an unrecognised stored value is NOT offered as an option',
+    !/<option value="done"/.test(orphanBody),
+    'the server validates this field, so offering a value it would reject '
+    + 'fails the WHOLE save on an unrelated edit');
+  r.check('it says in words what is wrong instead',
+    /legend does not name/.test(orphanBody)
+    && orphanBody.includes('<b>done</b>'),
+    'the value is not offered as an option, so the only way he learns what is '
+    + 'stored is being told');
+  r.check('and records the original so an untouched save leaves it alone',
+    /data-orig="done"/.test(orphanBody),
+    'every other field here is sent unconditionally; this one must not be');
+
+  app.resetCalls();
+  await ev("saveProject('4507')");
+  const untouched = app.calls().find(c => c.tool === 'update_project');
+  r.check('saving without touching the bucket does not send it',
+    !!untouched && !('tracker_status' in untouched.args.fields),
+    `got ${JSON.stringify(untouched && untouched.args.fields.tracker_status)} -- `
+    + 'resending an unrecognised value would fail the whole save, and sending '
+    + 'null would clear a good bucket on an unrelated edit');
+
+  app.resetCalls();
+  ev("document.getElementById('f_tracker').value='action_owner';");
+  await ev("saveProject('4507')");
+  const fixed = app.calls().find(c => c.tool === 'update_project');
+  r.check('choosing a bucket does send it',
+    !!fixed && fixed.args.fields.tracker_status === 'action_owner',
+    `got ${JSON.stringify(fixed && fixed.args.fields.tracker_status)}`);
+  ev("closeDrawer(); setFilter('live');");
+  r.check('and the row leaves the "not recognised" section',
+    !/Status not recognised/.test(app.doc.getElementById('main').innerHTML),
+    'it was the only unrecognised row');
+
+  // ---- adoption records the key the SHEET carries --------------------------
+  r.check('adoption writes the sheet key so the row can be retired',
+    /tracker_key: st\(u\.raw_key\)/.test(js),
+    'a tracker row need not be keyed with a number -- on the real workbook one '
+    + 'is keyed with a phrase, which parses to nothing, so without this that '
+    + 'card returns every import no matter what number he gives it');
+
+  // ---- the refresh pulls the tracker files too -----------------------------
+  r.check('a live refresh asks for the tracker files as well',
+    /CRM\.call\('list_tracker'/.test(js),
+    'refreshing five of seven inputs left the bucket headings and the whole '
+    + 'unlinked section frozen at page-build time');
+  r.check('and only overwrites them when the answer is a list',
+    /Array\.isArray\(tk\.tracker_buckets\)/.test(js)
+    && /Array\.isArray\(tk\.tracker_unlinked\)/.test(js),
+    'a server older than the tool returns ok:false, and an app must not blank '
+    + 'a section it simply cannot refresh');
 
   // ---- leaving the screen ---------------------------------------------------
   ev("select('acme');");

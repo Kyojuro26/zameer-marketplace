@@ -176,8 +176,8 @@ MERGE = [
  ("the adopted match uses the display string instead of the parsed key",
   '            keys = [_idkey(k) for k in (u.get("parsed_keys") or [])]\n'
   "            if not keys:\n"
-  '                keys = [_idkey(u.get("raw_key"))]',
-  '            keys = [_idkey(u.get("raw_key"))]'),
+  "                keys = [_idkey(raw)]",
+  "            keys = [_idkey(raw)]"),
  ("the adopted match goes back to matching on the sheet row",
   "            hit = next((k for k in keys if k and k in by_key), None)",
   "            hit = next((k for k in keys if k and k in by_key), None) \\\n"
@@ -204,6 +204,14 @@ MERGE = [
   'IMPORTER_OWNED = {"tracker_status", "tracker_row", "open_orders_notes"}'),
  ("the report stops naming the rows it dropped",
   '            report["adopted"] = adopted', "            pass"),
+ ("a phrase-keyed row he adopted comes back forever",
+  "            if not hit and raw and raw in by_sheet_key:\n"
+  "                hit = raw\n", ""),
+ ("the sheet-key handle matches any project, adopted or not",
+  '        by_sheet_key = {_s(p.get("tracker_key")) for p in projs\n'
+  '                        if _s(p.get("tracker_key"))}',
+  '        by_sheet_key = {_s(u2) for u2 in [None]} | {_s(p.get("project_no"))\n'
+  "                        for p in projs}"),
 ]
 
 # -------------------------------------------------------------------- view ---
@@ -420,6 +428,44 @@ VIEW = [
   "  return iso ? Number(iso.slice(0, 4)) : new Date().getFullYear();",
   "  return new Date().getFullYear();"),
 
+ ("adoption stops recording the key the sheet carries",
+  "    tracker_key: st(u.raw_key) || null,\n", ""),
+ ("a live refresh stops pulling the tracker files",
+  "      CRM.call('list_invoices', {}),  CRM.call('list_tracker', {})]);",
+  "      CRM.call('list_invoices', {})]);"),
+ ("a refresh blanks the tracker sections when the server cannot answer",
+  "      if (Array.isArray(tk.tracker_buckets))  DATA.tracker_buckets  = tk.tracker_buckets;\n"
+  "      if (Array.isArray(tk.tracker_unlinked)) DATA.tracker_unlinked = tk.tracker_unlinked;",
+  "      DATA.tracker_buckets  = tk.tracker_buckets;\n"
+  "      DATA.tracker_unlinked = tk.tracker_unlinked;"),
+ ("the bucket selector is dropped from the project drawer",
+  '    <div class="field"><label>Live Tracker bucket</label>\n'
+  '      <select id="f_tracker" data-orig="${esc(st(p.tracker_status))}">\n'
+  "        ${trackerOpts(p.tracker_status)}</select>",
+  '    <div class="field" style="display:none"><label>bucket</label>\n'
+  '      <select id="f_tracker_gone">'),
+ ("the bucket selector offers a value the server would refuse",
+  "  trackerBuckets().forEach(b=>{\n"
+  "    h += `<option value=\"${esc(b.key)}\"${b.key===cur ? ' selected' : ''}>`\n"
+  "       + `${esc(bucketLabel(b.key))}</option>`;\n"
+  "  });",
+  "  trackerBuckets().forEach(b=>{\n"
+  "    h += `<option value=\"${esc(b.key)}\"${b.key===cur ? ' selected' : ''}>`\n"
+  "       + `${esc(bucketLabel(b.key))}</option>`;\n"
+  "  });\n"
+  "  if(cur && !trackerBuckets().some(b=>b.key===cur))\n"
+  "    h += `<option value=\"${esc(cur)}\" selected>${esc(cur)}</option>`;"),
+ ("the bucket is sent on every save, clearing it on an unrelated edit",
+  "  if(trk && (trk.value || '') !== (trk.getAttribute('data-orig') || '')){\n"
+  "    fields.tracker_status = trk.value || null;\n"
+  "  }",
+  "  if(trk){ fields.tracker_status = trk.value || null; }"),
+ ("the changed-check trips on empty-versus-absent again",
+  "  if(trk && (trk.value || '') !== (trk.getAttribute('data-orig') || '')){",
+  "  if(trk && trk.value !== trk.getAttribute('data-orig')){"),
+ ("an unrecognised bucket is no longer explained in the form",
+  "      ${knownBucket(p.tracker_status) ? '' : (st(p.tracker_status)",
+  "      ${true ? '' : (st(p.tracker_status)"),
 ]
 
 
@@ -463,6 +509,35 @@ SERVER = [
  ("the move is made but never reported",
   "                out[\"shipments_moved\"] = moved_ship\n", ""),
 
+ # ---- the finishing pass ------------------------------------------------------
+ ("tracker_key stops being a writable project field",
+  '    "tracker_key",\n}', "}"),
+ ("tracker_key is left as free text, so a numeric sheet key never matches",
+  "    # coerced to text like every other identifier: the sheet's key cell can be\n"
+  "    # a number, and a float 1419.0 stored here would never match the \"1419.0\"\n"
+  "    # string the importer writes into the unlinked row\n"
+  '    "tracker_key",\n', ""),
+ ("list_tracker reports a missing tracker file as an error",
+  '        v = self._read_json(self.root / filename, [])\n'
+  "        return v if isinstance(v, list) else []",
+  "        with open(self.root / filename, encoding=\"utf-8-sig\") as f:\n"
+  "            return json.load(f)"),
+ ("list_tracker passes a wrong-shaped file straight through",
+  "        return v if isinstance(v, list) else []", "        return v"),
+ ("list_tracker swallows a corrupt file as empty",
+  "    try:\n"
+  "        return {\"ok\": True, \"interface_version\": VERSION,\n"
+  '                "tracker_buckets": STORE.load_side("tracker_buckets.json"),\n'
+  '                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}\n'
+  "    except StoreError as e:\n"
+  "        return _err(e)",
+  "    try:\n"
+  "        return {\"ok\": True, \"interface_version\": VERSION,\n"
+  '                "tracker_buckets": STORE.load_side("tracker_buckets.json"),\n'
+  '                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}\n'
+  "    except StoreError:\n"
+  '        return {"ok": True, "interface_version": VERSION,\n'
+  '                "tracker_buckets": [], "tracker_unlinked": []}'),
 ]
 
 

@@ -24,6 +24,7 @@ Every response carries `ok` and `interface_version`. Failures return
 | `get_vendor` | `ref` (id or name) | vendor with offerings + PO/invoice routing |
 | `find_contacts` | `company?`, `query?` | contacts + count |
 | `list_invoices` | `payment_status?` (paid\|open\|partial), `company?`, `invoice_no?`, `overdue?` | the receivables ledger (CLIENT Invoices table); invoices also attached to `get_company`. Every invoice carries a computed `effective_due_on` — the `due_on` override if set, else `invoice_date` + Net 30. It is response-only and never stored; an `invoice_date` the server cannot parse yields `null` rather than a guessed date. |
+| `list_tracker` | — | the Live Tracker's two importer-written files: `tracker_buckets` (the status buckets, named from the sheet's own legend) and `tracker_unlinked` (rows the importer could not match to a project). Read-only — both are rewritten wholesale by every import. Neither is an entity file, so their absence is normal on a store seeded before the tracker and returns empty lists rather than an error; a *corrupt* one still reports `ok:false`. |
 | `crm_info` | — | version, store path, record counts, archived- and enriched-company counts |
 
 Reads that scan companies (`list_companies`, `list_projects`, `list_shipments`,

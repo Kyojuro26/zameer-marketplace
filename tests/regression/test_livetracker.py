@@ -510,6 +510,35 @@ def _merge_checks(r, crm, tmp):
             f"'1419.0' and the project is '1419'; matching has to use the "
             f"parse both sides came through, not the display string")
 
+    # A row keyed with a PHRASE parses to no project number at all -- the real
+    # workbook has one. Adopting it under any CRM number could never retire it
+    # by key, so the card came back on every import forever. The sheet's own
+    # key, recorded on the project at adoption, is the handle that works.
+    d = store("adopted-phrase", [{"project_no": "1500", "company_id": "acme",
+                                  "status": "won", "archived": False,
+                                  "tracker_key": "Word Proposal"}],
+              changelog=log)
+    merged, rep = merge.merge_all(
+        fresh([], [{"sheet_row": 2, "reason": "no matching project",
+                    "raw_key": "Word Proposal", "parsed_keys": [],
+                    "client": "Ironvale Supply",
+                    "open_orders_notes": "no number on this one", "legs": []},
+                   {"sheet_row": 9, "reason": "no matching project",
+                    "raw_key": "Another Phrase", "parsed_keys": [],
+                    "client": "Meridian Corp",
+                    "open_orders_notes": "still live", "legs": []}]),
+        str(d))
+    left = [u.get("raw_key") for u in merged["tracker_unlinked.json"]]
+    r.check("a phrase-keyed row he adopted is retired",
+            left == ["Another Phrase"],
+            f"got {left} -- it parses to no number, so matching the parsed key "
+            f"against project_no can never retire it")
+    r.check("a phrase-keyed row he has NOT adopted still shows",
+            "Another Phrase" in left)
+    r.check("and the report names it",
+            "Word Proposal" in str(rep.get("adopted")),
+            f"got {rep.get('adopted')!r}")
+
     # and the report has to SAY what it took off the screen
     d = store("adopted-report", [{"project_no": "1419", "company_id": "acme",
                                   "status": "won", "archived": False}],
@@ -1100,6 +1129,67 @@ def run(server, crm_dir=None):
                     plain.get("ok") is True
                     and "shipments_moved" not in plain,
                     f"got {plain}")
+
+            # ---- the tracker files must be readable at runtime ---------
+            #
+            # They are deliberately NOT in ENTITY_FILES -- that drives a
+            # missing-file warning, and their absence is normal on any store
+            # from before the tracker. So they need their own reader, or the
+            # app can never refresh them and the Live screen's bucket headings
+            # and unlinked section stay frozen at page-build time.
+            st.reset(companies=[company()], projects=[project("4521")])
+            (st.path / "tracker_buckets.json").write_text(json.dumps(
+                [{"key": "action_admin", "label": "Office", "argb": "FFFF00FF"}]))
+            (st.path / "tracker_unlinked.json").write_text(json.dumps(
+                [{"sheet_row": 8, "raw_key": "1419", "client": "Ironvale"}]))
+            st.rebind()
+            tk = st.call("list_tracker")
+            r.check("list_tracker returns the buckets", tk.get("ok") is True
+                    and len(tk.get("tracker_buckets") or []) == 1, f"got {tk}")
+            r.check("and the unlinked rows",
+                    len(tk.get("tracker_unlinked") or []) == 1, f"got {tk}")
+            st.reset(companies=[company()], projects=[project("4521")])
+            tk = st.call("list_tracker")
+            r.check("a store with no tracker files is not an error",
+                    tk.get("ok") is True and tk.get("tracker_buckets") == []
+                    and tk.get("tracker_unlinked") == [],
+                    f"got {tk} -- absence is normal on any store seeded before "
+                    f"the tracker shipped, and must not read as a broken store")
+            (st.path / "tracker_unlinked.json").write_text("{}")
+            st.rebind()
+            tk = st.call("list_tracker")
+            r.check("a tracker file of the wrong shape reads as empty",
+                    tk.get("ok") is True and tk.get("tracker_unlinked") == [],
+                    f"got {tk} -- the caller embeds this into a page that dies "
+                    f"on the wrong type")
+            (st.path / "tracker_unlinked.json").write_text("{ not json")
+            st.rebind()
+            tk = st.call("list_tracker")
+            r.check("but a CORRUPT one is reported, not silently empty",
+                    tk.get("ok") is False and "_raised" not in tk,
+                    f"got {tk} -- a half-written OneDrive file is not an empty "
+                    f"tracker")
+
+            # ---- tracker_key is a writable, text-coerced identifier ---------
+            st.reset(companies=[company()], projects=[])
+            mk = st.call("create_project", fields={
+                "project_no": "1500", "company_id": "acme",
+                "tracker_key": "Word Proposal", "status": "won"})
+            r.check("a project can record the sheet key it was adopted from",
+                    mk.get("ok") is True, f"got {mk}")
+            r.check("and it is stored verbatim",
+                    (st.read("projects") or [{}])[0].get("tracker_key")
+                    == "Word Proposal",
+                    f"got {(st.read('projects') or [{}])[0].get('tracker_key')!r}")
+            st.reset(companies=[company()], projects=[])
+            st.call("create_project", fields={
+                "project_no": "1501", "company_id": "acme",
+                "tracker_key": 1419.0, "status": "won"})
+            r.check("a numeric sheet key is coerced to text like every other id",
+                    (st.read("projects") or [{}])[0].get("tracker_key") == "1419",
+                    f"got {(st.read('projects') or [{}])[0].get('tracker_key')!r} "
+                    f"-- a float here would never match the string the importer "
+                    f"writes into the unlinked row")
 
             st.reset(companies=[company()], projects=[project("4521")])
             res = st.call("update_project", project_no="4521",
