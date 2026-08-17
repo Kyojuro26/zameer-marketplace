@@ -52,6 +52,18 @@ COMMISSION_RE = re.compile(
 # share, not a collection status. Requires a name-shaped token so "50% to be
 # invoiced" and "10% for freight" do not trip it.
 REP_ALLOC_RE = re.compile(r"%\s*(?:to|for)\s+(?:[A-Z]{1,3}\b|[A-Z][a-z]+)")
+# "(D @ 25%)" -- the rep's initials BEFORE the rate, with an @. Same meaning as
+# "25% to D" and the same trap, but neither guard above sees it: COMMISSION_RE
+# needs the word, and REP_ALLOC_RE needs the name to follow the percentage.
+# Found on the real ledger, where 41 invoices reading "Invoice sent on 4/20/26
+# (D @ 25%)" were stored as partial:25% -- so the app said a customer had
+# part-paid when nothing had been paid, and quietly took 25% off what each one
+# was owed.
+#
+# INITIALS ONLY (1-3 capitals), deliberately. Allowing a spelled-out word here
+# would swallow "Deposit @ 25%", which IS a payment percentage. A miss costs a
+# needs_review entry; a false match would drop a real deposit.
+REP_AT_RE = re.compile(r"\b[A-Z]{1,3}\s*@\s*\d{1,3}\s*%")
 
 
 def commission_like(text):
@@ -59,7 +71,8 @@ def commission_like(text):
     percentage. Both call sites treat True the same way: never guess a status
     from the number, leave it open, and flag it for a person."""
     t = "" if text is None else str(text)
-    return bool(COMMISSION_RE.search(t)) or bool(REP_ALLOC_RE.search(t))
+    return (bool(COMMISSION_RE.search(t)) or bool(REP_ALLOC_RE.search(t))
+            or bool(REP_AT_RE.search(t)))
 # Payment wording lives in ONE place -- see payment_words.py. Three modules
 # need it and a checker that drifts from the importer cannot catch the
 # importer's mistake, which is exactly how "NOT PAID" read as paid for five

@@ -66,6 +66,21 @@ M = [
   "    except ValueError:\n        return True",
   "    except ValueError:\n        return False"),
 
+ # ---- the rep's cut read as a part payment -------------------------------
+ # 41 invoices on the real ledger read "Invoice sent on 4/20/26 (D @ 25%)" and
+ # were stored as partial:25%, so the app claimed a part payment that never
+ # happened and knocked 25% off what each was owed.
+ ("the initials-before-the-rate commission spelling is missed again",
+  '    return (bool(COMMISSION_RE.search(t)) or bool(REP_ALLOC_RE.search(t))\n'
+  "            or bool(REP_AT_RE.search(t)))",
+  "    return bool(COMMISSION_RE.search(t)) or bool(REP_ALLOC_RE.search(t))"),
+ ("the @ guard widens to any word, swallowing a real deposit",
+  'REP_AT_RE = re.compile(r"\\b[A-Z]{1,3}\\s*@\\s*\\d{1,3}\\s*%")',
+  'REP_AT_RE = re.compile(r"\\b[A-Za-z]+\\s*@\\s*\\d{1,3}\\s*%")'),
+ ("the @ guard demands a space, so (D@25%) slips through",
+  'REP_AT_RE = re.compile(r"\\b[A-Z]{1,3}\\s*@\\s*\\d{1,3}\\s*%")',
+  'REP_AT_RE = re.compile(r"\\b[A-Z]{1,3} @ \\d{1,3}\\s*%")'),
+
  # ---- THE TRAP: the tidy-up that loses a real key ------------------------
  ("clean() 'fixed' to drop zeros -- loses a literal 0 identifier",
   "    s = str(v).strip()\n    return s if s else None",

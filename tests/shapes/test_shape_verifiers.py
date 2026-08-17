@@ -104,6 +104,66 @@ def run(server, crm_dir=None):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # ---- the money reconciler must reject a store that does not add up -----
+    #
+    # Shape 2 again: a checker is only worth its green run if it can go red.
+    # This one exists because audit_workbook_vs_store.py compares counts and
+    # fields but never sums anything, so a store could agree field-by-field and
+    # still print a wrong total in the top bar -- which is what happened.
+    r.section("the money reconciler: known-bad inputs it must reject")
+    rec = crm / "pipeline" / "reconcile_workbook.py"
+    if not rec.exists():
+        r.check("pipeline/reconcile_workbook.py exists", False,
+                "nothing reconciles the KPI figures against the workbook")
+    else:
+        import importlib.util as _ilu
+        _sp = _ilu.spec_from_file_location("_recon", rec)
+        _rc = _ilu.module_from_spec(_sp)
+        _sp.loader.exec_module(_rc)
+
+        bad_inv = [{"invoice_no": "1", "payment_status": "partial:25%",
+                    "payment_notes": "Invoice sent on 4/20/26 (D @ 25%)"},
+                   {"invoice_no": "2", "payment_status": "partial:25%",
+                    "payment_notes": "(D@25%)"},
+                   {"invoice_no": "3", "payment_status": "partial:10%",
+                    "payment_notes": "10% comm to D"}]
+        r.check("it flags a rep's cut stored as a part payment",
+                len(_rc.suspicious_percentages(bad_inv)) == 3,
+                f"flagged {len(_rc.suspicious_percentages(bad_inv))} of 3 -- "
+                f"these are the spellings that reached the real ledger")
+        ok_inv = [{"invoice_no": "4", "payment_status": "partial:30%",
+                   "payment_notes": "30% deposit received 5/2"},
+                  {"invoice_no": "5", "payment_status": "paid",
+                   "payment_notes": "(D @ 25%)"}]
+        r.check("and does NOT flag a real deposit, or an already-paid invoice",
+                _rc.suspicious_percentages(ok_inv) == [],
+                "a checker that flags everything is not a checker")
+
+        projects = [{"project_no": "1", "company_id": "a", "revenue": 100,
+                     "year": 2026, "status": "won"}]
+        h = _rc.invoice_health([{"invoice_no": "9", "company_id": "a",
+                                 "payment_status": "open"}], projects)
+        r.check("it reports an invoice with no project link as unpriceable",
+                h["unpriced"] == 1 and h["screen_total"] == 0,
+                f"got {h} -- counting it as zero is how a receivable vanishes")
+        h2 = _rc.invoice_health([{"invoice_no": "9", "company_id": "b",
+                                  "project_no": "1", "payment_status": "open"}],
+                                projects)
+        r.check("and does not price it off ANOTHER company's project",
+                h2["unpriced"] == 1,
+                f"got {h2} -- two customers can hold one project number")
+
+        k = _rc.kpi_totals([
+            {"year": 2026, "status": "won", "revenue": 100},
+            {"year": "2026", "status": "won", "revenue": "50"},
+            {"year": 2025, "status": "won", "revenue": 999},
+            {"year": 2026, "status": "pending", "revenue": 7},
+        ], 2026)
+        r.check("its KPI maths matches build_view's, strings and all",
+                k["won"] == 150 and k["pending"] == 7,
+                f"got {k} -- a reconciler that computes the total differently "
+                f"from the screen reconciles nothing")
+
     # ---- the store/workbook audit must not certify a sabotaged store -------
     r.section("workbook audit: it must not report a destroyed store as clean")
     audit = crm / "pipeline" / "audit_workbook_vs_store.py"

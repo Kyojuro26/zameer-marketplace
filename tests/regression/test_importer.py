@@ -50,9 +50,19 @@ NO_MENTION = ["Open", "awaiting payment", "unpaid", "", "net 30"]
 # a percentage next to a commission is a payout rate, never a collection status
 COMMISSION = ["10% comm to D", "10% commission to D", "10% commissions to D",
               "10% comms to D", "10% cmsn to D", "10% to D", "15% for JS",
-              "20% rep split"]
+              "20% rep split",
+              # the initials-BEFORE-the-rate spelling, found on the real
+              # ledger: 41 invoices reading like this were stored as
+              # partial:25%, so the app reported a part payment that had not
+              # happened and knocked 25% off what each was owed
+              "Invoice sent on 4/20/26 (D @ 25%)", "(D @ 25%)", "D@25%",
+              "JS @ 10%", "Invoice sent on 05/01/26 (D @ 25%)"]
 NOT_COMMISSION = ["50%", "25% deposit received", "10% for freight",
-                  "2% discount", "50% collected"]
+                  "2% discount", "50% collected",
+                  # a spelled-out word before the @ is NOT initials, and this
+                  # one is a real payment percentage -- the guard is limited to
+                  # 1-3 capitals so it cannot swallow these
+                  "Deposit @ 25%", "Paid @ 50%", "Collected @ 30%"]
 
 
 def _em(user, host):
