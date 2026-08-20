@@ -106,10 +106,41 @@ function createDocument() {
         el.tagName = m[1].toUpperCase();
         const tm = /\btype="([^"]*)"/.exec(attrs);
         if (tm) el.type = tm[1];
+        // EVERY attribute, not just id/type/value. A guard that compares a
+        // control's value against a baseline stashed in data-* was invisible
+        // here: getAttribute() returned null for it whatever the markup said,
+        // so "unchanged" and "changed" produced the same answer and the test
+        // could not fail. One such guard shipped broken because of this.
+        el._attrs = {};
+        const attr = /([A-Za-z_:][-A-Za-z0-9_:.]*)="([^"]*)"/g;
+        let a;
+        while ((a = attr.exec(attrs)) !== null) {
+          el._attrs[a[1]] = decodeEntities(a[2]);
+        }
         const vm = /\bvalue="([^"]*)"/.exec(attrs);
         // assign through the setter so date sanitization applies
         el.value = vm ? decodeEntities(vm[1]) : '';
         el.disabled = false;   // a re-rendered control starts enabled
+      }
+      // A <select>'s value is its SELECTED option -- and, per the HTML
+      // selectedness-reset algorithm, the FIRST option when none is marked.
+      // That fallback is the whole point: a stored value the option list omits
+      // makes the browser report a different value than the markup implies,
+      // which is how a save silently writes something nobody chose. A shim
+      // that reports '' for every select cannot express that at all.
+      const sel = /<select\b([^>]*)>([\s\S]*?)<\/select>/gi;
+      let sm;
+      while ((sm = sel.exec(html)) !== null) {
+        const idm = /\bid="([^"]*)"/.exec(sm[1]);
+        if (!idm) continue;
+        const el = doc.getElementById(idm[1]);
+        const opts = [...sm[2].matchAll(/<option\b([^>]*)>/gi)].map(o => ({
+          value: (/\bvalue="([^"]*)"/.exec(o[1]) || [, ''])[1],
+          selected: /\bselected\b/.test(o[1]),
+        }));
+        el.options = opts;
+        const chosen = opts.find(o => o.selected) || opts[0];
+        el.value = chosen ? decodeEntities(chosen.value) : '';
       }
       return made;
     },

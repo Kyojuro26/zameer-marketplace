@@ -27,7 +27,7 @@ not evidence. Re-run it after any change to the harness, and bump
 | Path | What it protects |
 |---|---|
 | `lib/harness.py` | scratch stores, real `mcp.call_tool` dispatch, fixtures |
-| `lib/dom.js` | DOM shim — **emulates `<input type=date>` sanitization** |
+| `lib/dom.js` | DOM shim — **emulates `<input type=date>` sanitization**, every attribute, and `<select>` selectedness |
 | `lib/view.js` | builds the real bundle and runs it under node |
 | `regression/test_identifiers.py` | `_key`/`_canon`/`_resolve`; mint vs lookup |
 | `regression/test_visibility.py` | what archiving hides, and must never hide |
@@ -63,6 +63,19 @@ Two harness rules, both learned expensively:
   stores whatever you assign makes every date-wipe test **unable to fail**,
   because the baseline is snapshotted from the control after insertion. An
   earlier harness had exactly that hole and its date tests were decorative.
+- The same hole reappeared in a different shape: the shim recorded only
+  `id`/`type`/`value` and modelled no `<option selected>`, so `getAttribute`
+  returned `null` for any `data-*` baseline and every `<select>` read `""`.
+  Both sides of a send-only-if-changed guard were therefore always equal, and
+  the guard shipped broken with a green test. It now parses every attribute and
+  resolves a select's value from its selected option — falling back to the
+  first, as the HTML selectedness-reset algorithm does, which is the case that
+  actually bites.
+- `launch({keepCall: true})` stubs the **transport** rather than `CRM.call`.
+  The default patch replaces `CRM.call` wholesale, so its dispatch and error
+  handling are never executed — which is how a version where one rejecting
+  call discarded five good answers passed the suite. Any test about what
+  happens when a call FAILS must use `keepCall`.
 
 ## The three shapes
 

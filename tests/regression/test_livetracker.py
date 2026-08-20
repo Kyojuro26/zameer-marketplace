@@ -535,9 +535,56 @@ def _merge_checks(r, crm, tmp):
             f"against project_no can never retire it")
     r.check("a phrase-keyed row he has NOT adopted still shows",
             "Another Phrase" in left)
-    r.check("and the report names it",
-            "Word Proposal" in str(rep.get("adopted")),
+    r.check("and the report names the PROJECT, not the sheet phrase",
+            rep.get("adopted") == ["1500"],
+            f"got {rep.get('adopted')!r} -- format_report prints these under "
+            f"\"you already gave each of these a project number\", so naming "
+            f"the phrase describes a project that does not exist")
+    out = merge.format_report(rep)
+    r.check("and the printed line reads as a real project",
+            "project 1500" in out and "project Word Proposal" not in out,
+            f"got:\n{out}")
+
+    # A key cell the sheet repeats. parse_project_key's own docstring names
+    # 'Word Proposal' and 'Check' as real key shapes, so two rows sharing one
+    # is an ordinary week. Retiring on a non-unique key drops a job nobody
+    # adopted -- and this file calls a dropped job worse than a duplicate card.
+    d = store("adopted-dupe-key", [{"project_no": "1500", "company_id": "acme",
+                                    "status": "won", "archived": False,
+                                    "tracker_key": "Check"}], changelog=log)
+    merged, rep = merge.merge_all(
+        fresh([], [{"sheet_row": 2, "reason": "no matching project",
+                    "raw_key": "Check", "parsed_keys": [], "client": "Ace",
+                    "open_orders_notes": "the one he adopted", "legs": []},
+                   {"sheet_row": 9, "reason": "no matching project",
+                    "raw_key": "Check", "parsed_keys": [], "client": "Northgate",
+                    "open_orders_notes": "A DIFFERENT LIVE JOB",
+                    "legs": [{"vendor_po_raw": "VPO-9", "ship_date": None}]}]),
+        str(d))
+    left = [u.get("sheet_row") for u in merged["tracker_unlinked.json"]]
+    r.check("a repeated key cell retires NEITHER row",
+            sorted(left) == [2, 9],
+            f"got rows {left} -- the un-adopted job has vendor legs and money "
+            f"against it; dropping it hides live work, and the report would "
+            f"claim he adopted it")
+    r.check("and nothing is claimed as adopted", not rep.get("adopted"),
             f"got {rep.get('adopted')!r}")
+
+    # Archiving is this product's delete, so an archived adopted project must
+    # release its tracker row rather than keep suppressing it -- otherwise the
+    # job is on neither list and only a chat tool call can recover it.
+    d = store("adopted-archived", [{"project_no": "1500", "company_id": "acme",
+                                    "status": "won", "archived": True,
+                                    "tracker_key": "Word Proposal"}],
+              changelog=log)
+    merged, _ = merge.merge_all(
+        fresh([], [{"sheet_row": 2, "reason": "no matching project",
+                    "raw_key": "Word Proposal", "parsed_keys": [],
+                    "client": "Ace", "open_orders_notes": "n", "legs": []}]),
+        str(d))
+    r.check("an archived adoption gives its tracker row back",
+            [u.get("sheet_row") for u in merged["tracker_unlinked.json"]] == [2],
+            f"got {merged['tracker_unlinked.json']!r}")
 
     # and the report has to SAY what it took off the screen
     d = store("adopted-report", [{"project_no": "1419", "company_id": "acme",
@@ -1162,6 +1209,39 @@ def run(server, crm_dir=None):
                     tk.get("ok") is True and tk.get("tracker_unlinked") == [],
                     f"got {tk} -- the caller embeds this into a page that dies "
                     f"on the wrong type")
+            # a wrong-shaped BUCKETS file too -- the unlinked one is now also
+            # walked by the archived filter, whose comprehension quietly yields
+            # [] for a dict, so it can no longer prove the coercion works
+            (st.path / "tracker_buckets.json").write_text('"not a list"')
+            (st.path / "tracker_unlinked.json").write_text("[]")
+            st.rebind()
+            tk = st.call("list_tracker")
+            r.check("a wrong-shaped BUCKETS file reads as empty",
+                    tk.get("ok") is True and tk.get("tracker_buckets") == [],
+                    f"got {tk}")
+
+            # archiving is this product's delete, and an unlinked row carries a
+            # client NAME rather than a company_id -- so the tool has to do the
+            # same squash-match the page build does, or the app's own refresh
+            # puts an archived customer's row back a second after every load
+            st.reset(companies=[company("gone", "Gone Away Inc"), company()],
+                     projects=[])
+            cos = st.read("companies")
+            cos[0]["archived"] = True
+            st.write("companies", cos)
+            (st.path / "tracker_buckets.json").write_text("[]")
+            (st.path / "tracker_unlinked.json").write_text(json.dumps(
+                [{"sheet_row": 8, "client": "Gone Away Inc", "legs": []},
+                 {"sheet_row": 9, "client": "Ace Manufacturing", "legs": []}]))
+            st.rebind()
+            tk = st.call("list_tracker")
+            rows = [u.get("sheet_row") for u in (tk.get("tracker_unlinked") or [])]
+            r.check("an archived customer's unlinked row is not handed back",
+                    rows == [9],
+                    f"got rows {rows} -- the page build strips these; the tool "
+                    f"handing them back undoes that on every refresh")
+
+            st.reset(companies=[company()], projects=[project("4521")])
             (st.path / "tracker_unlinked.json").write_text("{ not json")
             st.rebind()
             tk = st.call("list_tracker")

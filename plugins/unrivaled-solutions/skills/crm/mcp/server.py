@@ -170,7 +170,7 @@ LOCK_STALE_SECONDS = 30   # far longer than any single tool call should take
 LOCK_WAIT_SECONDS = 10    # give up and surface a clear error rather than hang
 
 
-SERVER_VERSION = "0.1.33"
+SERVER_VERSION = "0.1.34"
 
 
 class StoreError(Exception):
@@ -1384,6 +1384,13 @@ def update_project(project_no: str, fields: dict) -> dict:
         return _err(e)
 
 
+def _squash_name(v):
+    """Company names compared the way build_view compares them for the tracker
+    scrub: lowercase, alphanumerics only. Only ever HIDES a row, so a near-miss
+    costs a visible card, never a wrong record."""
+    return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
+
+
 @mcp.tool()
 def list_tracker() -> dict:
     """The Live Tracker's two importer-written files: the status buckets read
@@ -1399,9 +1406,24 @@ def list_tracker() -> dict:
     whole "Not in the CRM yet" section frozen at page-build time -- the screen
     looked freshly refreshed while a third of it was not."""
     try:
+        buckets = STORE.load_side("tracker_buckets.json")
+        unlinked = STORE.load_side("tracker_unlinked.json")
+        # Archived companies are stripped here for the same reason every other
+        # read takes include_archived: archiving is this product's delete. An
+        # unlinked row carries the sheet's raw client NAME, not a company_id --
+        # that is why it is unlinked -- so the match is on a squashed name,
+        # exactly as build_view does when it bakes the page. Without it the
+        # app's refresh overwrote the scrubbed array with an unscrubbed one a
+        # second after every load, and an archived customer's row came back
+        # with an "Add to CRM" button that could no longer find them.
+        arch = {_squash_name(c.get("display_name"))
+                for c in STORE.load("companies") if c.get("archived")}
+        arch.discard("")
+        unlinked = [u for u in unlinked
+                    if not (isinstance(u, dict)
+                            and _squash_name(u.get("client")) in arch)]
         return {"ok": True, "interface_version": VERSION,
-                "tracker_buckets": STORE.load_side("tracker_buckets.json"),
-                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}
+                "tracker_buckets": buckets, "tracker_unlinked": unlinked}
     except StoreError as e:
         return _err(e)
 
@@ -2474,6 +2496,17 @@ def crm_info() -> dict:
         out["enriched_companies"] = len(STORE.load_enrichment())
     except StoreError as ex:
         problems["enrichment/archive"] = str(ex)
+    # The Live Tracker's two files are outside ENTITY_FILES, so the counts loop
+    # above cannot see them -- which meant a half-synced OneDrive tracker file
+    # produced an empty "Not in the CRM yet" section, a list_tracker returning
+    # ok:false, and a store-health tool reporting everything fine. Counting
+    # them here is the only place the operator would ever be told.
+    for _f, _label in (("tracker_buckets.json", "tracker_buckets"),
+                       ("tracker_unlinked.json", "tracker_unlinked")):
+        try:
+            counts[_label] = len(STORE.load_side(_f))
+        except StoreError as ex:
+            problems[_label] = str(ex)
     # A store file this build had to create at first boot is surfaced here,
     # not buried in a temp-dir launch log. If it was missing because OneDrive
     # had not synced it down, this is the operator's only signal.

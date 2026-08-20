@@ -65,14 +65,32 @@ function launch(opts) {
 
   // Record every tool call and answer it. Patched inside the context because
   // CRM is a lexical const.
+  //
+  // keepCall: stub the TRANSPORT instead, so the real CRM.call runs. Replacing
+  // CRM.call outright means its own dispatch and error handling are never
+  // executed by any test -- which is how a version where one rejecting call
+  // discarded five good answers passed the suite. Anything asserting how the
+  // app behaves when a call FAILS has to take this path; the default is fine
+  // for tests that only care which tools were asked for.
   vm.runInContext(`
     globalThis.__calls = [];
     ${opts.mode ? `CRM.mode = ${JSON.stringify(opts.mode)};` : ''}
-    CRM.call = function(tool, args){
+    ${opts.keepCall ? '' : `CRM.call = function(tool, args){
       globalThis.__calls.push({tool: tool, args: JSON.parse(JSON.stringify(args))});
       return globalThis.__respond(tool, args);
-    };
+    };`}
   `, sandbox);
+  if (opts.keepCall) {
+    // http mode's transport. Rejecting here is what a server that does not
+    // have the tool actually does to the cowork path, and what a dropped
+    // connection does to this one.
+    sandbox.fetch = (url, init) => {
+      const body = JSON.parse((init && init.body) || '{}');
+      sandbox.__calls.push({ tool: body.tool, args: body.args || {} });
+      const r = opts.onCall ? opts.onCall(body.tool, body.args || {}) : { ok: true };
+      return Promise.resolve(r).then(v => ({ status: 200, json: async () => v }));
+    };
+  }
   sandbox.__respond = (tool, args) => {
     if (opts.onCall) {
       const r = opts.onCall(tool, args);

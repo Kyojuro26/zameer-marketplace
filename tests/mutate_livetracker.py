@@ -205,13 +205,16 @@ MERGE = [
  ("the report stops naming the rows it dropped",
   '            report["adopted"] = adopted', "            pass"),
  ("a phrase-keyed row he adopted comes back forever",
-  "            if not hit and raw and raw in by_sheet_key:\n"
-  "                hit = raw\n", ""),
- ("the sheet-key handle matches any project, adopted or not",
-  '        by_sheet_key = {_s(p.get("tracker_key")) for p in projs\n'
-  '                        if _s(p.get("tracker_key"))}',
-  '        by_sheet_key = {_s(u2) for u2 in [None]} | {_s(p.get("project_no"))\n'
-  "                        for p in projs}"),
+  "            if not hit and raw and raw in by_sheet_key and raw_counts.get(raw) == 1:\n"
+  "                hit = by_sheet_key[raw]\n", ""),
+ ("a repeated key cell retires every row carrying it",
+  "            if not hit and raw and raw in by_sheet_key and raw_counts.get(raw) == 1:",
+  "            if not hit and raw and raw in by_sheet_key:"),
+ ("an ARCHIVED adoption keeps suppressing its tracker row",
+  "            if k and not p.get(\"archived\"):",
+  "            if k:"),
+ ("the report names the sheet phrase instead of the project",
+  "                hit = by_sheet_key[raw]", "                hit = raw"),
 ]
 
 # -------------------------------------------------------------------- view ---
@@ -431,8 +434,8 @@ VIEW = [
  ("adoption stops recording the key the sheet carries",
   "    tracker_key: st(u.raw_key) || null,\n", ""),
  ("a live refresh stops pulling the tracker files",
-  "      CRM.call('list_invoices', {}),  CRM.call('list_tracker', {})]);",
-  "      CRM.call('list_invoices', {})]);"),
+  "      if (Array.isArray(tk.tracker_buckets))  DATA.tracker_buckets  = tk.tracker_buckets;\n",
+  ""),
  ("a refresh blanks the tracker sections when the server cannot answer",
   "      if (Array.isArray(tk.tracker_buckets))  DATA.tracker_buckets  = tk.tracker_buckets;\n"
   "      if (Array.isArray(tk.tracker_unlinked)) DATA.tracker_unlinked = tk.tracker_unlinked;",
@@ -460,12 +463,38 @@ VIEW = [
   "    fields.tracker_status = trk.value || null;\n"
   "  }",
   "  if(trk){ fields.tracker_status = trk.value || null; }"),
- ("the changed-check trips on empty-versus-absent again",
-  "  if(trk && (trk.value || '') !== (trk.getAttribute('data-orig') || '')){",
-  "  if(trk && trk.value !== trk.getAttribute('data-orig')){"),
  ("an unrecognised bucket is no longer explained in the form",
-  "      ${knownBucket(p.tracker_status) ? '' : (st(p.tracker_status)",
-  "      ${true ? '' : (st(p.tracker_status)"),
+  "        : (knownBucket(p.tracker_status) ? ''",
+  "        : (true ? ''"),
+ ("the no-status helper text goes back to being unreachable",
+  "      ${!st(p.tracker_status)", "      ${false && !st(p.tracker_status)"),
+ # ---- the re-review pass ------------------------------------------------------
+ ("one rejecting call discards every sibling answer again",
+  "    try{\n"
+  "      return await this._call(tool, args);\n"
+  "    }catch(e){\n"
+  "      return {ok:false, error:(e && e.message) || String(e), tool};\n"
+  "    }\n"
+  "  },\n"
+  "  async _call(tool, args){",
+  "    return await this._call(tool, args);\n"
+  "  },\n"
+  "  async _call(tool, args){"),
+ ("the bucket baseline goes back to the value we MEANT to render",
+  "  const _trk = document.getElementById('f_tracker');\n"
+  "  if(_trk) _trk.setAttribute('data-orig', _trk.value);\n", ""),
+ ("an unrecognised bucket leaves no option selected again",
+  "  let h = `<option value=\"\"${knownBucket(cur) && cur ? '' : ' selected'}>— none —</option>`;",
+  "  let h = `<option value=\"\"${cur ? '' : ' selected'}>— none —</option>`;"),
+ ("the baseline is not refreshed after a save, so a revert is a no-op",
+  "    if(trk) trk.setAttribute('data-orig', trk.value);\n", ""),
+ ("adoption stops writing the sheet key (behavioural, not a grep)",
+  "    tracker_key: st(u.raw_key) || null,",
+  "    tracker_key: st(u.raw_key) && null,"),
+ ("the refresh calls list_tracker and throws the answer away",
+  "      if (Array.isArray(tk.tracker_unlinked)) DATA.tracker_unlinked = tk.tracker_unlinked;\n",
+  ""),
+
 ]
 
 
@@ -524,20 +553,24 @@ SERVER = [
   "            return json.load(f)"),
  ("list_tracker passes a wrong-shaped file straight through",
   "        return v if isinstance(v, list) else []", "        return v"),
+ # Anchored on the RETURN line, not on the decorator that follows the function.
+ # An anchor spanning a newline into the next decorator puts a letter directly
+ # before the at-sign, and the PII sweep's shape regex reads that as an email
+ # address and fails the whole tree closed. The sweep is right to; the anchor
+ # was the problem, and so was the first version of this very comment.
  ("list_tracker swallows a corrupt file as empty",
-  "    try:\n"
-  "        return {\"ok\": True, \"interface_version\": VERSION,\n"
-  '                "tracker_buckets": STORE.load_side("tracker_buckets.json"),\n'
-  '                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}\n'
+  '                "tracker_buckets": buckets, "tracker_unlinked": unlinked}\n'
   "    except StoreError as e:\n"
   "        return _err(e)",
-  "    try:\n"
-  "        return {\"ok\": True, \"interface_version\": VERSION,\n"
-  '                "tracker_buckets": STORE.load_side("tracker_buckets.json"),\n'
-  '                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}\n'
+  '                "tracker_buckets": buckets, "tracker_unlinked": unlinked}\n'
   "    except StoreError:\n"
   '        return {"ok": True, "interface_version": VERSION,\n'
   '                "tracker_buckets": [], "tracker_unlinked": []}'),
+ ("list_tracker hands back an archived customer's unlinked row",
+  "        unlinked = [u for u in unlinked\n"
+  "                    if not (isinstance(u, dict)\n"
+  '                            and _squash_name(u.get("client")) in arch)]\n',
+  ""),
 ]
 
 

@@ -25,10 +25,22 @@
 //
 // What this file does NOT verify is listed in the header of
 // test_drawer_close.js and applies here too: no CSS layout, no tab order, no
-// real focus. One shim limitation matters specifically here -- the DOM shim
-// gives every <select> an empty value regardless of which <option> carries
-// `selected`, so the preselect assertions below read the generated markup
-// rather than el.value.
+// real focus.
+//
+// Two claims that USED to sit here were wrong, and each cost a real bug:
+//
+//   * "the shim gives every <select> an empty value regardless of which
+//     <option> carries selected" -- true when written, and used to justify
+//     asserting on markup instead of behaviour. lib/dom.js now models
+//     attributes and selectedness, and doing so immediately turned a passing
+//     check red against unmodified product code.
+//   * "refreshData cannot complete under this harness because fetch never
+//     settles" -- simply false. lib/view.js patches CRM.call INSIDE the vm;
+//     only CRM.detect() touches fetch. Pass keepCall:true to stub the
+//     transport instead and the real dispatch, including its error path, runs.
+//
+// A documented limitation is a licence to write a weaker test, so it has to be
+// re-checked rather than inherited.
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -212,6 +224,7 @@ async function run(crmDir) {
   const store = seedStore(path.join(tmp, 'store'));
   const { js, html } = buildBundle(crmDir, store, tmp);
   const app = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
+  const DATA_SNAP = JSON.parse(app.eval('JSON.stringify(DATA)'));
   const ev = (code) => app.eval(code);
   freezeClock(app, TODAY);
   r.check('the frozen clock reaches the view', ev('todayISO()') === TODAY,
@@ -582,6 +595,14 @@ async function run(crmDir) {
     r.check('no synthetic key is smuggled in as the number',
       String(f.project_no) !== '1419',
       'the sheet key is shown to him, never written as the CRM key');
+    // BEHAVIOURAL. A source-text grep for `tracker_key: st(u.raw_key)` passed
+    // while `st(u.raw_key) && null` -- which writes null and brings the
+    // phantom card back forever -- survived the entire module.
+    r.check('the sheet key is recorded so the row can be retired',
+      String(f.tracker_key) === '1419',
+      `got ${JSON.stringify(f.tracker_key)} -- a tracker row need not be keyed `
+      + 'with a number; without the sheet key that card returns every import '
+      + 'whatever number he gives it');
     r.check('the sheet row it came from is recorded on the project',
       String(f.tracker_row) === '8',
       `got ${JSON.stringify(f.tracker_row)} -- a numberless row has no key to `
@@ -763,11 +784,33 @@ async function run(crmDir) {
     /<option value="action_admin"/.test(orphanBody)
     && /<option value="awaiting_materials"/.test(orphanBody));
   r.check('and a way to clear it',
-    /<option value="">— none —<\/option>/.test(orphanBody));
+    /<option value=""( selected)?>— none —<\/option>/.test(orphanBody));
+  // The markup must AGREE with what the browser will actually report. An
+  // unrecognised value matches no option, so the browser selects the first one
+  // -- if the markup does not say so, the rendered value and the intended
+  // value disagree and the change-guard fires on an untouched save.
+  const trkSel = (h) => (h.match(/<select id="f_tracker"[\s\S]*?<\/select>/) || [''])[0];
+  r.check('and — none — is the option actually marked selected',
+    /<option value="" selected>/.test(trkSel(orphanBody)),
+    'scoped to the tracker select: opts() renders the COLLECTION select with '
+    + '<option value="" selected> too, so a page-wide regex passes on markup '
+    + 'that never marks the tracker placeholder at all');
   r.check('an unrecognised stored value is NOT offered as an option',
     !/<option value="done"/.test(orphanBody),
     'the server validates this field, so offering a value it would reject '
     + 'fails the WHOLE save on an unrelated edit');
+  // the no-status branch was unreachable: knownBucket() is true for an empty
+  // status, so the else-arm required a non-empty one and its inner false-arm
+  // could never render
+  ev("closeDrawer(); openProject('4504');");   // no tracker_status at all
+  const noneBody = app.doc.getElementById('dbody').innerHTML;
+  r.check('a job with no bucket is told what the control is for',
+    /Not on the\s+Live screen/.test(noneBody),
+    'this branch could never render, so the one control with no obvious '
+    + 'purpose had no explanation at all');
+  r.check('and is not told its status is unrecognised',
+    !/legend does not name/.test(noneBody));
+  ev("closeDrawer(); openProject('4507');");
   r.check('it says in words what is wrong instead',
     /legend does not name/.test(orphanBody)
     && orphanBody.includes('<b>done</b>'),
@@ -793,28 +836,114 @@ async function run(crmDir) {
   r.check('choosing a bucket does send it',
     !!fixed && fixed.args.fields.tracker_status === 'action_owner',
     `got ${JSON.stringify(fixed && fixed.args.fields.tracker_status)}`);
+  // ...and back again, in one drawer session, on a project that OPENS on a
+  // real bucket. doSave never re-renders #dbody, so without re-baselining the
+  // control still measures against the value it had when the drawer opened --
+  // and returning to that value looks unchanged, sends nothing, and flashes
+  // "Saved" over a store that kept the first change. On the orphan the
+  // baseline is '', so no edit can ever return to it and the bug cannot show.
+  ev("closeDrawer(); openProject('4501');");   // opens on action_admin
+  app.resetCalls();
+  ev("document.getElementById('f_tracker').value='action_owner';");
+  await ev("saveProject('4501')");
+  ev("document.getElementById('f_tracker').value='action_admin';");
+  await ev("saveProject('4501')");
+  const backs = app.calls().filter(c => c.tool === 'update_project'
+                                   && 'tracker_status' in c.args.fields);
+  r.check('changing the bucket back in the same session is still sent',
+    backs.length === 2 && backs[1].args.fields.tracker_status === 'action_admin',
+    `got ${JSON.stringify(backs.map(c => c.args.fields.tracker_status))} -- a `
+    + 'stale baseline swallows the correction and reports success over a store '
+    + 'that kept the first change');
+  ev("closeDrawer(); openProject('4507');");
+  app.resetCalls();
+  ev("document.getElementById('f_tracker').value='action_owner';");
+  await ev("saveProject('4507')");
   ev("closeDrawer(); setFilter('live');");
   r.check('and the row leaves the "not recognised" section',
     !/Status not recognised/.test(app.doc.getElementById('main').innerHTML),
     'it was the only unrecognised row');
 
-  // ---- adoption records the key the SHEET carries --------------------------
-  r.check('adoption writes the sheet key so the row can be retired',
-    /tracker_key: st\(u\.raw_key\)/.test(js),
-    'a tracker row need not be keyed with a number -- on the real workbook one '
-    + 'is keyed with a phrase, which parses to nothing, so without this that '
-    + 'card returns every import no matter what number he gives it');
 
-  // ---- the refresh pulls the tracker files too -----------------------------
-  r.check('a live refresh asks for the tracker files as well',
-    /CRM\.call\('list_tracker'/.test(js),
-    'refreshing five of seven inputs left the bucket headings and the whole '
-    + 'unlinked section frozen at page-build time');
-  r.check('and only overwrites them when the answer is a list',
-    /Array\.isArray\(tk\.tracker_buckets\)/.test(js)
-    && /Array\.isArray\(tk\.tracker_unlinked\)/.test(js),
-    'a server older than the tool returns ok:false, and an app must not blank '
-    + 'a section it simply cannot refresh');
+  // ---- the refresh, DRIVEN -------------------------------------------------
+  //
+  // The header used to claim refreshData could not complete under this harness
+  // because fetch never settles. That was wrong: lib/view.js patches CRM.call
+  // INSIDE the vm, and only CRM.detect() touches fetch. The claim was used to
+  // justify source-text assertions here, and `if (false && tk && tk.ok)` --
+  // which throws the tracker answer away -- survived the whole module as a
+  // result.
+  {
+    const ans = {
+      list_companies: {ok: true, companies: DATA_SNAP.companies},
+      find_contacts:  {ok: true, contacts: []},
+      list_projects:  {ok: true, projects: DATA_SNAP.projects},
+      list_shipments: {ok: true, shipments: DATA_SNAP.shipments},
+      list_invoices:  {ok: true, invoices: []},
+      list_tracker:   {ok: true,
+                       tracker_buckets: [{key: 'action_admin', label: 'REFRESHED'}],
+                       tracker_unlinked: [{sheet_row: 99, client: 'From Refresh',
+                                           legs: []}]},
+    };
+    const live = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http',
+                          keepCall: true,
+                          onCall: (t) => ans[t] || {ok: false} });
+    freezeClock(live, TODAY);
+    await live.eval('refreshData()');
+    r.check('a live refresh pulls the tracker files too',
+      live.eval("String((DATA.tracker_buckets||[]).map(b=>b.label))") === 'REFRESHED',
+      'refreshing five of seven inputs left the bucket headings and the whole '
+      + 'unlinked section frozen at page-build time');
+    r.check('and the refreshed unlinked rows reach the app',
+      live.eval("String(arr(DATA.tracker_unlinked).filter(u=>u).map(u=>u.sheet_row))")
+        === '99',
+      'filter(u=>u) first: the built fixture carries a deliberate leading null, '
+      + 'and mapping over it throws before this module can print a verdict');
+
+    // ONE ABSENT TOOL MUST NOT DISCARD FIVE GOOD ANSWERS. Against a server
+    // older than list_tracker the call REJECTS rather than answering -- which
+    // is why probeCowork wraps its own calls -- and all six sat in one
+    // Promise.all, so the whole refresh was thrown away until restart.
+    const stale = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      keepCall: true,
+      onCall: (t) => t === 'list_tracker'
+        ? Promise.reject(new Error('Unknown tool: list_tracker'))
+        : (t === 'list_projects'
+            ? {ok: true, projects: [{company_id: 'acme', project_no: 'REFRESHED',
+                                     status: 'won', year: 2026, archived: false,
+                                     tracker_status: 'action_admin'}]}
+            : ans[t] || {ok: true}) });
+    freezeClock(stale, TODAY);
+    await stale.eval('refreshData()');
+    r.check('an absent tool does not discard the other five answers',
+      stale.eval("String((DATA.projects||[]).map(p=>p.project_no))") === 'REFRESHED',
+      'one rejecting call used to reject the whole Promise.all, leaving every '
+      + 'section on build-time data with no recovery short of a restart');
+    r.check('and the refresh is not reported as failed',
+      !/refresh failed/.test(stale.doc.getElementById('modePill').textContent),
+      `got ${stale.doc.getElementById('modePill').textContent}`);
+    r.check('while the section it could not refresh is left as built, not blanked',
+      stale.eval("String(arr(DATA.tracker_unlinked).filter(u=>u).length)") !== '0',
+      'an older server must not cost him the rows the page was built with');
+
+    // A server that ANSWERS, but with the wrong shape. ok:true short-circuits
+    // the guard above, so only the Array.isArray checks stand between a
+    // malformed answer and a page that throws on its next render.
+    const junk = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      keepCall: true,
+      onCall: (t) => t === 'list_tracker'
+        ? {ok: true, tracker_buckets: 'not a list', tracker_unlinked: {}}
+        : (ans[t] || {ok: true}) });
+    freezeClock(junk, TODAY);
+    await junk.eval('refreshData()');
+    r.check('a wrong-shaped answer does not replace a good section',
+      junk.eval("String(Array.isArray(DATA.tracker_buckets))") === 'true'
+      && junk.eval("String(Array.isArray(DATA.tracker_unlinked))") === 'true',
+      'a string or an object here throws at the next render and blanks the app');
+    let junkErr = '';
+    try { junk.eval('renderMain();'); } catch (e) { junkErr = String(e).slice(0, 120); }
+    r.check('and the screen still renders after it', !junkErr, junkErr);
+  }
 
   // ---- leaving the screen ---------------------------------------------------
   ev("select('acme');");

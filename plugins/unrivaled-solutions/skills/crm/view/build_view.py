@@ -294,6 +294,19 @@ const CRM = {
     if (this.mode !== 'embedded') await refreshData();
   },
   async call(tool, args){
+    // NEVER REJECTS. Callers gather several of these in one Promise.all, so a
+    // single rejection used to discard every sibling answer: against a server
+    // older than one of the tools, refreshData threw away five good responses
+    // and left the whole app on build-time data until restart. probeCowork
+    // already wraps its own calls for exactly this reason -- an unknown tool
+    // name rejects rather than answering -- and this path did not.
+    try{
+      return await this._call(tool, args);
+    }catch(e){
+      return {ok:false, error:(e && e.message) || String(e), tool};
+    }
+  },
+  async _call(tool, args){
     if (this.mode === 'cowork'){
       const r = await window.cowork.callMcpTool(TOOL_PREFIX + tool, args || {});
       if (r.isError) return {ok:false, error:(r.content && r.content[0] && r.content[0].text) || 'MCP error'};
@@ -603,7 +616,13 @@ function knownBucket(key){
 }
 function trackerOpts(current){
   const cur = st(current);
-  let h = `<option value=""${cur ? '' : ' selected'}>— none —</option>`;
+  // `selected` on — none — whenever the stored value is not a bucket the
+  // legend names -- not merely when it is empty. An unrecognised value matches
+  // no option, and per the HTML selectedness-reset algorithm the browser then
+  // selects the FIRST option anyway. Leaving the markup silent about that made
+  // the rendered value ('') disagree with what the markup implied ('done'),
+  // which is what let an untouched save read as an edit.
+  let h = `<option value=""${knownBucket(cur) && cur ? '' : ' selected'}>— none —</option>`;
   trackerBuckets().forEach(b=>{
     h += `<option value="${esc(b.key)}"${b.key===cur ? ' selected' : ''}>`
        + `${esc(bucketLabel(b.key))}</option>`;
@@ -1731,14 +1750,15 @@ function openProject(pno){
     <div class="field"><label>Live Tracker bucket</label>
       <select id="f_tracker" data-orig="${esc(st(p.tracker_status))}">
         ${trackerOpts(p.tracker_status)}</select>
-      ${knownBucket(p.tracker_status) ? '' : (st(p.tracker_status)
-        ? `<p class="muted" style="margin:4px 0 0;font-size:11px">This job is
+      ${!st(p.tracker_status)
+        ? `<p class="muted" style="margin:4px 0 0;font-size:11px">Not on the
+             Live screen. The import sets this from the colour of the row's
+             notes cell in your tracker.</p>`
+        : (knownBucket(p.tracker_status) ? ''
+        : `<p class="muted" style="margin:4px 0 0;font-size:11px">This job is
              stored as <b>${esc(st(p.tracker_status))}</b>, which your tracker's
              legend does not name — it shows under "Status not recognised" on
-             the Live screen. Pick a bucket here to correct it.</p>`
-        : `<p class="muted" style="margin:4px 0 0;font-size:11px">Not on the
-             Live screen. The import sets this from the colour of the row's
-             notes cell in your tracker.</p>`)}</div>
+             the Live screen. Pick a bucket here to correct it.</p>`)}</div>
     <div class="row2">
       <div class="field"><label>Revenue ($)</label><input id="f_revenue" type="number" step="0.01" value="${p.revenue==null?'':esc(p.revenue)}"/></div>
       <div class="field"><label>Total cost ($)</label><input id="f_cost" type="number" step="0.01" value="${p.total_cost==null?'':esc(p.total_cost)}"/></div>
@@ -1762,6 +1782,16 @@ function openProject(pno){
     <button class="pill-btn" style="background:var(--red-soft);color:var(--red);margin-left:8px" onclick="deleteProject('${jesc(pno)}')">Delete project</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px" id="drawerNote"></p>`;
+  // Snapshot the bucket baseline FROM THE CONTROL, after the markup has been
+  // parsed -- never from the string we intended to put there. This is the rule
+  // snapDates already states for the date inputs, and the tracker select broke
+  // it: `data-orig` held the STORED value while the control reported what the
+  // browser actually selected, so for a status the legend does not name the
+  // two disagreed and every unrelated save sent tracker_status:null. The job
+  // then failed liveRows' truthiness test and left the Live screen entirely --
+  // out of the very section that promises "they are here rather than hidden".
+  const _trk = document.getElementById('f_tracker');
+  if(_trk) _trk.setAttribute('data-orig', _trk.value);
   document.getElementById('drawerNote').textContent = CRM.mode==='embedded'
     ? 'Demo mode: this save lasts only for this browser session.'
     : 'Saves persist to your CRM records through the validated write interface.';
@@ -1867,6 +1897,13 @@ async function saveProject(pnoArg){
   const ok = await doSave('update_project', {project_no: pno, fields}, (r)=>{
     const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
     Object.assign(p, r.project || fields);
+    // Re-baseline the bucket. doSave never re-renders #dbody, so without this
+    // the control still measures against the value it had when the drawer
+    // opened: change the bucket, save, change it BACK in the same session, and
+    // the second save matches the stale baseline, sends nothing, and flashes
+    // "Saved" over a store that still holds the first change. The rename path
+    // already does exactly this for f_pno.
+    if(trk) trk.setAttribute('data-orig', trk.value);
   });
   // A rename changes the project_no baked into this drawer's own button
   // handlers (Delete, + Add shipment) -- reopen so they point at the new
