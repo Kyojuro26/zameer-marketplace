@@ -63,25 +63,68 @@ function launch(opts) {
   vm.createContext(sandbox);
   vm.runInContext(js, sandbox, { filename: 'crm-view.js' });
 
-  // Record every tool call and answer it. Patched inside the context because
-  // CRM is a lexical const.
+  // Answer every tool call by stubbing the TRANSPORT, never by replacing
+  // CRM.call.
+  //
+  // Replacing CRM.call was the old approach and it meant CRM.call's own
+  // dispatch and error handling were executed by no test at all. A version
+  // where one rejecting call discarded five good answers passed the whole
+  // suite, because the stub -- not the product -- decided what a failure did.
+  // The stub and the app then drifted apart precisely on the behaviour being
+  // changed, and the tests kept measuring the stub.
+  //
+  // Stubbing the transport instead means the real CRM.call runs in every mode,
+  // and a rejecting onCall reaches the app exactly as a dead socket or an
+  // unknown tool name would. There is no opt-in, because an opt-in is a thing
+  // the next person under time pressure forgets to pass.
   vm.runInContext(`
     globalThis.__calls = [];
     ${opts.mode ? `CRM.mode = ${JSON.stringify(opts.mode)};` : ''}
-    CRM.call = function(tool, args){
-      globalThis.__calls.push({tool: tool, args: JSON.parse(JSON.stringify(args))});
-      return globalThis.__respond(tool, args);
-    };
   `, sandbox);
-  sandbox.__respond = (tool, args) => {
-    if (opts.onCall) {
-      const r = opts.onCall(tool, args);
-      if (r && typeof r.then === 'function') return r;
-      return Promise.resolve(r);
-    }
-    return Promise.resolve({ ok: true });
+
+  const respond = (tool, args) => {
+    sandbox.__calls.push({ tool, args: JSON.parse(JSON.stringify(args || {})) });
+    if (!opts.onCall) return Promise.resolve({ ok: true });
+    // A thrown or rejected onCall becomes a rejected transport, which is what
+    // the product must survive -- not a resolved {ok:false}.
+    let r;
+    try { r = opts.onCall(tool, args || {}); } catch (e) { return Promise.reject(e); }
+    return Promise.resolve(r);
   };
 
+  // http: CRM.call's own fetch. The one branch every current test exercises.
+  sandbox.fetch = (url, init) => {
+    const u = String(url || '');
+    const body = (() => { try { return JSON.parse((init && init.body) || '{}'); }
+                          catch (e) { return {}; } })();
+    const tool = u.endsWith('/health') ? 'crm_info' : body.tool;
+    // `__status` lets a test drive the HTTP status, which is the only way to
+    // reach CRM.call's own 401 branch -- and reaching it is also the proof
+    // that the REAL CRM.call ran rather than a stand-in.
+    return respond(tool, body.args).then(v => ({
+      status: (v && v.__status) || 200, json: async () => v }));
+  };
+  // cowork and embedded, so onCall is never silently inert in a mode the
+  // harness cannot observe. Installed only for the mode under test: `window
+  // .cowork` existing at load time would send CRM.detect() down a path no
+  // caller asked for.
+  if (opts.mode === 'cowork') {
+    // TOOL_PREFIX is `let TOOL_PREFIX = null` and is normally set by
+    // probeCowork, which never runs here. Pin it to '' so the name the app
+    // sends is the tool name -- guessing it back out of a prefixed string is
+    // how the recorder ends up logging "nullcrm_info".
+    vm.runInContext("TOOL_PREFIX = '';", sandbox);
+    sandbox.window.cowork = {
+      callMcpTool: (name, args) =>
+        respond(String(name), args).then(v => ({ structuredContent: v })),
+    };
+  } else if (!opts.mode || opts.mode === 'embedded') {
+    // embeddedCall is a top-level function declaration, so it is a property of
+    // the vm global and can be re-pointed.
+    sandbox.__respondEmbedded = (tool, args) => respond(tool, args);
+    vm.runInContext('embeddedCall = (t, a) => globalThis.__respondEmbedded(t, a);',
+                    sandbox);
+  }
   return {
     sandbox,
     el: (id) => document._els[id],

@@ -25,10 +25,13 @@
 //
 // What this file does NOT verify is listed in the header of
 // test_drawer_close.js and applies here too: no CSS layout, no tab order, no
-// real focus. One shim limitation matters specifically here -- the DOM shim
-// gives every <select> an empty value regardless of which <option> carries
-// `selected`, so the preselect assertions below read the generated markup
-// rather than el.value.
+// real focus.
+//
+// This header used to claim the shim gave every <select> an empty value
+// regardless of `selected`, and used that to justify asserting on markup
+// instead of behaviour. lib/dom.js models selectedness now, and test_harness.js
+// holds it to it. A documented limitation is a licence to write a weaker test,
+// so re-check one before inheriting it.
 const path = require('path');
 const os = require('os');
 const fs = require('fs');

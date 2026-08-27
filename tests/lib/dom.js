@@ -21,6 +21,12 @@ function isValidDateString(s) {
   return d <= days[mo - 1];
 }
 
+// Attributes whose PRESENCE is their meaning. The app reads them as
+// properties, never through getAttribute, so parsing them into _attrs alone
+// would leave them just as untestable as before.
+const BOOLEAN_ATTRS = ['checked', 'disabled', 'required', 'multiple',
+                       'readonly', 'selected', 'autofocus'];
+
 function makeEl(id, doc) {
   const el = {
     id: id || '', tagName: 'DIV', type: '', textContent: '', _value: '',
@@ -104,12 +110,63 @@ function createDocument() {
         const el = doc.getElementById(idm[1]);
         made.push(el);
         el.tagName = m[1].toUpperCase();
+        // Every attribute, valued AND valueless. Reading only id/type/value
+        // put two whole classes out of reach: a data-* baseline, which made
+        // both sides of a send-only-if-changed guard read the same and let
+        // that guard ship broken with a green test; and the boolean
+        // attributes below, which is the same hole with a different name.
+        el._attrs = {};
+        const attr = /([A-Za-z_:][-A-Za-z0-9_:.]*)(?:="([^"]*)")?/g;
+        let a;
+        while ((a = attr.exec(attrs)) !== null) {
+          if (!a[1]) continue;
+          // per HTML, a valueless attribute's value is the empty string
+          el._attrs[a[1].toLowerCase()] = a[2] === undefined ? '' : decodeEntities(a[2]);
+        }
         const tm = /\btype="([^"]*)"/.exec(attrs);
         if (tm) el.type = tm[1];
         const vm = /\bvalue="([^"]*)"/.exec(attrs);
         // assign through the setter so date sanitization applies
         el.value = vm ? decodeEntities(vm[1]) : '';
-        el.disabled = false;   // a re-rendered control starts enabled
+        // Boolean attributes drive PROPERTIES, and the property is what the
+        // app reads: `f_poflag.checked` decides whether po_flag is sent at
+        // all. Hard-coding `disabled = false` here made a markup-disabled
+        // control read as enabled, and left `checked` permanently undefined --
+        // so the PO-on-file checkbox was outside test reach entirely.
+        for (const b of BOOLEAN_ATTRS) el[b] = b in el._attrs;
+      }
+      // A <select>'s value is its selected option. Per the HTML selectedness
+      // algorithm: the LAST option marked selected wins on a size-1 select,
+      // and with none marked the FIRST NON-DISABLED option is selected. Both
+      // halves matter -- "first option" is wrong the moment someone adds a
+      // disabled placeholder, which is one edit away on the customer picker.
+      const sel = /<select\b([^>]*)>([\s\S]*?)<\/select>/gi;
+      let sm;
+      while ((sm = sel.exec(html)) !== null) {
+        const idm = /\bid="([^"]*)"/.exec(sm[1]);
+        if (!idm) continue;
+        const el = doc.getElementById(idm[1]);
+        const opts = [...sm[2].matchAll(/<option\b([^>]*)>([\s\S]*?)(?=<option\b|<\/select>|$)/gi)]
+          .map(o => {
+            const at = {};
+            let x; const re = /([A-Za-z_:][-A-Za-z0-9_:.]*)(?:="([^"]*)")?/g;
+            while ((x = re.exec(o[1])) !== null) {
+              if (x[1]) at[x[1].toLowerCase()] = x[2] === undefined ? '' : decodeEntities(x[2]);
+            }
+            const text = decodeEntities(String(o[2] || '').replace(/<[^>]*>/g, '').trim());
+            return {
+              // an option with no value attribute has value === its text
+              value: 'value' in at ? at.value : text,
+              text,
+              selected: 'selected' in at,      // matched on the attribute NAME:
+              disabled: 'disabled' in at,      // `data-x="selected"` is not it
+            };
+          });
+        el.options = opts;
+        const marked = opts.filter(o => o.selected);
+        const chosen = marked.length ? marked[marked.length - 1]
+                                     : opts.find(o => !o.disabled);
+        el.value = chosen ? chosen.value : '';
       }
       return made;
     },

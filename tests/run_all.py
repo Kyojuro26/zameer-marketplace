@@ -51,7 +51,8 @@ PY_MODULES = [
 JS_MODULES = [("regression/test_view.js", "view"),
               ("regression/test_drawer_close.js", "drawer-close"),
               ("regression/test_receivables.js", "receivables"),
-              ("regression/test_livetracker.js", "live-tracker/view")]
+              ("regression/test_livetracker.js", "live-tracker/view"),
+              ("regression/test_harness.js", "harness")]
 
 
 def _load(modname, relpath):
@@ -110,7 +111,15 @@ def run_js(crm_dir, pattern):
         if not reported:
             print(f"[FAIL] {name}  (harness error -- NO checks were evaluated)")
             print("        " + (p.stderr.strip().split("\n")[-1] if p.stderr else "?"))
-        out.append((name, p.returncode == 0, reported))
+        # Pull the COUNTS back out, so a node module contributes to the headline
+        # number like a python one. Without this the total said "python:" and a
+        # JS module could quietly shrink from twelve checks to two with the
+        # number never moving -- the `reported` guard above only catches a
+        # module that evaluates NOTHING, not one that evaluates less.
+        m = re.search(r"^\[(?:PASS|FAIL)\] \S+\s+\((\d+) checks\)", p.stdout, re.M)
+        passed = int(m.group(1)) if m else 0
+        nfailed = len(re.findall(r"^\s+x ", p.stdout, re.M))
+        out.append((name, p.returncode == 0, reported, passed, nfailed))
     return out
 
 
@@ -151,9 +160,9 @@ def main():
             # Only modules that actually EVALUATED checks and failed them count.
             # A module that crashed proves the baseline is broken somewhere, not
             # that this suite can detect the thing it claims to test.
-            crashed = [n for n, _ok, reported in js if not reported]
+            crashed = [n for n, _ok, reported, _pa, _fa in js if not reported]
             failed_modules = [r.name for r in results if r.failed] + \
-                             [n for n, ok, reported in js if reported and not ok]
+                             [n for n, ok, reported, _pa, _fa in js if reported and not ok]
             print()
             for n in crashed:
                 print(f"NOT COUNTED: {n} crashed against the baseline without "
@@ -176,12 +185,17 @@ def main():
     results = run_python(str(crm), args.pattern)
     ok_py = all([r.report() for r in results])   # list: report ALL modules
     js = run_js(str(crm), args.pattern)
-    ok_js = all(o and rep for _, o, rep in js)
+    ok_js = all(o and rep for _, o, rep, _pa, _fa in js)
 
-    total = sum(len(r.passed) + len(r.failed) for r in results)
-    failed = sum(len(r.failed) for r in results)
+    py_total = sum(len(r.passed) + len(r.failed) for r in results)
+    py_failed = sum(len(r.failed) for r in results)
+    js_total = sum(pa + fa for _, _, _, pa, fa in js)
+    js_failed = sum(fa for _, _, _, pa, fa in js)
+    total, failed = py_total + js_total, py_failed + js_failed
     print()
-    print(f"python: {total - failed}/{total} checks passed"
+    print(f"python: {py_total - py_failed}/{py_total}    "
+          f"node: {js_total - js_failed}/{js_total}")
+    print(f"TOTAL:  {total - failed}/{total} checks passed"
           + (f"   ({failed} failing)" if failed else ""))
     if not (ROOT / ".positive-control-ran").exists():
         print("\nNOTE: --positive-control has never been run. Until it has, a "

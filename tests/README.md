@@ -27,7 +27,7 @@ not evidence. Re-run it after any change to the harness, and bump
 | Path | What it protects |
 |---|---|
 | `lib/harness.py` | scratch stores, real `mcp.call_tool` dispatch, fixtures |
-| `lib/dom.js` | DOM shim — **emulates `<input type=date>` sanitization** |
+| `lib/dom.js` | DOM shim — `<input type=date>` sanitization, all attributes (valued and boolean), `<select>` selectedness |
 | `lib/view.js` | builds the real bundle and runs it under node |
 | `regression/test_identifiers.py` | `_key`/`_canon`/`_resolve`; mint vs lookup |
 | `regression/test_visibility.py` | what archiving hides, and must never hide |
@@ -35,7 +35,14 @@ not evidence. Re-run it after any change to the harness, and bump
 | `regression/test_view.js` | render robustness, date preservation, saves |
 | `regression/test_livetracker.py` | the fill-colour decode, the legend boundary, unlinked rows, re-import |
 | `regression/test_livetracker.js` | the Live screen: lateness flags, adoption, the note |
+| `regression/test_harness.js` | **the instrument itself** — the four ways it has been unable to fail |
 | `shapes/test_shape_*.py` | the three recurring failure shapes |
+
+The headline total counts **both** languages: `python: N/N   node: N/N` and a
+combined `TOTAL`. Node counts were absent from it for a long time, which meant
+a JS module could quietly shrink from twelve checks to two with the number
+never moving — the "no checks were evaluated" guard catches a module that
+evaluates *nothing*, not one that evaluates *less*.
 
 `mutate_livetracker.py` runs **four** passes — normalize.py and merge.py and
 server.py against the python module, build_view.py against the node one. The
@@ -49,6 +56,21 @@ Two things that pass have to be re-earned, not assumed:
   "NOT COUNTED" rather than counting a crash as detection. Their evidence is
   the mutation suites, which is why every JS behaviour asserted here has a
   mutant.
+- `test_harness.js` cannot be positive-controlled either, but for a different
+  reason worth naming: it **passes** against `BASELINE_REF`, and always will.
+  `--positive-control` checks out the old *plugin* and runs it against the
+  *current* `tests/`, so the instrument under test is the same one in both
+  runs — varying the product cannot exercise a module whose subject is the
+  harness. A green result there is not evidence of anything, in either
+  direction.
+
+  Its evidence is the mutation protocol instead: each of the four harness
+  defects it was written for is reintroduced into `lib/dom.js` or
+  `lib/view.js`, the suite is run, and each must produce a NAMED red check
+  rather than a crash — the same standard `run_all.py` applies when it scores
+  a crashing module NOT COUNTED. That protocol is this module's positive
+  control. Re-run it after any change to `lib/`, and do not take a green
+  `--positive-control` as a substitute.
 - The Live Tracker's lateness answers are computed against **today**, so
   `test_livetracker.js` freezes the clock. A test whose expected answers drift
   with the wall clock stops asserting anything the week after it is written.
@@ -63,6 +85,18 @@ Two harness rules, both learned expensively:
   stores whatever you assign makes every date-wipe test **unable to fail**,
   because the baseline is snapshotted from the control after insertion. An
   earlier harness had exactly that hole and its date tests were decorative.
+- The same hole has since appeared twice more, which is why `test_harness.js`
+  exists: the shim read only `id`/`type`/`value`, so a `data-*` baseline came
+  back `null` and both sides of a send-only-if-changed guard were always equal
+  — that guard shipped broken with a green test; and `launch()` replaced
+  `CRM.call` outright, so the product's own dispatch and error handling were
+  executed by no test, and a version where one rejecting call discarded five
+  good answers passed the suite.
+- `launch()` stubs the **transport**, never `CRM.call`. `onCall` is consulted
+  in every mode, and a rejecting `onCall` reaches the app exactly as a dead
+  socket would. There is no opt-in: an opt-in is what the next person under
+  time pressure forgets to pass. Return `{__status: 401}` to drive the HTTP
+  status, which is the only way to reach `CRM.call`'s bridge-auth branch.
 
 ## The three shapes
 
