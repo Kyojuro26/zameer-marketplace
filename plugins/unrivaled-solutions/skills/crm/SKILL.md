@@ -13,7 +13,7 @@ description: >
   contacts and statuses into Outlook, and keeping the desktop app copy in
   sync with the plugin.
 metadata:
-  version: "0.1.34"
+  version: "0.1.33"
 ---
 
 # Unrivaled CRM
@@ -66,12 +66,6 @@ Use the read tools; they are side-effect-free:
   Every invoice reports `effective_due_on`: a manual `due_on` override if
   one was set, else `invoice_date` + Net 30 — never guess a due date when
   `invoice_date` itself is missing/unparseable, it just comes back `null`.
-- The Live Tracker's own two files → `list_tracker`: `tracker_buckets` (the
-  status buckets, named from the sheet's own legend) and `tracker_unlinked`
-  (rows the importer could not match to a project). Read-only, and rewritten
-  wholesale by every import — to change one, edit the project it became, or
-  adopt the row in the app. Their absence is normal on a store seeded before
-  the tracker and comes back as empty lists, not an error.
 - People → `find_contacts`; vendor routing → `get_vendor`.
 
 Project numbers are the user's QuickBooks quote numbers. Shipments are

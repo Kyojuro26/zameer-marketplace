@@ -47,27 +47,6 @@ def run(server, crm_dir=None):
                 "is not True" in graph_src or "is False" not in graph_src,
                 "an empty 202 body passes an `isDraft is False` test")
 
-    # ---- every tool the server exposes must be documented ------------------
-    #
-    # SHAPE 3: the interface reference calls itself "the stable read/write API"
-    # and "a pinned contract", which is a promise that it lists the API. Nothing
-    # enforced it, and renumber_duplicate_shipments -- a repair tool for a store
-    # nobody can otherwise edit -- went unlisted from the day it shipped. A tool
-    # no document mentions is a tool the chat agent will never reach for, which
-    # makes it as good as absent.
-    r.section("every @mcp.tool() appears in the interface reference")
-    srv = (crm / "mcp" / "server.py").read_text()
-    ref = (crm / "references" / "interface-v0.1.md").read_text()
-    tools = re.findall(r"@mcp\.tool\(\)\s*(?:@\w+\s*)*def\s+(\w+)\s*\(", srv)
-    r.check("the tool list was actually found", len(tools) > 20,
-            f"found {len(tools)} -- the decorator pattern stopped matching, so "
-            f"the check below would pass on an empty list")
-    undocumented = sorted(t for t in tools if f"`{t}`" not in ref)
-    r.check("no tool is missing from references/interface-v0.1.md",
-            not undocumented,
-            f"undocumented: {undocumented} -- the reference calls itself the "
-            f"pinned contract, so a tool absent from it is undiscoverable")
-
     # ------------------------------------------------------------------ 2 --
     r.section('normalize.py: "anything ambiguous is flagged, never dropped"')
     nrm = crm / "pipeline" / "normalize.py"

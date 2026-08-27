@@ -296,10 +296,7 @@ def merge_all(fresh_files, store_dir):
         report_note = ("no changelog.jsonl: nothing already in the store was "
                        "refreshed, only new rows were added -- except the "
                        "Project Tracker status colour, which the workbook owns "
-                       "and refreshes from the sheet. Without an edit history "
-                       "a bucket you set on a job yourself cannot be told "
-                       "apart from an imported one, so the sheet wins; make "
-                       "any edit in the app and that stops being true")
+                       "outright and which nothing in the app can edit")
     else:
         report_note = None
     operator.setdefault("renamed_from", set())
@@ -441,28 +438,8 @@ def merge_all(fresh_files, store_dir):
         # project_no could never retire it and the card came back every import
         # no matter what number he gave it. This is exact: it only matches a
         # row somebody actually adopted.
-        # -> project_no, so the report can name the project rather than the
-        # sheet phrase, and ARCHIVED projects excluded: archiving is this
-        # product's delete, so a mistakenly-adopted project that has been
-        # archived must release its tracker row rather than keep suppressing
-        # it. Otherwise the job is on neither list and the only way back is a
-        # tool call through chat.
-        by_sheet_key = {}
-        for p in projs:
-            k = _s(p.get("tracker_key"))
-            if k and not p.get("archived"):
-                by_sheet_key.setdefault(k, _s(p.get("project_no")) or k)
-        # How many rows on the sheet carry each key. The sheet's key cell is
-        # free text -- parse_project_key's own docstring names 'Word Proposal'
-        # and 'Check' as real shapes -- so two rows sharing one is an ordinary
-        # week, not a contrived case. Retiring on a non-unique key drops a live
-        # job that nobody adopted, which this file already calls worse than
-        # showing a duplicate card.
-        raw_counts = {}
-        for u in unl:
-            if isinstance(u, dict) and _s(u.get("raw_key")):
-                k = _s(u.get("raw_key"))
-                raw_counts[k] = raw_counts.get(k, 0) + 1
+        by_sheet_key = {_s(p.get("tracker_key")) for p in projs
+                        if _s(p.get("tracker_key"))}
         kept_unl, adopted = [], []
         for u in unl:
             if not isinstance(u, dict):
@@ -472,8 +449,8 @@ def merge_all(fresh_files, store_dir):
             if not keys:
                 keys = [_idkey(raw)]
             hit = next((k for k in keys if k and k in by_key), None)
-            if not hit and raw and raw in by_sheet_key and raw_counts.get(raw) == 1:
-                hit = by_sheet_key[raw]
+            if not hit and raw and raw in by_sheet_key:
+                hit = raw
             if hit:
                 adopted.append(hit)
                 continue    # skip-ok: it IS a project now; listed in report["adopted"]
