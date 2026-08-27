@@ -431,8 +431,8 @@ VIEW = [
  ("adoption stops recording the key the sheet carries",
   "    tracker_key: st(u.raw_key) || null,\n", ""),
  ("a live refresh stops pulling the tracker files",
-  "      CRM.call('list_invoices', {}),  CRM.call('list_tracker', {})]);",
-  "      CRM.call('list_invoices', {})]);"),
+  "                  'list_shipments', 'list_invoices', 'list_tracker'];",
+  "                  'list_shipments', 'list_invoices'];"),
  ("a refresh blanks the tracker sections when the server cannot answer",
   "      if (Array.isArray(tk.tracker_buckets))  DATA.tracker_buckets  = tk.tracker_buckets;\n"
   "      if (Array.isArray(tk.tracker_unlinked)) DATA.tracker_unlinked = tk.tracker_unlinked;",
@@ -460,9 +460,21 @@ VIEW = [
   "    fields.tracker_status = trk.value || null;\n"
   "  }",
   "  if(trk){ fields.tracker_status = trk.value || null; }"),
- ("the changed-check trips on empty-versus-absent again",
-  "  if(trk && (trk.value || '') !== (trk.getAttribute('data-orig') || '')){",
-  "  if(trk && trk.value !== trk.getAttribute('data-orig')){"),
+ # RETIRED, deliberately, rather than left to read SURVIVED forever:
+ #   ("the changed-check trips on empty-versus-absent again",
+ #    "(trk.value || '') !== (trk.getAttribute('data-orig') || '')"
+ #     -> "trk.value !== trk.getAttribute('data-orig')")
+ # data-orig used to be absent until something wrote it, so getAttribute
+ # returned null and the `|| ''` was the whole guard. openProject now
+ # snapshots the baseline FROM THE CONTROL on every open, so the attribute is
+ # always a string and the mutation has no reachable effect. A mutant with no
+ # reachable effect is not evidence of anything; the two mutants below are the
+ # ones that now carry this behaviour.
+ ("openProject no longer snapshots the bucket baseline from the control",
+  "  const _trk = document.getElementById('f_tracker');\n"
+  "  if(_trk) _trk.setAttribute('data-orig', _trk.value);\n", ""),
+ ("a saved bucket is not re-baselined, so changing it back sends nothing",
+  "    if(trk) trk.setAttribute('data-orig', trk.value);\n", ""),
  ("an unrecognised bucket is no longer explained in the form",
   "      ${knownBucket(p.tracker_status) ? '' : (st(p.tracker_status)",
   "      ${true ? '' : (st(p.tracker_status)"),

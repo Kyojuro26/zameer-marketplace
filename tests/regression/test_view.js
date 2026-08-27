@@ -53,7 +53,7 @@ function seedStore(dir) {
   return dir;
 }
 
-function run(crmDir) {
+async function run(crmDir) {
   const r = makeResult('view');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmview-'));
   const store = seedStore(path.join(tmp, 'store'));
@@ -177,6 +177,122 @@ function run(crmDir) {
   r.check('and a string revenue is added, not concatenated',
     !/\$1[0-9]{6,}/.test(kpiText),
     'a string revenue concatenated into a nonsense total');
+
+  // ---- a write that never reaches the server ------------------------------
+  //
+  // THE CLASS, not six separate defects. Every one of these awaited CRM.call
+  // with no catch, so a dead socket rejected out of the handler and the
+  // operator saw the button go quiet: no message, no alert, nothing changed
+  // and nothing said.
+  //
+  // Of the ten sites that awaited CRM.call, four caught and six did not, and
+  // catching was UNCORRELATED with being tested: three of the four -- 
+  // fetchEnrichment, draft, replyToThread -- had no test at all. Habit put
+  // those try/catches there, and habit is not coverage. What tests predicted
+  // was not whether a catch existed but whether it told the truth, which is
+  // why every check below asserts what the operator SEES.
+  //
+  // `sees` asserts what the OPERATOR gets, never that a catch exists. A
+  // handler that swallows the rejection silently passes a structural check
+  // and fails this one.
+  const dead = () => launch({ crmDir, storeDir: seedStore(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'crmdead-'))), outDir: tmp, mode: 'http',
+    onCall: (t) => Promise.reject(new Error('socket hung up: ' + t)) });
+  const msgOf = (a) => ((a.el('savedMsg') || EMPTY).textContent || '');
+  const SITES = [
+    ['rename_project', async (a) => {
+      a.fn('openProject')('4521'); a.el('f_pno').value = '4599';
+      await a.fn('saveProject')('4521');
+    }, (a) => /✗/.test(msgOf(a))],
+    ['archive_project', async (a) => { await a.fn('deleteProject')('4521'); },
+      (a) => a.alerts().some(m => /failed/i.test(m))
+             && a.eval("String(DATA.projects.some(p=>String(p.project_no)==='4521'))") === 'true'],
+    ['convert_lead', async (a) => { await a.fn('convertLead')('acme'); },
+      (a) => a.alerts().some(m => /failed/i.test(m))],
+    ['rename_invoice', async (a) => {
+      a.fn('openEditInvoice')('acme', '9001'); a.el('e_iv_no').value = '9099';
+      await a.fn('saveEditInvoice')('acme', '9001');
+    }, (a) => /✗/.test(msgOf(a))],
+    ['archive_company', async (a) => { await a.fn('deleteCompany')('acme'); },
+      (a) => a.alerts().some(m => /failed/i.test(m))
+             && a.eval("String(DATA.companies.some(c=>c.company_id==='acme'))") === 'true'],
+    ['reassign_shipment', async (a) => {
+      a.fn('openShipment')('4521-L2'); a.el('s_pno').value = '4599';
+      await a.fn('saveShipment')('4521-L2');
+    }, (a) => /✗/.test(msgOf(a))],
+  ];
+  for (const [tool, drive, sees] of SITES) {
+    const a = dead();
+    let threw = null;
+    try { await drive(a); } catch (e) { threw = e; }
+    // Separate checks on purpose: "it did not blow up" and "the operator was
+    // told" are different failures and a combined check hides which happened.
+    r.check(`a dead socket on ${tool} does not escape the handler`,
+      threw === null, threw && threw.message);
+    r.check(`and ${tool} tells the operator it failed`, threw === null && sees(a),
+      `msg=${JSON.stringify(msgOf(a))} alerts=${JSON.stringify(a.alerts())}`);
+  }
+
+  // The two sites that ALREADY caught, and what they did with the value.
+  //
+  // A structural check -- "is there a catch here" -- passes on both of these
+  // unchanged, which is exactly why this suite does not write one. doSave
+  // printed `e.message` and replyToThread alerted it; for an Error that is the
+  // reason, and for anything else it is the literal string "undefined". The
+  // operator gets a red mark that says nothing, which is the silence this
+  // whole commit is about, one layer in.
+  //
+  // Reachable only in COWORK mode. CRM.call has no throw of its own: it
+  // propagates whatever its transport rejects with, and fetch (http) and
+  // embeddedCall reject with Errors. cowork's rejection comes from the host's
+  // window.cowork.callMcpTool, which owes us nothing -- a string or a bare
+  // {code:-32603} both arrive. That is also the mode the operator runs in.
+  {
+    const bridge = (v) => launch({ crmDir, storeDir: seedStore(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'crmbridge-'))), outDir: tmp,
+      mode: 'cowork', onCall: () => Promise.reject(v) });
+    // A string and a bare object: the two shapes an MCP bridge actually
+    // produces. Neither has `.message`.
+    for (const [label, v] of [['a string', 'bridge closed'],
+                              ['a bare object', { code: -32603 }]]) {
+      {
+        // No rename -- f_pno is left alone so this falls through to
+        // doSave('update_project'), which is the catch under test. Renaming
+        // would be caught by saveProject's own guard instead.
+        const a = bridge(v);
+        a.fn('openProject')('4521');
+        await a.fn('saveProject')('4521');
+        const m = msgOf(a);
+        r.check(`doSave names a reason when the bridge rejects with ${label}`,
+          /✗/.test(m) && !/undefined/.test(m), `savedMsg=${JSON.stringify(m)}`);
+      }
+      {
+        const a = bridge(v);
+        let threw = null;
+        try { await a.fn('replyToThread')('acme', 'msg-1'); }
+        catch (e) { threw = e; }
+        const said = a.alerts().join(' | ');
+        r.check(`replyToThread names a reason when the bridge rejects with ${label}`,
+          threw === null && /could not create reply draft/i.test(said)
+            && !/undefined/.test(said),
+          `threw=${threw && threw.message} alerts=${JSON.stringify(a.alerts())}`);
+      }
+    }
+  }
+
+  // The same rule for a READ. `ENRICH[id] = null` renders "No Outlook signal
+  // on file" -- a claim about the data, byte-identical to a company that
+  // genuinely has none, made when the truth is that nobody managed to ask.
+  {
+    const a = dead();
+    a.fn('select')('acme');          // the real path: select renders, then asks
+    await a.fn('fetchEnrichment')('acme');
+    r.check('an unreachable Outlook is reported as unreachable, not as "none"',
+      /Could not reach Outlook/.test((a.el('main') || EMPTY).innerHTML || ''),
+      ((a.el('main') || EMPTY).innerHTML || '').includes('No Outlook signal')
+        ? 'rendered "No Outlook signal on file" for a call that never completed'
+        : 'neither message rendered');
+  }
 
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;

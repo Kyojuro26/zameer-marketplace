@@ -796,6 +796,25 @@ async function run(crmDir) {
   r.check('choosing a bucket does send it',
     !!fixed && fixed.args.fields.tracker_status === 'action_owner',
     `got ${JSON.stringify(fixed && fixed.args.fields.tracker_status)}`);
+  // Change it BACK in the same session. The baseline has to move with the
+  // save: doSave never re-renders #dbody, so a control still measuring against
+  // the value it had when the drawer opened will call the second change
+  // "unchanged", send nothing, and flash Saved over a store that kept the
+  // first one. This is the only PROJECT_FIELD sent conditionally, so it is the
+  // only one that can go wrong this way.
+  app.resetCalls();
+  ev("document.getElementById('f_tracker').value='';");
+  await ev("saveProject('4507')");
+  const reverted = app.calls().find(c => c.tool === 'update_project');
+  r.check('changing the bucket BACK in the same session is still sent',
+    !!reverted && 'tracker_status' in reverted.args.fields
+      && reverted.args.fields.tracker_status === null,
+    `got ${JSON.stringify(reverted && reverted.args.fields)} -- the save says `
+    + 'Saved either way, so an unsent change leaves the screen showing a '
+    + 'bucket the store does not have');
+  ev("document.getElementById('f_tracker').value='action_owner';");
+  await ev("saveProject('4507')");
+
   ev("closeDrawer(); setFilter('live');");
   r.check('and the row leaves the "not recognised" section',
     !/Status not recognised/.test(app.doc.getElementById('main').innerHTML),
@@ -808,16 +827,39 @@ async function run(crmDir) {
     + 'is keyed with a phrase, which parses to nothing, so without this that '
     + 'card returns every import no matter what number he gives it');
 
-  // ---- the refresh pulls the tracker files too -----------------------------
-  r.check('a live refresh asks for the tracker files as well',
-    /CRM\.call\('list_tracker'/.test(js),
-    'refreshing five of seven inputs left the bucket headings and the whole '
-    + 'unlinked section frozen at page-build time');
-  r.check('and only overwrites them when the answer is a list',
-    /Array\.isArray\(tk\.tracker_buckets\)/.test(js)
-    && /Array\.isArray\(tk\.tracker_unlinked\)/.test(js),
-    'a server older than the tool returns ok:false, and an app must not blank '
-    + 'a section it simply cannot refresh');
+  // ---- the refresh reaches the tracker sections ----------------------------
+  // Behavioural, not a grep. These were source-text assertions and broke the
+  // moment refreshData asked for its tools from a list instead of by literal
+  // name -- a rename of a string, with the behaviour unchanged. A test that
+  // fails on a rename and passes on a behaviour change is measuring the wrong
+  // thing.
+  {
+    const live = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: (t) => t === 'list_tracker'
+        ? { ok: true, tracker_buckets: [{ key: 'action_admin', label: 'REFRESHED' }],
+            tracker_unlinked: [{ sheet_row: 99, client: 'From Refresh', legs: [] }] }
+        : { ok: true, companies: [], contacts: [], projects: [], shipments: [],
+            invoices: [] } });
+    await live.eval('refreshData()');
+    r.check('a live refresh pulls the tracker files too',
+      live.eval("String((DATA.tracker_buckets||[]).map(b=>b.label))") === 'REFRESHED',
+      'refreshing five of seven inputs left the bucket headings and the whole '
+      + 'unlinked section frozen at page-build time');
+    r.check('and the refreshed unlinked rows reach the app',
+      live.eval("String(arr(DATA.tracker_unlinked).filter(u=>u).map(u=>u.sheet_row))")
+        === '99');
+
+    const junk = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: (t) => t === 'list_tracker'
+        ? { ok: true, tracker_buckets: 'not a list', tracker_unlinked: {} }
+        : { ok: true, companies: [], contacts: [], projects: [], shipments: [],
+            invoices: [] } });
+    await junk.eval('refreshData()');
+    r.check('a wrong-shaped answer does not replace a good section',
+      junk.eval("String(Array.isArray(DATA.tracker_buckets))") === 'true'
+      && junk.eval("String(Array.isArray(DATA.tracker_unlinked))") === 'true',
+      'a string or an object here throws at the next render and blanks the app');
+  }
 
   // ---- leaving the screen ---------------------------------------------------
   ev("select('acme');");

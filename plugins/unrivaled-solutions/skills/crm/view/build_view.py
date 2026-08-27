@@ -421,14 +421,29 @@ function embeddedCall(tool, args){   // demo fallback — session-only mutation
 
 async function refreshData(){
   try{
-    const [co, ct, pr, sh, iv, tk] = await Promise.all([
-      CRM.call('list_companies', {}), CRM.call('find_contacts', {}),
-      CRM.call('list_projects', {}),  CRM.call('list_shipments', {}),
-      CRM.call('list_invoices', {}),  CRM.call('list_tracker', {})]);
-    if (co.ok) DATA.companies = co.companies;
-    if (ct.ok) DATA.contacts  = ct.contacts;
-    if (pr.ok) DATA.projects  = pr.projects;
-    if (sh.ok) DATA.shipments = sh.shipments;
+    // KEEP EVERY GOOD ANSWER, AND WARN ABOUT EXACTLY WHAT FAILED.
+    //
+    // Both previous shapes were wrong, in opposite directions. Promise.all
+    // rejected the whole gather if any single call failed, so one dead tool
+    // discarded five good answers -- and then a version that made CRM.call
+    // unable to reject removed the only warning, so the operator got seven
+    // stale sections under a pill reading "edits persist". allSettled keeps
+    // the answers that arrived; the pill names the ones that did not.
+    const WANT = ['list_companies', 'find_contacts', 'list_projects',
+                  'list_shipments', 'list_invoices', 'list_tracker'];
+    const settled = await Promise.allSettled(WANT.map(t => CRM.call(t, {})));
+    const got = {}, failed = [];
+    settled.forEach((s, i) => {
+      const v = s.status === 'fulfilled' ? s.value : null;
+      if (v && v.ok) got[WANT[i]] = v; else failed.push(WANT[i]);
+    });
+    const co = got.list_companies, ct = got.find_contacts,
+          pr = got.list_projects,  sh = got.list_shipments,
+          iv = got.list_invoices,  tk = got.list_tracker;
+    if (co && co.ok) DATA.companies = co.companies;
+    if (ct && ct.ok) DATA.contacts  = ct.contacts;
+    if (pr && pr.ok) DATA.projects  = pr.projects;
+    if (sh && sh.ok) DATA.shipments = sh.shipments;
     if (iv && iv.ok) DATA.invoices = iv.invoices;
     // Without these the landing screen refreshed five of its seven inputs: the
     // bucket headings and the whole "Not in the CRM yet" section stayed frozen
@@ -449,7 +464,21 @@ async function refreshData(){
     // pre-existing and reachable only after an explicit tab switch.)
     else if (filter === 'live') renderMain();
     else if (selected) renderMain();
+    // The pill is the only place a refresh failure can be seen, so it has to
+    // distinguish three states rather than two. A warning after a CLEAN
+    // refresh is not harmless: it trains the operator to ignore the one that
+    // matters.
+    const el = document.getElementById('modePill');
+    if (el && failed.length === WANT.length){
+      el.textContent = 'Live · refresh failed — showing last built data';
+    } else if (el && failed.length){
+      el.textContent = 'Live · could not refresh ' + failed.join(', ')
+                     + ' — those sections show last built data';
+    }
   }catch(e){
+    // Reached only by a throw AFTER the calls -- reindex/kpis/render on a
+    // malformed-but-ok payload. A transport fault no longer arrives here,
+    // because allSettled above absorbs it and names it on the pill.
     console.warn('live refresh failed; keeping embedded data', e);
     const el = document.getElementById('modePill');
     if (el){ el.textContent = 'Live · refresh failed — showing last built data'; }
@@ -1321,7 +1350,13 @@ async function fetchEnrichment(id){
   try{
     const r = await CRM.call('get_company', {ref: id});
     ENRICH[id] = (r.ok && r.enrichment) || null;
-  }catch(e){ ENRICH[id] = null; }
+  }catch(e){
+    // NOT null. null renders "No Outlook signal on file", which is a claim
+    // about the DATA and is byte-identical to a company that genuinely has
+    // none. A call that never completed is a failure to ASK, and saying
+    // otherwise leaves the screen asserting something the store does not.
+    ENRICH[id] = {__unreachable: (e && e.message) || String(e)};
+  }
   if (selected === id) renderMain();
 }
 
@@ -1329,6 +1364,7 @@ function enrichmentSection(id){
   if (CRM.mode === 'embedded') return '';
   const e = ENRICH[id];
   if (e === undefined) return `<div class="section"><h2>Outlook activity</h2><div class="muted">Checking Outlook…</div></div>`;
+  if (e && e.__unreachable) return `<div class="section"><h2>Outlook activity</h2><div class="muted">Could not reach Outlook just now (${esc(st(e.__unreachable))}), so this section may be out of date. Nothing has been changed.</div></div>`;
   if (e === null) return `<div class="section"><h2>Outlook activity</h2><div class="muted">No Outlook signal on file — refresh enrichment to pull last contact, threads, and meetings.</div></div>`;
   let h = `<div class="section"><h2>Outlook activity</h2>`;
   h += `<div class="kv"><span class="k">Last contact</span><span>${e.last_contact ? esc(String(e.last_contact).slice(0,10)) : '<span class="muted">none found</span>'}</span></div>`;
@@ -1762,6 +1798,15 @@ function openProject(pno){
     <button class="pill-btn" style="background:var(--red-soft);color:var(--red);margin-left:8px" onclick="deleteProject('${jesc(pno)}')">Delete project</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px" id="drawerNote"></p>`;
+  // Snapshot the bucket baseline FROM THE CONTROL, after the markup has been
+  // parsed -- never from the string we intended to put there. snapDates states
+  // this rule for the date inputs and the tracker select broke it: `data-orig`
+  // held the STORED value while the control reports what the browser actually
+  // selected, so for a status the legend does not name the two disagreed and
+  // every unrelated save sent tracker_status:null. The job then failed
+  // liveRows' truthiness test and left the Live screen entirely.
+  const _trk = document.getElementById('f_tracker');
+  if(_trk) _trk.setAttribute('data-orig', _trk.value);
   document.getElementById('drawerNote').textContent = CRM.mode==='embedded'
     ? 'Demo mode: this save lasts only for this browser session.'
     : 'Saves persist to your CRM records through the validated write interface.';
@@ -1835,7 +1880,12 @@ async function saveProject(pnoArg){
   if(newPno && newPno !== pno){
     const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
     btn.disabled=true; msg.className='saved';
-    const rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno});
+    // A rejection and an {ok:false} are the same event to the operator;
+    // folding it into the branch that already exists keeps ONE failure
+    // path rather than a parallel one that can drift out of step.
+    let rr;
+    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno}); }
+    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }
     if(!rr || !rr.ok){
       msg.textContent='✗ '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';
       btn.disabled=false;
@@ -1867,6 +1917,13 @@ async function saveProject(pnoArg){
   const ok = await doSave('update_project', {project_no: pno, fields}, (r)=>{
     const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
     Object.assign(p, r.project || fields);
+    // Re-baseline. doSave never re-renders #dbody, so without this the control
+    // still measures against the value it had when the drawer opened: change
+    // the bucket, save, change it BACK in the same session, and the second
+    // save matches the stale baseline, sends nothing, and flashes "Saved" over
+    // a store that kept the first change. The rename path already does this
+    // for f_pno.
+    if(trk) trk.setAttribute('data-orig', trk.value);
   });
   // A rename changes the project_no baked into this drawer's own button
   // handlers (Delete, + Add shipment) -- reopen so they point at the new
@@ -1885,7 +1942,12 @@ async function saveProject(pnoArg){
 async function deleteProject(pno){
   const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
   if(!confirm(`Delete project ${pno}${p&&p.description?' ('+p.description+')':''}? It and its shipments/invoices will be archived (hidden from the CRM) and can be restored later — nothing is permanently destroyed.`)) return;
-  const r=await CRM.call('archive_project', {project_no:pno});
+  // A rejection and an {ok:false} are the same event to the operator;
+  // folding it into the branch that already exists keeps ONE failure
+  // path rather than a parallel one that can drift out of step.
+  let r;
+  try{ r = await CRM.call('archive_project', {project_no:pno}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
   if(r&&r.ok){
     DATA.projects=DATA.projects.filter(x=>String(x.project_no)!==String(pno));
     DATA.shipments=DATA.shipments.filter(x=>!(_shipmentProjectNos(x).has(String(pno))));
@@ -2185,7 +2247,12 @@ async function saveEditCompany(cid){
 async function convertLead(cid){
   const c=companyById[cid]; if(!c) return;
   if(!confirm(`Convert ${c.display_name||cid} from a lead to a customer?`)) return;
-  const r=await CRM.call('convert_lead', {company_id:cid});
+  // A rejection and an {ok:false} are the same event to the operator;
+  // folding it into the branch that already exists keeps ONE failure
+  // path rather than a parallel one that can drift out of step.
+  let r;
+  try{ r = await CRM.call('convert_lead', {company_id:cid}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
   if(r&&r.ok){
     const updated=r.company||Object.assign(c,{role:'customer'});
     const i=DATA.companies.findIndex(x=>x.company_id===cid);
@@ -2321,7 +2388,12 @@ async function saveEditInvoice(cid, invoiceNo){
   const newNo = noEl.value.trim();
   if(newNo && newNo !== storedNo){
     btn.disabled=true; msg.className='saved';
-    const rr = await CRM.call('rename_invoice', {company_id:cid, old_invoice_no:storedNo, new_invoice_no:newNo});
+    // A rejection and an {ok:false} are the same event to the operator;
+    // folding it into the branch that already exists keeps ONE failure
+    // path rather than a parallel one that can drift out of step.
+    let rr;
+    try{ rr = await CRM.call('rename_invoice', {company_id:cid, old_invoice_no:storedNo, new_invoice_no:newNo}); }
+    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }
     if(!rr || !rr.ok){
       msg.textContent='✗ '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';
       btn.disabled=false;
@@ -2360,7 +2432,12 @@ async function saveEditInvoice(cid, invoiceNo){
 async function deleteCompany(cid){
   const c=companyById[cid]||{};
   if(!confirm(`Delete ${c.display_name||cid}? It will be archived (hidden from the CRM) and can be restored later — nothing is permanently destroyed.`)) return;
-  const r=await CRM.call('archive_company', {company_id:cid});
+  // A rejection and an {ok:false} are the same event to the operator;
+  // folding it into the branch that already exists keeps ONE failure
+  // path rather than a parallel one that can drift out of step.
+  let r;
+  try{ r = await CRM.call('archive_company', {company_id:cid}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
   if(r&&r.ok){
     DATA.companies=DATA.companies.filter(x=>x.company_id!==cid);
     DATA.vendors=(DATA.vendors||[]).filter(x=>x.company_id!==cid);
@@ -2410,7 +2487,12 @@ async function saveShipment(sid){
   // would fire a pointless reassign_shipment.
   if(s && newPno !== st(s.project_no)){
     btn.disabled=true; msg.className='saved';
-    const rr = await CRM.call('reassign_shipment', {shipment_id: sid, new_project_no: newPno || null});
+    // A rejection and an {ok:false} are the same event to the operator;
+    // folding it into the branch that already exists keeps ONE failure
+    // path rather than a parallel one that can drift out of step.
+    let rr;
+    try{ rr = await CRM.call('reassign_shipment', {shipment_id: sid, new_project_no: newPno || null}); }
+    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }
     if(!rr || !rr.ok){
       msg.textContent='✗ '+((rr&&rr.error)||'reassign failed'); msg.className='saved show errc';
       btn.disabled=false;
@@ -2495,7 +2577,12 @@ async function doSave(tool, args, applyLocal){
     msg.textContent='✗ ' + ((r && r.error) || 'save failed'); msg.className='saved show errc';
     return false;
   }catch(e){
-    msg.textContent='✗ ' + e.message; msg.className='saved show errc';
+    // Not `e.message`: CRM.call has no throw of its own and propagates whatever
+    // its transport rejects with. fetch and embeddedCall reject with Errors,
+    // but cowork mode's value comes from the host's window.cowork.callMcpTool,
+    // which can reject with a string or a bare {code:-32603} -- and `undefined`
+    // on the screen is the same silence this commit exists to remove.
+    msg.textContent='✗ ' + ((e && e.message) || String(e)); msg.className='saved show errc';
     return false;
   }finally{
     locked.forEach(el=>{ el.disabled = false; });
@@ -2684,7 +2771,9 @@ async function replyToThread(companyId, messageId){
     }
     alert('Could not create reply draft: ' + ((r && r.error) || 'unknown error'));
   }catch(e){
-    alert('Could not create reply draft: ' + e.message);
+    // Same normalisation as doSave and the six writes: a non-Error rejection
+    // from the cowork bridge printed as `undefined` here.
+    alert('Could not create reply draft: ' + ((e && e.message) || String(e)));
   }
 }
 

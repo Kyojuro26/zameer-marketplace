@@ -35,14 +35,35 @@ not evidence. Re-run it after any change to the harness, and bump
 | `regression/test_view.js` | render robustness, date preservation, saves |
 | `regression/test_livetracker.py` | the fill-colour decode, the legend boundary, unlinked rows, re-import |
 | `regression/test_livetracker.js` | the Live screen: lateness flags, adoption, the note |
-| `regression/test_harness.js` | **the instrument itself** — the four ways it has been unable to fail |
+| `regression/test_harness.js` | **the instrument itself** — the four ways it has been unable to fail, and refreshData's three failure states |
 | `shapes/test_shape_*.py` | the three recurring failure shapes |
 
-The headline total counts **both** languages: `python: N/N   node: N/N` and a
-combined `TOTAL`. Node counts were absent from it for a long time, which meant
-a JS module could quietly shrink from twelve checks to two with the number
-never moving — the "no checks were evaluated" guard catches a module that
-evaluates *nothing*, not one that evaluates *less*.
+### Two-fifths of this suite was never in the reported total
+
+Until this was found, `run_all.py`'s summary line read `python: N/N` and the
+node modules — **319 checks, 41% of the suite** — were run but not counted.
+Every "Suite 430/430", "441/441", "454/454" in this project's history is a
+python-only number that was reported as a suite total, including baselines
+confirmed on a fresh clone. The JS side could have eroded at any point with the
+number never moving.
+
+The lesson is the distinction, not the arithmetic: the existing guard catches a
+module that evaluates **nothing** (it is scored "harness error — NO checks were
+evaluated"), and catches nothing about a module that quietly evaluates
+**less**. A count that is displayed but not totalled is a count nobody is
+actually watching.
+
+The headline now reads `python: N/N   node: N/N` with a combined `TOTAL`.
+
+`mutate_failure.py` runs **three** passes over one class rather than one file:
+what the app does when a call to the server does not come back. It exists
+because of what the audit found — the two call sites that already caught a
+rejection were the two that had tests, and the seven that did not were the
+seven that had none. **The guarded half was the tested half**, so "which sites
+are guarded" was never an independent fact; it was a restatement of which ones
+anybody had looked at. Its `test_view.js` pass therefore asserts what the
+OPERATOR sees, never that a `catch` exists: one mutant catches the rejection
+and reports success, and it must still be killed.
 
 `mutate_livetracker.py` runs **four** passes — normalize.py and merge.py and
 server.py against the python module, build_view.py against the node one. The
@@ -56,19 +77,26 @@ Two things that pass have to be re-earned, not assumed:
   "NOT COUNTED" rather than counting a crash as detection. Their evidence is
   the mutation suites, which is why every JS behaviour asserted here has a
   mutant.
-- `test_harness.js` cannot be positive-controlled either, but for a different
-  reason worth naming: it **passes** against `BASELINE_REF`, and always will.
-  `--positive-control` checks out the old *plugin* and runs it against the
-  *current* `tests/`, so the instrument under test is the same one in both
-  runs — varying the product cannot exercise a module whose subject is the
-  harness. A green result there is not evidence of anything, in either
-  direction.
+- `test_harness.js` is **half** positive-controllable, and the halves must not
+  be confused. `--positive-control` checks out the old *plugin* and runs it
+  against the *current* `tests/`, so the instrument is the same one in both
+  runs: varying the product cannot exercise a check whose subject is the
+  harness. Those checks — the DOM shim, the transport stub — pass against
+  `BASELINE_REF` and always will, and a green result there is not evidence of
+  anything in either direction.
 
-  Its evidence is the mutation protocol instead: each of the four harness
-  defects it was written for is reintroduced into `lib/dom.js` or
+  This paragraph used to say that of the whole module, which stopped being
+  true the moment the refreshData checks were added: those assert PRODUCT
+  behaviour and the baseline fails them, which is why `harness` now appears in
+  the positive control's detected list. A guarantee that quietly stopped being
+  true is this suite's own SHAPE 3, so it is corrected here rather than left
+  to be inherited.
+
+  The instrument half's evidence is the mutation protocol instead: each of the
+  four harness defects it was written for is reintroduced into `lib/dom.js` or
   `lib/view.js`, the suite is run, and each must produce a NAMED red check
   rather than a crash — the same standard `run_all.py` applies when it scores
-  a crashing module NOT COUNTED. That protocol is this module's positive
+  a crashing module NOT COUNTED. That protocol is those checks' positive
   control. Re-run it after any change to `lib/`, and do not take a green
   `--positive-control` as a substitute.
 - The Live Tracker's lateness answers are computed against **today**, so
@@ -150,7 +178,7 @@ Green on its own is still not the claim. What makes it mean something:
 
 ```bash
 python3 tests/run_all.py --positive-control   # must FAIL against BASELINE_REF
-python3 tests/mutate_drawer.py                # and the other three
+python3 tests/mutate_drawer.py                # and the other four
 ```
 
 `--positive-control` writes `.positive-control-ran`; until it exists,

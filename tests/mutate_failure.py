@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Mutation-test the FAILURE-SIGNALLING checks.
+
+The subject is one class, not one file: what the app does when a call to the
+server does not come back. Three modules assert it, so this script runs three
+passes -- a single pass would leave whichever module it did not name resting on
+its author's confidence.
+
+Why this class earned its own script: of the ten sites that awaited CRM.call,
+four caught a rejection and six did not -- and catching was UNCORRELATED with
+being tested. Three of the four (fetchEnrichment, draft, replyToThread) had no
+test at all. What tests predicted was not whether a catch existed but whether
+it told the truth: doSave caught and reported, fetchEnrichment caught and then
+asserted a falsehood about the data. So no mutant here asserts that a catch is
+present -- each reintroduces a site as it stood and is killed only by a check
+on what the OPERATOR SEES.
+"""
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
+from mutate_lib import mutate
+
+SRC = "plugins/unrivaled-solutions/skills/crm"
+F = "view/build_view.py"
+
+HARNESS_TEST = "./tests/regression/test_harness.js"
+VIEW_TEST = "./tests/regression/test_view.js"
+TRACKER_TEST = "./tests/regression/test_livetracker.js"
+
+# ---- refreshData: three states, not two ----------------------------------
+REFRESH = [
+ ("one dead call discards the five good answers again (pre-facb583)",
+  "    const settled = await Promise.allSettled(WANT.map(t => CRM.call(t, {})));",
+  "    const settled = (await Promise.all(WANT.map(t => CRM.call(t, {}))))\n"
+  "      .map(v => ({status: 'fulfilled', value: v}));"),
+ ("the pill stops naming WHICH sections are stale",
+  "    } else if (el && failed.length){\n"
+  "      el.textContent = 'Live · could not refresh ' + failed.join(', ')\n"
+  "                     + ' — those sections show last built data';\n"
+  "    }",
+  "    }"),
+ ("a partial failure says nothing at all (the 8ec5cac behaviour)",
+  "    const el = document.getElementById('modePill');\n"
+  "    if (el && failed.length === WANT.length){\n"
+  "      el.textContent = 'Live · refresh failed — showing last built data';\n"
+  "    } else if (el && failed.length){",
+  "    const el = document.getElementById('modePill');\n"
+  "    if (false){\n"
+  "      el.textContent = '';\n"
+  "    } else if (false){"),
+ ("a CLEAN refresh also warns, so the warning stops meaning anything",
+  "    if (el && failed.length === WANT.length){",
+  "    if (el && failed.length >= 0){"),
+ ("a clean refresh warns too, with the other two states left correct",
+  "    } else if (el && failed.length){",
+  "    } else if (el && !failed.length){\n"
+  "      el.textContent = 'Live · could not refresh — showing last built data';\n"
+  "    } else if (el && failed.length){"),
+ ("a failed call is applied as though it had succeeded",
+  "      if (v && v.ok) got[WANT[i]] = v; else failed.push(WANT[i]);",
+  "      got[WANT[i]] = v || {ok: true, companies: [], contacts: [], projects: [],\n"
+  "        shipments: [], invoices: []};\n"
+  "      if (!(v && v.ok)) failed.push(WANT[i]);"),
+]
+
+# ---- every write that can be refused, and the one read --------------------
+# Each mutant is the site exactly as it stood before this commit.
+SITES = [
+ ("rename_project unwrapped",
+  "    let rr;\n"
+  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno}); }\n"
+  "    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }",
+  "    const rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno});"),
+ ("archive_project unwrapped",
+  "  let r;\n"
+  "  try{ r = await CRM.call('archive_project', {project_no:pno}); }\n"
+  "  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }",
+  "  const r=await CRM.call('archive_project', {project_no:pno});"),
+ ("convert_lead unwrapped",
+  "  let r;\n"
+  "  try{ r = await CRM.call('convert_lead', {company_id:cid}); }\n"
+  "  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }",
+  "  const r=await CRM.call('convert_lead', {company_id:cid});"),
+ ("rename_invoice unwrapped",
+  "    let rr;\n"
+  "    try{ rr = await CRM.call('rename_invoice', {company_id:cid, old_invoice_no:storedNo, new_invoice_no:newNo}); }\n"
+  "    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }",
+  "    const rr = await CRM.call('rename_invoice', {company_id:cid, old_invoice_no:storedNo, new_invoice_no:newNo});"),
+ ("archive_company unwrapped",
+  "  let r;\n"
+  "  try{ r = await CRM.call('archive_company', {company_id:cid}); }\n"
+  "  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }",
+  "  const r=await CRM.call('archive_company', {company_id:cid});"),
+ ("reassign_shipment unwrapped",
+  "    let rr;\n"
+  "    try{ rr = await CRM.call('reassign_shipment', {shipment_id: sid, new_project_no: newPno || null}); }\n"
+  "    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }",
+  "    const rr = await CRM.call('reassign_shipment', {shipment_id: sid, new_project_no: newPno || null});"),
+ ("an unreachable Outlook reported as \"no signal on file\" again",
+  "    ENRICH[id] = {__unreachable: (e && e.message) || String(e)};",
+  "    ENRICH[id] = null;"),
+ # The two sites that already CAUGHT. A structural check passes on these
+ # mutants -- the catch is still there, still catching. Only a check that reads
+ # the screen and fails on the string "undefined" kills them.
+ ("doSave prints a non-Error rejection as \"undefined\"",
+  "    msg.textContent='\u2717 ' + ((e && e.message) || String(e)); msg.className='saved show errc';",
+  "    msg.textContent='\u2717 ' + e.message; msg.className='saved show errc';"),
+ ("replyToThread alerts a non-Error rejection as \"undefined\"",
+  "    alert('Could not create reply draft: ' + ((e && e.message) || String(e)));",
+  "    alert('Could not create reply draft: ' + e.message);"),
+ # A catch that swallows is the shape a structural check would pass: the
+ # rejection is handled, nothing escapes, and the operator still learns
+ # nothing. If this survives, the checks above are asserting the wrong thing.
+ ("archive_project catches the rejection and reports success",
+  "  try{ r = await CRM.call('archive_project', {project_no:pno}); }\n"
+  "  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }",
+  "  try{ r = await CRM.call('archive_project', {project_no:pno}); }\n"
+  "  catch(e){ r = {ok:true}; }"),
+]
+
+# ---- the tracker half of the same refresh ---------------------------------
+TRACKER = [
+ ("the refresh drops list_tracker again",
+  "    const WANT = ['list_companies', 'find_contacts', 'list_projects',\n"
+  "                  'list_shipments', 'list_invoices', 'list_tracker'];",
+  "    const WANT = ['list_companies', 'find_contacts', 'list_projects',\n"
+  "                  'list_shipments', 'list_invoices'];"),
+ ("a wrong-shaped tracker answer overwrites a good section",
+  "      if (Array.isArray(tk.tracker_buckets))  DATA.tracker_buckets  = tk.tracker_buckets;\n"
+  "      if (Array.isArray(tk.tracker_unlinked)) DATA.tracker_unlinked = tk.tracker_unlinked;",
+  "      DATA.tracker_buckets  = tk.tracker_buckets;\n"
+  "      DATA.tracker_unlinked = tk.tracker_unlinked;"),
+]
+
+
+def main():
+    worst = 0
+    for title, test_rel, mutants in (
+            ("REFRESH -- test_harness.js", HARNESS_TEST, REFRESH),
+            ("SITES -- test_view.js", VIEW_TEST, SITES),
+            ("TRACKER -- test_livetracker.js", TRACKER_TEST, TRACKER)):
+        print(f"\n=== {title}  ({len(mutants)} mutants) ===")
+        worst = max(worst, mutate(SRC, test_rel, F, mutants))
+    return worst
+
+
+sys.exit(main())
