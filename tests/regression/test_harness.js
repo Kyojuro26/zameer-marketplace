@@ -151,65 +151,12 @@ async function run(crmDir) {
       + 'attribute string lets data-note="selected by import" win');
   }
 
-  // ---- 6. refreshData: keep every good answer, warn about what failed -----
+  // refreshData's checks used to live here, as section 6. They are PRODUCT
+  // behaviour, not instrument behaviour, and they are now in test_refresh.js.
   //
-  // Written middle-case FIRST, because it is the one both previous behaviours
-  // got wrong in opposite directions: "any failure discards everything and
-  // warns", then "any failure keeps going and says nothing".
-  const ALL = {
-    list_companies: { ok: true, companies: [{ company_id: 'acme',
-      display_name: 'REFRESHED', role: 'customer', archived: false }] },
-    find_contacts: { ok: true, contacts: [] },
-    list_projects: { ok: true, projects: [{ company_id: 'acme',
-      project_no: 'REFRESHED', status: 'won', year: 2026, archived: false }] },
-    list_shipments: { ok: true, shipments: [] },
-    list_invoices: { ok: true, invoices: [] },
-    list_tracker: { ok: true, tracker_buckets: [], tracker_unlinked: [] },
-  };
-  const pillOf = (a) => a.doc.getElementById('modePill').textContent;
-
-  {   // SOME fail
-    const app = mk({ mode: 'http',
-      onCall: (t) => t === 'list_projects'
-        ? Promise.reject(new Error('socket died'))
-        : (ALL[t] || { ok: true }) });
-    await app.eval('refreshData()');
-    r.check('a partial failure still applies the answers that DID arrive',
-      app.eval("String((DATA.companies||[]).map(c=>c.display_name))") === 'REFRESHED',
-      'discarding five good answers because one failed was the pre-facb583 '
-      + 'behaviour, and it is half of what this is meant to end');
-    r.check('and leaves the failed section on its last known data',
-      app.eval("String((DATA.projects||[]).map(p=>p.project_no))") !== 'REFRESHED',
-      'a failed call must not be applied as though it succeeded');
-    r.check('and the pill NAMES what did not refresh',
-      /list_projects/.test(pillOf(app)),
-      `got ${JSON.stringify(pillOf(app))} -- saying nothing was the 8ec5cac `
-      + 'behaviour: seven stale sections under a pill claiming edits persist');
-  }
-
-  {   // ALL fail
-    const app = mk({ mode: 'http',
-      onCall: () => Promise.reject(new Error('transport is dead')) });
-    const before = app.eval("String((DATA.companies||[]).map(c=>c.display_name))");
-    await app.eval('refreshData()');
-    r.check('a total failure updates nothing',
-      app.eval("String((DATA.companies||[]).map(c=>c.display_name))") === before,
-      'nothing arrived, so nothing may be applied');
-    r.check('and says so rather than reporting success',
-      /refresh failed|could not refresh/i.test(pillOf(app)),
-      `got ${JSON.stringify(pillOf(app))}`);
-  }
-
-  {   // NONE fail
-    const app = mk({ mode: 'http', onCall: (t) => ALL[t] || { ok: true } });
-    await app.eval('refreshData()');
-    r.check('a clean refresh applies everything',
-      app.eval("String((DATA.companies||[]).map(c=>c.display_name))") === 'REFRESHED');
-    r.check('and shows no warning at all',
-      !/fail|could not/i.test(pillOf(app)),
-      `got ${JSON.stringify(pillOf(app))} -- a warning after a clean refresh `
-      + 'trains the operator to ignore the one that matters');
-  }
+  // Keeping them here made `harness` appear in --positive-control's detected
+  // list, which reads as "the harness module is positive-controlled" -- and it
+  // structurally cannot be. See the note in tests/README.md.
 
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;

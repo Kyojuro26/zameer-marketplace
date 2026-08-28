@@ -77,28 +77,37 @@ Two things that pass have to be re-earned, not assumed:
   "NOT COUNTED" rather than counting a crash as detection. Their evidence is
   the mutation suites, which is why every JS behaviour asserted here has a
   mutant.
-- `test_harness.js` is **half** positive-controllable, and the halves must not
-  be confused. `--positive-control` checks out the old *plugin* and runs it
-  against the *current* `tests/`, so the instrument is the same one in both
-  runs: varying the product cannot exercise a check whose subject is the
-  harness. Those checks — the DOM shim, the transport stub — pass against
-  `BASELINE_REF` and always will, and a green result there is not evidence of
-  anything in either direction.
+- `test_harness.js` **cannot be positive-controlled at all**, and this is
+  structural rather than a gap to be closed. `--positive-control` checks out
+  the old *plugin* and runs it against the *current* `tests/`, so the
+  instrument is the same one in both runs: varying the product cannot exercise
+  a check whose subject is the harness. Every check in that module — the DOM
+  shim, the transport stub — passes against `BASELINE_REF` and always will,
+  and a green result there is not evidence of anything in either direction.
+  `harness` must therefore never appear in the positive control's detected
+  list; if it does, something that is not an instrument check has been added
+  to it.
 
-  This paragraph used to say that of the whole module, which stopped being
-  true the moment the refreshData checks were added: those assert PRODUCT
-  behaviour and the baseline fails them, which is why `harness` now appears in
-  the positive control's detected list. A guarantee that quietly stopped being
-  true is this suite's own SHAPE 3, so it is corrected here rather than left
-  to be inherited.
+  This was briefly untrue. The refreshData checks were written into this
+  module because the harness fix that made them possible landed in the same
+  commit, and they assert PRODUCT behaviour that the baseline fails — so
+  `harness` did appear in the detected list, and the guarantee above had to be
+  softened to "half". A README paragraph explaining that only part of a module
+  is positive-controlled cannot outvote a module NAME emitted by the runner,
+  so the fix is the file boundary, not the prose: those checks are now
+  `test_refresh.js` and the list says `refresh`. One subject per module is what
+  makes the detected list readable as a guarantee.
 
-  The instrument half's evidence is the mutation protocol instead: each of the
-  four harness defects it was written for is reintroduced into `lib/dom.js` or
+  This module's evidence is the mutation protocol instead: each of the four
+  harness defects it was written for is reintroduced into `lib/dom.js` or
   `lib/view.js`, the suite is run, and each must produce a NAMED red check
   rather than a crash — the same standard `run_all.py` applies when it scores
-  a crashing module NOT COUNTED. That protocol is those checks' positive
-  control. Re-run it after any change to `lib/`, and do not take a green
-  `--positive-control` as a substitute.
+  a crashing module NOT COUNTED. That protocol is this module's only real
+  positive control. Re-run it after any change to `lib/`, and do not take a
+  green `--positive-control` as a substitute.
+- `test_refresh.js` holds refreshData's three states (some fail, all fail, none
+  fail). Product behaviour, positive-controllable, and mutation-covered by the
+  REFRESH pass of `mutate_failure.py`.
 - The Live Tracker's lateness answers are computed against **today**, so
   `test_livetracker.js` freezes the clock. A test whose expected answers drift
   with the wall clock stops asserting anything the week after it is written.

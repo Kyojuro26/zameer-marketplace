@@ -52,6 +52,7 @@ JS_MODULES = [("regression/test_view.js", "view"),
               ("regression/test_drawer_close.js", "drawer-close"),
               ("regression/test_receivables.js", "receivables"),
               ("regression/test_livetracker.js", "live-tracker/view"),
+              ("regression/test_refresh.js", "refresh"),
               ("regression/test_harness.js", "harness")]
 
 

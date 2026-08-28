@@ -536,20 +536,46 @@ SERVER = [
   "            return json.load(f)"),
  ("list_tracker passes a wrong-shaped file straight through",
   "        return v if isinstance(v, list) else []", "        return v"),
+ # Both mutants below anchor on list_tracker's WHOLE per-file body.
+ # The anchor this replaced was shortened to the bare `except` arm when the
+ # body changed, and a fragment cannot say WHICH line it mutated -- it is
+ # also one rename away from colliding with crm_info's near-identical arm.
  ("list_tracker swallows a corrupt file as empty",
+  "    out, problems = {}, {}\n"
+  "    for key, fname in ((\"tracker_buckets\", \"tracker_buckets.json\"),\n"
+  "                       (\"tracker_unlinked\", \"tracker_unlinked.json\")):\n"
+  "        try:\n"
+  "            out[key] = STORE.load_side(fname)\n"
+  "        except StoreError as ex:\n"
+  "            out[key] = []\n"
+  "            problems[key] = str(ex)\n",
+  "    out, problems = {}, {}\n"
+  "    for key, fname in ((\"tracker_buckets\", \"tracker_buckets.json\"),\n"
+  "                       (\"tracker_unlinked\", \"tracker_unlinked.json\")):\n"
+  "        try:\n"
+  "            out[key] = STORE.load_side(fname)\n"
+  "        except StoreError as ex:\n"
+  "            out[key] = []\n"),
+ # The per-file split is the point: one bad file must not take the other's
+ # rows with it. This mutant restores the single shared try.
+ ("list_tracker goes back to ONE try around both loads",
+  "    out, problems = {}, {}\n"
+  "    for key, fname in ((\"tracker_buckets\", \"tracker_buckets.json\"),\n"
+  "                       (\"tracker_unlinked\", \"tracker_unlinked.json\")):\n"
+  "        try:\n"
+  "            out[key] = STORE.load_side(fname)\n"
+  "        except StoreError as ex:\n"
+  "            out[key] = []\n"
+  "            problems[key] = str(ex)\n",
+  "    out, problems = {}, {}\n"
   "    try:\n"
-  "        return {\"ok\": True, \"interface_version\": VERSION,\n"
-  '                "tracker_buckets": STORE.load_side("tracker_buckets.json"),\n'
-  '                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}\n'
-  "    except StoreError as e:\n"
-  "        return _err(e)",
-  "    try:\n"
-  "        return {\"ok\": True, \"interface_version\": VERSION,\n"
-  '                "tracker_buckets": STORE.load_side("tracker_buckets.json"),\n'
-  '                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}\n'
-  "    except StoreError:\n"
-  '        return {"ok": True, "interface_version": VERSION,\n'
-  '                "tracker_buckets": [], "tracker_unlinked": []}'),
+  "        for key, fname in ((\"tracker_buckets\", \"tracker_buckets.json\"),\n"
+  "                           (\"tracker_unlinked\", \"tracker_unlinked.json\")):\n"
+  "            out[key] = STORE.load_side(fname)\n"
+  "    except StoreError as ex:\n"
+  "        out[\"tracker_buckets\"] = []\n"
+  "        out[\"tracker_unlinked\"] = []\n"
+  "        problems[\"tracker\"] = str(ex)\n"),
 ]
 
 

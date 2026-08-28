@@ -23,7 +23,7 @@ SRC = "plugins/unrivaled-solutions/skills/crm"
 F = "view/build_view.py"
 SERVER_F = "mcp/server.py"
 
-HARNESS_TEST = "./tests/regression/test_harness.js"
+REFRESH_TEST = "./tests/regression/test_refresh.js"
 VIEW_TEST = "./tests/regression/test_view.js"
 TRACKER_TEST = "./tests/regression/test_livetracker.js"
 INTEGRITY_TEST = "./tests/regression/test_integrity.py"
@@ -158,6 +158,78 @@ HEALTH = [
   "            problems[e] = str(ex)",
   "    for e in ENTITY_FILES:\n"
   "        counts[e] = len(STORE.load(e))"),
+ # ADDED WITH THE FIX IT GRADES, not with the plumbing one commit back.
+ # This anchors on the REORDERED tail, which did not exist then -- dropped into
+ # that commit it reported ANCHOR-MISSING and proved nothing.
+ #
+ # The anchor is the whole tail because the defect is an ORDER: `ok` computed at
+ # the top of it rather than the bottom, with the two edit points twenty-two
+ # lines apart. No shorter anchor can express that, and a fuzzy one could not
+ # say which of the two it moved.
+ ("crm_info computes ok BEFORE the blocks that can still add problems",
+  "    # `ok` is NOT computed here. Two blocks below can still add to `problems`\n"
+  "    # -- the enrichment/archive read and the auto_created manifest -- and a\n"
+  "    # value snapshotted at this point reported \"ok\": true with those problems\n"
+  "    # listed underneath it. A caller branches on `ok` and never reads the list,\n"
+  "    # so the one machine-readable field said the store was fine while the\n"
+  "    # human-readable one said it was not. Computed once, at the end, from the\n"
+  "    # finished dict.\n"
+  "    out = {\"interface_version\": VERSION,\n"
+  "           \"server_version\": SERVER_VERSION,\n"
+  "           \"store\": str(STORE.root), \"counts\": counts}\n"
+  "    try:\n"
+  "        out[\"archived_companies\"] = len(_archived_ids())\n"
+  "        out[\"enriched_companies\"] = len(STORE.load_enrichment())\n"
+  "    except StoreError as ex:\n"
+  "        problems[\"enrichment/archive\"] = str(ex)\n"
+  "    # A store file this build had to create at first boot is surfaced here,\n"
+  "    # not buried in a temp-dir launch log. If it was missing because OneDrive\n"
+  "    # had not synced it down, this is the operator's only signal.\n"
+  "    try:\n"
+  "        created = (STORE._manifest_read_raw() or {}).get(\"auto_created\") or []\n"
+  "        if created:\n"
+  "            out[\"auto_created_store_files\"] = created\n"
+  "            problems[\"auto_created\"] = (\n"
+  "                f\"{created} did not exist when the CRM first started and were \"\n"
+  "                f\"created empty. If they should have held records, restore them \"\n"
+  "                f\"from your backup before making further edits.\")\n"
+  "    except Exception:                                 # noqa: BLE001\n"
+  "        pass\n"
+  "    if problems:\n"
+  "        out[\"problems\"] = problems\n"
+  "    out[\"ok\"] = not problems\n"
+  "    return out",
+  "    # `ok` is NOT computed here. Two blocks below can still add to `problems`\n"
+  "    # -- the enrichment/archive read and the auto_created manifest -- and a\n"
+  "    # value snapshotted at this point reported \"ok\": true with those problems\n"
+  "    # listed underneath it. A caller branches on `ok` and never reads the list,\n"
+  "    # so the one machine-readable field said the store was fine while the\n"
+  "    # human-readable one said it was not. Computed once, at the end, from the\n"
+  "    # finished dict.\n"
+  "    out = {\"ok\": not problems, \"interface_version\": VERSION,\n"
+  "           \"server_version\": SERVER_VERSION,\n"
+  "           \"store\": str(STORE.root), \"counts\": counts}\n"
+  "    try:\n"
+  "        out[\"archived_companies\"] = len(_archived_ids())\n"
+  "        out[\"enriched_companies\"] = len(STORE.load_enrichment())\n"
+  "    except StoreError as ex:\n"
+  "        problems[\"enrichment/archive\"] = str(ex)\n"
+  "    # A store file this build had to create at first boot is surfaced here,\n"
+  "    # not buried in a temp-dir launch log. If it was missing because OneDrive\n"
+  "    # had not synced it down, this is the operator's only signal.\n"
+  "    try:\n"
+  "        created = (STORE._manifest_read_raw() or {}).get(\"auto_created\") or []\n"
+  "        if created:\n"
+  "            out[\"auto_created_store_files\"] = created\n"
+  "            problems[\"auto_created\"] = (\n"
+  "                f\"{created} did not exist when the CRM first started and were \"\n"
+  "                f\"created empty. If they should have held records, restore them \"\n"
+  "                f\"from your backup before making further edits.\")\n"
+  "    except Exception:                                 # noqa: BLE001\n"
+  "        pass\n"
+  "    if problems:\n"
+  "        out[\"problems\"] = problems\n"
+  "    return out"),
 ]
 
 
@@ -167,7 +239,7 @@ def main():
     # which silently limited this script to the screen -- the server side of the
     # same class could not be graded here at all.
     for title, test_rel, target, mutants in (
-            ("REFRESH -- test_harness.js", HARNESS_TEST, F, REFRESH),
+            ("REFRESH -- test_refresh.js", REFRESH_TEST, F, REFRESH),
             ("SITES -- test_view.js", VIEW_TEST, F, SITES),
             ("TRACKER -- test_livetracker.js", TRACKER_TEST, F, TRACKER),
             ("HEALTH -- test_integrity.py", INTEGRITY_TEST, SERVER_F, HEALTH)):

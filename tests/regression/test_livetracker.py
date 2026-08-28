@@ -1170,6 +1170,33 @@ def run(server, crm_dir=None):
                     f"got {tk} -- a half-written OneDrive file is not an empty "
                     f"tracker")
 
+            # One corrupt tracker file must not take the OTHER one down,
+            # and the error must name WHICH file. Both loads shared a single
+            # try, so a half-written tracker_buckets.json returned one
+            # StoreError for the pair -- the good unlinked rows went with it,
+            # and the message did not say which file was bad. crm_info two
+            # tools away states the opposite rule for its own reads ("one
+            # unreadable file reports as an error string for that entity
+            # instead of taking down the whole health check"); this is that
+            # rule applied where it was missing.
+            st.reset(companies=[company()], projects=[project("4521")])
+            (st.path / "tracker_buckets.json").write_text("{ not json")
+            (st.path / "tracker_unlinked.json").write_text(json.dumps(
+                [{"sheet_row": 8, "raw_key": "1419", "client": "Ironvale"}]))
+            st.rebind()
+            tk = st.call("list_tracker")
+            r.check("a corrupt buckets file names the file that failed",
+                    "tracker_buckets" in str(tk.get("problems") or tk.get("error") or ""),
+                    f"got {tk} -- the operator cannot restore a file the error "
+                    f"does not name")
+            r.check("and does not discard the unlinked rows that read fine",
+                    len(tk.get("tracker_unlinked") or []) == 1,
+                    f"got {tk} -- one bad file took down a section whose own "
+                    f"file was intact")
+            r.check("while still reporting NOT ok", tk.get("ok") is False,
+                    f"got {tk} -- the refresh must name list_tracker as stale "
+                    f"rather than quietly showing a half-loaded tracker")
+
             # ---- tracker_key is a writable, text-coerced identifier ---------
             st.reset(companies=[company()], projects=[])
             mk = st.call("create_project", fields={

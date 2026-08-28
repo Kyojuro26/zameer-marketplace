@@ -1398,12 +1398,28 @@ def list_tracker() -> dict:
     refreshData pulled the other five and left the bucket headings and the
     whole "Not in the CRM yet" section frozen at page-build time -- the screen
     looked freshly refreshed while a third of it was not."""
-    try:
-        return {"ok": True, "interface_version": VERSION,
-                "tracker_buckets": STORE.load_side("tracker_buckets.json"),
-                "tracker_unlinked": STORE.load_side("tracker_unlinked.json")}
-    except StoreError as e:
-        return _err(e)
+    # PER-FILE, not one try around both. These two sections are independent --
+    # nothing in the buckets is needed to read the unlinked rows -- and a
+    # single shared try meant a half-written tracker_buckets.json discarded a
+    # perfectly good tracker_unlinked.json along with it. crm_info states this
+    # rule for its own reads; list_tracker did not follow it.
+    out, problems = {}, {}
+    for key, fname in (("tracker_buckets", "tracker_buckets.json"),
+                       ("tracker_unlinked", "tracker_unlinked.json")):
+        try:
+            out[key] = STORE.load_side(fname)
+        except StoreError as ex:
+            out[key] = []
+            problems[key] = str(ex)
+    out["interface_version"] = VERSION
+    if problems:
+        out["problems"] = problems
+    # Computed last, from the finished dict -- the same reason crm_info does.
+    # ok stays FALSE when either file failed: the section that did load is
+    # returned so a caller CAN use it, but the refresh must still name
+    # list_tracker as stale rather than paint a half-loaded tracker as current.
+    out["ok"] = not problems
+    return out
 
 
 @mcp.tool()
@@ -2466,7 +2482,14 @@ def crm_info() -> dict:
         except StoreError as ex:
             counts[e] = None
             problems[e] = str(ex)
-    out = {"ok": not problems, "interface_version": VERSION,
+    # `ok` is NOT computed here. Two blocks below can still add to `problems`
+    # -- the enrichment/archive read and the auto_created manifest -- and a
+    # value snapshotted at this point reported "ok": true with those problems
+    # listed underneath it. A caller branches on `ok` and never reads the list,
+    # so the one machine-readable field said the store was fine while the
+    # human-readable one said it was not. Computed once, at the end, from the
+    # finished dict.
+    out = {"interface_version": VERSION,
            "server_version": SERVER_VERSION,
            "store": str(STORE.root), "counts": counts}
     try:
@@ -2489,6 +2512,7 @@ def crm_info() -> dict:
         pass
     if problems:
         out["problems"] = problems
+    out["ok"] = not problems
     return out
 
 

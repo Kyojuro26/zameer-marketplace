@@ -85,6 +85,35 @@ def run(server, crm_dir=None):
             f"got counts={info.get('counts')} -- per-file tolerance means the "
             f"readable entities keep reporting")
 
+    r.section("crm_info's ok reflects EVERY problem, including the late ones")
+    # `ok` was computed from `problems` immediately after the ENTITY_FILES
+    # loop, while two later blocks -- enrichment/archive, and the
+    # auto_created manifest -- can still add to it. Anything they found was
+    # listed under "problems" beneath an "ok": true, so the health check
+    # contradicted itself and the only machine-readable field said fine.
+    s.reset(companies=[company()])
+    (s.path / "enrichment.json").write_text("{ not json")
+    s.rebind()
+    info = s.call("crm_info")
+    r.check("a corrupt enrichment file makes crm_info report NOT ok",
+            info.get("ok") is False,
+            f"got ok={info.get('ok')!r} with problems="
+            f"{list((info.get('problems') or {}).keys())} -- a health check "
+            f"that lists a problem under ok:true is worse than one that "
+            f"misses it, because a caller branches on ok")
+    r.check("and names the file it could not read",
+            "enrichment/archive" in (info.get("problems") or {}),
+            f"got {info.get('problems')}")
+    r.check("while the counts it DID read are still reported",
+            (info.get("counts") or {}).get("companies") == 1,
+            f"got {info.get('counts')} -- per-file tolerance is the point; "
+            f"one bad file must not blank the whole health check")
+
+    s.reset(companies=[company()])
+    info = s.call("crm_info")
+    r.check("and a clean store is still ok", info.get("ok") is True,
+            f"got {info} -- an ok that is never true is not a signal")
+
     r.section("create_shipment identity cannot be overridden by caller fields")
     s.reset(companies=[company(), company("beta", "Beta Ltd")],
             projects=[project("4521"), project("9999", archived=True)])
