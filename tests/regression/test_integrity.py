@@ -17,9 +17,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.harness import Result, Store, company, project, invoice, shipment  # noqa: E402
 
 
-def run(server):
+def run(server, crm_dir=None):
     r = Result("integrity", since="0.1.26")
-    s = Store(server)
+    # crm_dir: the same shape test_livetracker.py and the shape modules already
+    # use. Without it this module cannot be driven against a MUTATED copy of the
+    # plugin -- mutate_lib calls run(None) and Store(None) fails before a single
+    # mutant is applied -- so nothing this module asserts had mutation cover.
+    srv = server
+    if srv is None:
+        from lib.harness import load_server
+        crm = crm_dir or str(Path(__file__).resolve().parents[2]
+                             / "plugins/unrivaled-solutions/skills/crm")
+        try:
+            srv = load_server(str(crm))
+        except Exception as exc:                              # noqa: BLE001
+            r.check("the server module imports", False,
+                    f"{type(exc).__name__}: {exc}")
+            return r
+    s = Store(srv)
 
     r.section("a missing entity file must fail closed, never be recreated empty")
     s.reset(companies=[company()],
@@ -49,6 +64,26 @@ def run(server):
         res = s.call(tool, **args)
         r.check(f"{tool} returns a result rather than raising",
                 "_raised" not in res, res.get("_raised", ""))
+
+    r.section("crm_info survives ONE unreadable file without losing the rest")
+    # crm_info's per-file tolerance is stated in a comment in its body and was
+    # asserted nowhere. It is correct today; this pins it so the HEALTH pass of
+    # mutate_failure.py has something it can be shown to kill.
+    s.reset(companies=[company()], invoices=[invoice("7001")])
+    (s.path / "invoices.json").write_text("{ not json")
+    s.rebind()
+    info = s.call("crm_info")
+    r.check("one corrupt entity file does not take down the health check",
+            "_raised" not in info,
+            info.get("_raised", "") + " -- the operator's only diagnostic must "
+            "not be the thing that dies on a half-synced OneDrive file")
+    r.check("the file that could not be read is named",
+            "invoices" in (info.get("problems") or {}),
+            f"got problems={info.get('problems')}")
+    r.check("and the files that DID read still report their counts",
+            (info.get("counts") or {}).get("companies") == 1,
+            f"got counts={info.get('counts')} -- per-file tolerance means the "
+            f"readable entities keep reporting")
 
     r.section("create_shipment identity cannot be overridden by caller fields")
     s.reset(companies=[company(), company("beta", "Beta Ltd")],

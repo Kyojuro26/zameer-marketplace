@@ -21,10 +21,12 @@ from mutate_lib import mutate
 
 SRC = "plugins/unrivaled-solutions/skills/crm"
 F = "view/build_view.py"
+SERVER_F = "mcp/server.py"
 
 HARNESS_TEST = "./tests/regression/test_harness.js"
 VIEW_TEST = "./tests/regression/test_view.js"
 TRACKER_TEST = "./tests/regression/test_livetracker.js"
+INTEGRITY_TEST = "./tests/regression/test_integrity.py"
 
 # ---- refreshData: three states, not two ----------------------------------
 REFRESH = [
@@ -132,14 +134,45 @@ TRACKER = [
 ]
 
 
+# ---- crm_info: the store's own health check --------------------------------
+# Before this commit `grep -rn crm_info tests/mutate_*.py` returned NOTHING --
+# the health check the operator relies on had no mutation cover anywhere.
+#
+# The reason was structural rather than neglect. mutate_lib drives a python
+# module as run(None) when its signature takes one parameter, and
+# test_integrity.py's did: Store(None) failed before a single mutant could be
+# applied, so the baseline never passed and no verdict was reachable. The
+# run(server, crm_dir=None) fallback in this commit is what makes any of this
+# gradable; the mutant below is the proof that it grades.
+#
+# Anchored on the WHOLE per-file loop, not the bare except arm: the decision
+# being reversed is "one unreadable file is tolerated per entity", and a
+# fragment could not say which loop it mutated.
+HEALTH = [
+ ("crm_info stops tolerating one unreadable file and dies on the whole check",
+  "    for e in ENTITY_FILES:\n"
+  "        try:\n"
+  "            counts[e] = len(STORE.load(e))\n"
+  "        except StoreError as ex:\n"
+  "            counts[e] = None\n"
+  "            problems[e] = str(ex)",
+  "    for e in ENTITY_FILES:\n"
+  "        counts[e] = len(STORE.load(e))"),
+]
+
+
 def main():
     worst = 0
-    for title, test_rel, mutants in (
-            ("REFRESH -- test_harness.js", HARNESS_TEST, REFRESH),
-            ("SITES -- test_view.js", VIEW_TEST, SITES),
-            ("TRACKER -- test_livetracker.js", TRACKER_TEST, TRACKER)):
+    # Per-section TARGET file. Every section used to mutate view/build_view.py,
+    # which silently limited this script to the screen -- the server side of the
+    # same class could not be graded here at all.
+    for title, test_rel, target, mutants in (
+            ("REFRESH -- test_harness.js", HARNESS_TEST, F, REFRESH),
+            ("SITES -- test_view.js", VIEW_TEST, F, SITES),
+            ("TRACKER -- test_livetracker.js", TRACKER_TEST, F, TRACKER),
+            ("HEALTH -- test_integrity.py", INTEGRITY_TEST, SERVER_F, HEALTH)):
         print(f"\n=== {title}  ({len(mutants)} mutants) ===")
-        worst = max(worst, mutate(SRC, test_rel, F, mutants))
+        worst = max(worst, mutate(SRC, test_rel, target, mutants))
     return worst
 
 
