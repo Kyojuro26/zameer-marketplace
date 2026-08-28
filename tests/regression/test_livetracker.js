@@ -162,6 +162,7 @@ function seedStore(dir) {
     null,
     // client matches a company EXACTLY -> the dropdown may preselect it
     { sheet_row: 7, reason: 'no project number', client: 'Meridian Corp',
+      fingerprint: 'fp-row7',
       client_po: 'PO-7007', start_date: '2026-07-03', location: 'Dayton OH',
       open_orders_notes: LONG_NOTE_UNLINKED,
       tracker_status: 'awaiting_materials',
@@ -172,6 +173,7 @@ function seedStore(dir) {
     // stamped from the adoption date and the year taken from the row are
     // otherwise the same number, and no assertion could tell them apart.
     { sheet_row: 8, reason: 'no matching project', raw_key: '1419',
+      fingerprint: 'fp-row8',
       client: 'Northgate Tooling', client_po: 'PO-8008',
       start_date: '2025-12-28', location: 'Akron OH',
       open_orders_notes: 'Keyed 1419 on the sheet; the deal log calls it '
@@ -182,6 +184,7 @@ function seedStore(dir) {
     // option selected -- the browser then reported the first customer and the
     // guard passed on it, filing the job under a company nobody chose.
     { sheet_row: 10, reason: 'no project number', client: 'Cobalt Freight',
+      fingerprint: 'fp-row10',
       client_po: 'PO-1010', start_date: '2026-07-08', location: 'Toledo OH',
       open_orders_notes: 'Freight job, no number.',
       tracker_status: 'action_owner', legs: [] }]);
@@ -560,7 +563,9 @@ async function run(crmDir) {
     const c = calls[0];
     r.check('adoption goes through create_project like everything else',
       c.tool === 'create_project',
-      `got ${c.tool} -- a private path here is one more thing to keep in step`);
+      `got ${c.tool} -- a private path here is one more thing to keep in step, `
+      + 'and the row does not need a dismissal written alongside: its NUMBER '
+      + 'retires it on the next import');
     const f = (c.args && c.args.fields) || {};
     r.check('it writes the number he typed', String(f.project_no) === '1500');
     r.check('and the customer he chose', f.company_id === 'mer');
@@ -591,11 +596,19 @@ async function run(crmDir) {
       + 'match on, so this plus the note is the only way the next import knows '
       + 'the row is already a project and stops re-offering it for adoption');
   }
+  // MARKED, not removed. It stops being OFFERED -- which is what matters --
+  // but it stays in the data so the screen can show it under "Dismissed" with
+  // a count. A row that vanishes silently is the failure this screen must
+  // never produce, and it is one click from coming back.
   r.check('the adopted row stops being offered for adoption',
-    ev("String(arr(DATA.tracker_unlinked).filter(u=>u).map(u=>u.sheet_row))")
+    ev("String(arr(DATA.tracker_unlinked).filter(u=>u&&!u.dismissed).map(u=>u.sheet_row))")
       === '7,10',
-    `got ${ev("String(arr(DATA.tracker_unlinked).filter(u=>u).map(u=>u.sheet_row))")}`
-    + ' -- leaving it there invites a second project for the same job');
+    `got ${ev("String(arr(DATA.tracker_unlinked).filter(u=>u&&!u.dismissed).map(u=>u.sheet_row))")}`
+    + ' -- leaving it offered invites a second project for the same job');
+  r.check('and it is gone from the data, not merely flagged',
+    ev("String(arr(DATA.tracker_unlinked).filter(u=>u).map(u=>u.sheet_row))") === '7,10',
+    'adoption removes the card now rather than dismissing it -- by_key retires '
+    + 'the row at the next import because its number is a project');
   r.check('and the new project is on the screen',
     ev("liveRows().some(x=>String(x.p.project_no)==='1500')"),
     'it was adopted so it can be worked from here');
@@ -910,17 +923,261 @@ async function run(crmDir) {
   fs.writeFileSync(path.join(archDir, 'companies.json'), JSON.stringify(cos));
   const archApp = launch({ crmDir, storeDir: archDir, outDir: tmp, mode: 'http' });
   const archMain = archApp.doc.getElementById('main').innerHTML;
-  r.check("an archived customer's unlinked row is gone from the screen",
-    !/tracker row 7/.test(archMain),
-    'it rendered their name and their note after they had been archived');
-  r.check('and its note went with it',
-    archMain.indexOf('Needs a number before anything else') === -1);
+  // INVERTED, deliberately. This used to assert that archiving a customer hid
+  // their tracker rows, matched on a SQUASHED display name because the row
+  // carries no company_id. Its own comment claimed the comparison "only ever
+  // HIDES a card, so a near-miss costs a visible row, never a wrong record" --
+  // which inverts this file's rule that a hidden job is worse than a duplicate
+  // card. This store has real duplicate records for one customer, so archiving
+  // the dupe is the single likeliest reason to archive anything -- and it took
+  // the SURVIVOR's live rows with it. Name-squashing across a boundary the row
+  // cannot express is a guess, and guessing is what this commit removes.
+  r.check("an archived customer's unlinked row still SHOWS",
+    /tracker row 7/.test(archMain),
+    'squash-matching a display name hid the live rows of every company whose '
+    + 'squashed name collided with an archived one -- including the survivor '
+    + 'of a duplicate pair, which is the common case');
+  r.check('and its note is still there',
+    archMain.indexOf('Needs a number before anything else') > -1);
   r.check('a live customer\'s unlinked row is untouched',
-    /tracker row 8/.test(archMain),
-    'the filter must hide one company, not the section');
-  r.check('the match is on the name, since that is all the row carries',
-    archApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u).length)") === '2',
-    'Meridian Corp is archived; the other two rows name nobody archived');
+    /tracker row 8/.test(archMain));
+  r.check('nothing is dropped from the data on the way to the page',
+    archApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u).length)") === '3',
+    'the build step must not decide which rows the operator may see');
+
+  // ---- the three buttons, unconditional --------------------------------
+  //
+  // No recognition. The app never decides that a reappeared row is one he
+  // adopted before -- that decision is a matcher, and matchers are what this
+  // removes. Instead the button he needs is on EVERY card, so the
+  // retitled-after-adoption case needs no detection at all.
+  // TWO here, not three: row 8 was adopted earlier in this run.
+  const nAdopt = (main.match(/openAdoptTrackerRow\(/g) || []).length;
+  r.check('every unlinked card offers adoption', nAdopt === 2, `got ${nAdopt}`);
+  r.check('and offers "already in the CRM"',
+    (main.match(/dismissRow\([^)]*'already_adopted'/g) || []).length === nAdopt,
+    'without it, a row he adopted and then retitled has no one-click answer '
+    + 'and Add to CRM dead-ends on "project already exists"');
+  r.check('and offers "not a job"',
+    (main.match(/dismissRow\([^)]*'not_a_job'/g) || []).length === nAdopt,
+    'the dismiss buttons must appear on exactly the cards adoption does');
+  r.check('the two dismiss labels are distinct on the page',
+    /Already in the CRM/.test(main) && /Not a job/.test(main),
+    'one soft label covering both is how the guard erodes: "Not a job" has '
+    + 'to feel wrong to click on live work');
+
+  // ---- the burndown: this list going to zero IS the feature -------------
+  r.check('the unlinked heading counts what is LEFT to clear',
+    /left to clear/.test(main),
+    'the workbook is being retired; "Not in the CRM yet" is a migration '
+    + 'checklist he burns down once, not a permanent screen, and a bare count '
+    + 'does not say that');
+  r.check('and a shared fingerprint says it speaks for both rows',
+    app.eval(
+      "(function(){var u={sheet_row:1,client:'X',legs:[],fingerprint:'z',"
+      + "shares_fingerprint:2};return /identical rows/.test(unlinkedCard(u,0))"
+      + "?'yes':'no';})()") === 'yes',
+    'two rows he cannot tell apart are one decision, and one click clearing '
+    + 'two cards has to be stated or it reads as a bug');
+
+  // ---- the dismissed section, which must never be invisible -------------
+  const disDir = path.join(tmp, 'store-dis');
+  fs.cpSync(store, disDir, { recursive: true });
+  const rawUnl = JSON.parse(fs.readFileSync(path.join(disDir, 'tracker_unlinked.json'), 'utf8'));
+  rawUnl.forEach((u, i) => { if (u) u.fingerprint = 'fp' + i; });
+  fs.writeFileSync(path.join(disDir, 'tracker_unlinked.json'), JSON.stringify(rawUnl));
+  // The flag is DERIVED from tracker_dismissed.json, which is the only
+  // authority. Stamping dismissed:true on the row with nothing behind it is
+  // exactly the stale flag the build step now strips.
+  const fp7 = (rawUnl.find(u => u && u.sheet_row === 7) || {}).fingerprint;
+  fs.writeFileSync(path.join(disDir, 'tracker_dismissed.json'), JSON.stringify(
+    [{ fingerprint: fp7, reason: 'not_a_job', sheet_row: 7 }]));
+  const disApp = launch({ crmDir, storeDir: disDir, outDir: tmp, mode: 'http' });
+  const disMain = disApp.doc.getElementById('main').innerHTML;
+  r.check('a dismissed row is out of the live list',
+    !/tracker row 7[\s\S]{0,400}?openAdoptTrackerRow/.test(
+      disMain.split(/Dismissed/)[0] || ''),
+    'it must not still be offered for adoption in the live section');
+  r.check('but the screen SAYS how many are dismissed',
+    /Dismissed/.test(disMain) && /\b1\b/.test(disMain),
+    'THE failure this must never produce is a dismissed card silently '
+    + 'hiding a live job -- a zero-height section is exactly that');
+  r.check('and offers to put it back',
+    /restoreRow\(/.test(disMain),
+    'a dismissal he cannot undo is a delete');
+  r.check('a row with no fingerprint offers no dismiss button',
+    disApp.eval(
+      "(function(){var u={sheet_row:99,client:'X',legs:[]};"
+      + "return /dismissRow\\(/.test(unlinkedCard(u,0))?'yes':'no';})()") === 'no',
+    'a store imported before this shipped has rows with no handle; offering '
+    + 'a button that cannot work is worse than offering none');
+
+  // ---- the conflict net: Add to CRM must not dead-end ------------------
+  const cfDir = path.join(tmp, 'store-conflict');
+  fs.cpSync(store, cfDir, { recursive: true });
+  const cfApp = launch({ crmDir, storeDir: cfDir, outDir: tmp, mode: 'http',
+    onCall: (t) => t === 'create_project'
+      ? { ok: false, error: "project '4501' already exists" }
+      : { ok: true } });
+  cfApp.eval("setFilter('live'); renderMain();");
+  cfApp.eval("openAdoptTrackerRow(2)");
+  cfApp.el('a_pno').value = '4501';
+  cfApp.el('a_cid').value = 'acme';
+  await cfApp.eval("saveAdoptTrackerRow(2)");
+  const cfMsg = (cfApp.el('savedMsg') || { textContent: '' }).textContent || '';
+  const cfBody = (cfApp.el('a_conflict') || { innerHTML: '' }).innerHTML || '';
+  r.check('a number already in use does not just fail',
+    /already exists/i.test(cfMsg + cfBody),
+    `msg=${JSON.stringify(cfMsg)} -- he has to be told which project it is`);
+  r.check('and he is offered the one-click answer instead of a dead end',
+    /dismissRow\([^)]*'already_adopted'/.test(cfBody),
+    `body had no link-it action -- "project already exists" with no way `
+    + 'forward is the 0.1.32 bug reached by a new route');
+
+  // ---- the STATIC page must know about dismissals made through the tools
+  //
+  // render_html reads tracker_unlinked.json, where the `dismissed` flag is
+  // stamped only by an IMPORT. A dismissal written by dismiss_tracker_row or
+  // adopt_tracker_row lands in tracker_dismissed.json, which the build step
+  // never read -- so a row he had adopted rendered back under "Not in the CRM
+  // yet" with an Add-to-CRM button. With a backend the live refresh corrects
+  // it; in the embedded/demo mode this page advertises, it never does.
+  const bootDir = path.join(tmp, 'store-boot');
+  fs.cpSync(store, bootDir, { recursive: true });
+  const bootUnl = JSON.parse(fs.readFileSync(path.join(bootDir, 'tracker_unlinked.json'), 'utf8'));
+  bootUnl.forEach(u => { if (u) delete u.dismissed; });
+  fs.writeFileSync(path.join(bootDir, 'tracker_unlinked.json'), JSON.stringify(bootUnl));
+  fs.writeFileSync(path.join(bootDir, 'tracker_dismissed.json'), JSON.stringify(
+    [{ fingerprint: 'fp-row8', reason: 'adopted_here', sheet_row: 8 }]));
+  const bootApp = launch({ crmDir, storeDir: bootDir, outDir: tmp, mode: 'http' });
+  r.check('the built page honours a dismissal made through the tools',
+    bootApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).map(u=>u.sheet_row))")
+      === '8',
+    `got ${bootApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).map(u=>u.sheet_row))")}`
+    + ' -- otherwise a row he adopted is offered for adoption all over again');
+  r.check('and carries the reason so the card does not call it "not a job"',
+    bootApp.eval("String((arr(DATA.tracker_unlinked).find(u=>u&&u.dismissed)||{}).reason_dismissed)")
+      === 'adopted_here',
+    `got ${bootApp.eval("String((arr(DATA.tracker_unlinked).find(u=>u&&u.dismissed)||{}).reason_dismissed)")}`);
+  r.check('a corrupt dismissal file does not stop the page being built',
+    (() => {
+      const bad = path.join(tmp, 'store-boot-bad');
+      fs.cpSync(bootDir, bad, { recursive: true });
+      fs.writeFileSync(path.join(bad, 'tracker_dismissed.json'), '{ not json');
+      try {
+        const a = launch({ crmDir, storeDir: bad, outDir: tmp, mode: 'http' });
+        return /Not in the CRM yet/.test(a.doc.getElementById('main').innerHTML);
+      } catch (e) { return 'threw: ' + String(e).slice(0, 120); }
+    })() === true,
+    'the page is the only way in; a bad side file must not take it down');
+
+  // ---- a success must not look like a failure --------------------------
+  //
+  // The mirror of everything this sequence has been about. The link-it button
+  // in the conflict box DID land the dismissal -- and the drawer stayed open,
+  // #savedMsg still showed the red mark from the save that failed, and the
+  // button was still sitting there inviting a second press.
+  const cf2 = launch({ crmDir, storeDir: cfDir, outDir: tmp, mode: 'http',
+    onCall: (t) => t === 'create_project'
+      ? { ok: false, error: "project '4501' already exists" }
+      : { ok: true } });
+  cf2.eval("setFilter('live'); renderMain();");
+  cf2.eval("openAdoptTrackerRow(2)");
+  cf2.el('a_pno').value = '4501';
+  cf2.el('a_cid').value = 'acme';
+  await cf2.eval("saveAdoptTrackerRow(2)");
+  await cf2.eval("dismissRow('fp-row8','already_adopted')");
+  r.check('linking it closes the drawer',
+    !/\bopen\b/.test(cf2.el('drawer').className || ''),
+    `class=${JSON.stringify(cf2.el('drawer').className)} -- the dismissal `
+    + 'landed; leaving the drawer up says it did not');
+  r.check('and clears the failure message it left behind',
+    !/✗/.test((cf2.el('savedMsg') || { textContent: '' }).textContent || ''),
+    `savedMsg=${JSON.stringify((cf2.el('savedMsg')||{}).textContent)} -- a red `
+    + 'mark over a write that succeeded is this whole sequence inverted');
+  r.check('and the row is out of the live list',
+    cf2.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).length)") === '1');
+
+  r.check('a dismissed row with no fingerprint offers no restore button',
+    disApp.eval(
+      "(function(){var u={sheet_row:99,client:'X',dismissed:true};"
+      + "return /restoreRow\\(/.test(dismissedCard(u))?'yes':'no';})()") === 'no',
+    'unlinkedCard guards exactly this case eight lines earlier -- a button '
+    + 'that cannot work is worse than no button');
+
+  r.check('a fingerprint-less row says why its buttons are missing',
+    /re-?import/i.test(disApp.eval(
+      "unlinkedCard({sheet_row:99,client:'X',legs:[]},0)")),
+    'otherwise the card just silently has fewer buttons than its neighbours');
+
+  // ---- the card promises both twins; the page has to clear both --------
+  const twDir = path.join(tmp, 'store-twins');
+  fs.cpSync(store, twDir, { recursive: true });
+  const twUnl = JSON.parse(fs.readFileSync(path.join(twDir, 'tracker_unlinked.json'), 'utf8'));
+  twUnl.forEach(u => { if (u && (u.sheet_row === 7 || u.sheet_row === 8)) {
+    u.fingerprint = 'fp-twin'; u.shares_fingerprint = 2; } });
+  fs.writeFileSync(path.join(twDir, 'tracker_unlinked.json'), JSON.stringify(twUnl));
+  const twApp = launch({ crmDir, storeDir: twDir, outDir: tmp, mode: 'http',
+    onCall: () => ({ ok: true }) });
+  twApp.eval("setFilter('live'); renderMain();");
+  await twApp.eval("dismissRow('fp-twin','not_a_job')");
+  r.check('dismissing a shared fingerprint clears EVERY row that shares it',
+    twApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).map(u=>u.sheet_row))")
+      === '7,8',
+    `got ${twApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).map(u=>u.sheet_row))")}`
+    + ' -- the card says "this clears both" and the store does clear both; '
+    + 'a .find() clears one and leaves the screen disagreeing with the store');
+  await twApp.eval("restoreRow('fp-twin')");
+  r.check('and restoring brings every one of them back',
+    twApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).length)") === '0',
+    'otherwise a card sits under Dismissed with a "Put it back" that is now a '
+    + 'no-op on the store');
+
+  // ---- the burndown is a migration quantity, not a search result -------
+  const bApp = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
+  bApp.eval("setFilter('live'); renderMain();");
+  const before = (bApp.el('main').innerHTML.match(/(\d+) rows? left to clear/) || [])[1];
+  bApp.eval("query='northgate'; renderList(); renderMain();");
+  const after = (bApp.el('main').innerHTML.match(/(\d+) rows? left to clear/) || [])[1];
+  r.check('searching does not change how much migration is left',
+    before === after, `${before} -> ${after} -- "left to clear" is a claim `
+    + 'about the whole checklist; computing it after the search filter turns '
+    + 'a search result into a false statement about work remaining');
+
+  // ---- an in-flight dismissal must not close a DIFFERENT drawer ---------
+  let release;
+  const slow = new Promise(res => { release = res; });
+  const raceApp = launch({ crmDir, storeDir: cfDir, outDir: tmp, mode: 'http',
+    onCall: (t) => t === 'dismiss_tracker_row' ? slow : { ok: true } });
+  raceApp.eval("setFilter('live'); renderMain();");
+  const pending = raceApp.eval("dismissRow('fp-row8','not_a_job')");
+  raceApp.eval("openProject('4501')");           // he opens something else
+  // drawerDirty set directly rather than by typing into a field: reaching for
+  // #f_oon made this module CRASH under an unrelated mutant that removes that
+  // textarea, and a module that dies has evaluated nothing.
+  raceApp.eval("drawerDirty = true;");
+  release({ ok: true });
+  await pending;
+  r.check('an in-flight dismissal leaves a later drawer alone',
+    /\bopen\b/.test(raceApp.el('drawer').className || ''),
+    `class=${JSON.stringify(raceApp.el('drawer').className)} -- it closed a `
+    + 'drawer it never opened, through closeDrawer() rather than '
+    + 'requestCloseDrawer(), so the discard prompt never fired and the edits went');
+  r.check('and does not silently discard his unsaved edits',
+    raceApp.eval("String(drawerDirty)") === 'true',
+    'the dirty flag was cleared by a close he did not ask for');
+
+  // ---- the new call sites report failure, like every other one ----------
+  const deadDis = launch({ crmDir, storeDir: disDir, outDir: tmp, mode: 'cowork',
+    onCall: () => Promise.reject('bridge closed') });
+  let disThrew = null;
+  try { await deadDis.eval("dismissRow('fp1','not_a_job')"); }
+  catch (e) { disThrew = String(e).slice(0, 120); }
+  const said = deadDis.alerts().join(' | ');
+  r.check('a dead transport on dismiss tells the operator',
+    disThrew === null && said.length > 0 && !/undefined/.test(said),
+    `threw=${disThrew} alerts=${JSON.stringify(deadDis.alerts())} -- a button that goes quiet `
+    + 'is the silence the previous commit removed everywhere else');
 
   // ---- the main pane caps like every sibling list, and says so -------------
   const bigDir = path.join(tmp, 'store-big');

@@ -14,6 +14,7 @@ parameters, and companies/contacts/vendors are read from the sheet, not baked in
 """
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -309,6 +310,90 @@ def is_nameish(s):
     if len(re.sub(r"[^A-Za-z]", "", base)) < 2 or len(base) > 45:
         return False
     return True
+
+
+def unlinked_fingerprint(u):
+    """Identify a tracker row by its CONTENT. The ONLY producer of this value.
+
+    A dismissal is scoped to the row as it stands in the current sheet, and
+    this is what "as it stands" means. Everything downstream -- merge's sweep,
+    the server's validation, the page's dismiss button -- reads this string and
+    never recomputes it. A second implementation would be a second parse to
+    disagree with, which is exactly how a sheet key of "1419.0" and a project
+    of "1419" once failed to meet.
+
+    sheet_row is DELIBERATELY EXCLUDED. Rows shift position week to week; if
+    the fingerprint moved with them, every reordering would resurrect every
+    dismissal and the operator would re-dismiss the same rows forever.
+
+    Everything he can SEE on the card is included -- client, key, start date,
+    note, vendor legs. That is the point: if the row changed in a way he would
+    notice, he gets to look at it again rather than staying hidden behind a
+    decision he made about different text.
+    """
+    def _t(v):
+        return "" if v is None else str(v).strip()
+    legs = []
+    for leg in (u.get("legs") or []):
+        if isinstance(leg, dict):
+            legs.append((_t(leg.get("vendor_po_raw")), _t(leg.get("ship_date"))))
+    payload = json.dumps({
+        "client": _t(u.get("client")),
+        "raw_key": _t(u.get("raw_key")),
+        "start_date": _t(u.get("start_date")),
+        "location": _t(u.get("location")),
+        "client_po": _t(u.get("client_po")),
+        "notes": _t(u.get("open_orders_notes")),
+        # The bucket the row sits in, and WHY it could not be matched. Both are
+        # properties of the row and both are real differences -- a keyless row
+        # and an unmatched-key row are not the same row -- so leaving them out
+        # collided rows that are not actually identical.
+        "tracker_status": _t(u.get("tracker_status")),
+        "reason": _t(u.get("reason")),
+        "legs": legs,
+    }, sort_keys=True, separators=(",", ":"))
+    # Truncated: it rides through the page and back in a button handler, and 16
+    # hex chars is 64 bits -- collision-free at a sheet of tens of rows by a
+    # margin nothing here can approach.
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def stamp_fingerprints(rows):
+    """Stamp every unlinked row with its fingerprint. The ONLY producer.
+
+    Takes the whole LIST because it also counts how many rows share each
+    fingerprint, which the card shows.
+
+    unlinked_fingerprint is pure content -- sheet_row is excluded so a
+    reordering does not resurrect every dismissal. Two rows identical on every
+    field the card shows therefore hash the same, and a dismissal keyed on that
+    string clears both.
+
+    That is the correct behaviour, not a defect to engineer around: rows the
+    operator cannot tell apart are not two decisions, they are one. So the card
+    SAYS so -- "2 identical rows on the sheet -- this clears both" -- and one
+    click clears them together.
+
+    Two earlier attempts did engineer around it and both were worse. An
+    occurrence ORDINAL gave colliding rows distinct handles, but the handle
+    depended on which other rows were present, so it re-bound when the
+    population changed and walked a dismissal onto a row nobody had adopted.
+    REFUSING to fingerprint them removed the collision and left an
+    undismissable card in its place. Saying the plain truth costs nothing and
+    hides nothing.
+    """
+    counts = {}
+    for u in rows:
+        counts.setdefault(unlinked_fingerprint(u), 0)
+        counts[unlinked_fingerprint(u)] += 1
+    out = []
+    for u in rows:
+        base = unlinked_fingerprint(u)
+        row = dict(u, fingerprint=base)
+        if counts[base] > 1:
+            row["shares_fingerprint"] = counts[base]
+        out.append(row)
+    return out
 
 
 def pick_client(cells):
@@ -1209,7 +1294,9 @@ def run(workbook, outdir, force=False, mode="merge"):
         # Both are the importer's own reading of the sheet, not operator data,
         # so merge.py regenerates them wholesale -- see REGENERATED there.
         "tracker_buckets.json": tracker_buckets,
-        "tracker_unlinked.json": unlinked_rows,
+        # Stamped at the single point every unlinked row passes through, so a
+        # row cannot reach the store without the handle a dismissal needs.
+        "tracker_unlinked.json": stamp_fingerprints(unlinked_rows),
     }
     # Take the store's OWN write lock around the read-merge-write. Without it
     # the importer read the store, spent seconds merging, then replaced every
@@ -1271,6 +1358,19 @@ def _finish(out, outdir, mode, workbook, companies, contacts, projects,
         except ImportError:
             import merge as _merge_mod          # run as a script
         out, merge_report = _merge_mod.merge_all(out, outdir)
+    else:
+        # --replace still has to SWEEP. merge_all is the only caller of the
+        # dismissal sweep, and gating the whole thing on merge mode meant a
+        # replace import swept nothing while dismiss_tracker_row kept writing:
+        # the table grew past the sheet it is defined as a subset of, which is
+        # the unbounded accumulation this release exists to remove, on the one
+        # path nobody looked at. Replace mode discards operator RECORDS by
+        # design; it does not get to abandon the bound.
+        try:
+            from . import merge as _merge_mod   # packaged
+        except ImportError:
+            import merge as _merge_mod          # run as a script
+        out, merge_report = _merge_mod.sweep_dismissals_only(out, outdir)
     # Stage every file before replacing any: a failure partway through used to
     # leave companies/contacts/projects NEW and invoices/shipments OLD, cross-
     # referencing keys that no longer agree -- and Store then auto-created the

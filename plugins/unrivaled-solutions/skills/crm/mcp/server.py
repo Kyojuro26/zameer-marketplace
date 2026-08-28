@@ -92,11 +92,12 @@ PROJECT_FIELDS = {
     # shipments, duplicated across every leg, and absent entirely from a row
     # with no legs.
     "tracker_status", "open_orders_notes", "tracker_row",
-    # tracker_key is the key the SHEET carries for a row adopted through the
-    # Live Tracker, kept verbatim. It is how the next import knows the row has
-    # already become a project. It is deliberately NOT project_no: he chooses
-    # the CRM number, and on the real workbook one such row is keyed with a
-    # phrase rather than a number, which parses to nothing at all.
+    # tracker_key is the key the SHEET carried for a row adopted through the
+    # Live Tracker, kept verbatim as PROVENANCE. Nothing reads it: it was
+    # by_sheet_key's handle, and by_sheet_key is deleted. An adopted row is
+    # retired by its NUMBER matching a live project, which compares the current
+    # sheet against the current store rather than against every adoption ever
+    # made.
     "tracker_key",
 }
 SHIPMENT_FIELDS = {
@@ -382,6 +383,19 @@ class Store:
         v = self._read_json(self.root / filename, [])
         return v if isinstance(v, list) else []
 
+    def save_side(self, filename, records):
+        """Atomic write for a non-entity store file. Goes through _write, the
+        same path save() uses.
+
+        This was a hand-rolled os.replace, which silently dropped all three of
+        _write's protections: the retry/backoff for the Windows case where
+        OneDrive, robocopy or Defender holds the target open for a moment; the
+        StoreError translation, so a locked file escaped as a raw exception
+        instead of a sentence the operator can act on; and the .~*.tmp naming
+        that the startup sweep actually collects, so its orphans accumulated
+        forever under a name nothing looked for."""
+        self._write(filename, records)
+
     @staticmethod
     def _read_json(path, default):
         """Tolerant read: utf-8-sig (survives a BOM), and a clear StoreError
@@ -395,6 +409,15 @@ class Store:
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise StoreError(f"{path.name} is unreadable ({e}); restore it from "
                              f"a backup or fix the JSON") from e
+        except OSError as e:
+            # A directory in its place, or a permissions bite. Without this it
+            # escaped every `except StoreError` as a raw ToolError, and a
+            # single bad side file took down list_tracker, dismiss and restore
+            # together with a stack trace instead of a sentence he can act on.
+            # merge.py's parallel branch already catches OSError; this did not.
+            raise StoreError(f"{path.name} could not be read ({e}); check the "
+                             f"file is not open, locked, or replaced by a "
+                             f"folder of the same name") from e
 
     def save(self, entity, records):
         """Atomic write: temp file in the same dir, then os.replace."""
@@ -1411,6 +1434,36 @@ def list_tracker() -> dict:
         except StoreError as ex:
             out[key] = []
             problems[key] = str(ex)
+    # `dismissed` is DERIVED here, not stored on the row. The importer stamps
+    # the same flag into the file so the built page has it, but the authority
+    # is tracker_dismissed.json alone -- a row dismissed mid-session must show
+    # as dismissed on the very next refresh, before any import has run.
+    try:
+        # fingerprint -> reason, not a bare set: the card reads the reason off
+        # the row, and without it a project he adopted reads "not a job" on the
+        # very next refresh. Empty keys are dropped so a null fingerprint in
+        # the file cannot flag every pre-upgrade row at once.
+        _dis = {str(d.get("fingerprint")): str(d.get("reason") or "not_a_job")
+                for d in STORE.load_side("tracker_dismissed.json")
+                if isinstance(d, dict) and str(d.get("fingerprint") or "")}
+    except StoreError as ex:
+        _dis = {}
+        problems["tracker_dismissed"] = str(ex)
+    # Only rebuild an actual LIST. An unconditional comprehension here coerced
+    # whatever load_side returned into a list, which silently masked load_side's
+    # own wrong-shape guard: a mutant removing that guard stopped being
+    # detectable through this tool. A derivation must not launder the thing it
+    # derives from.
+    _rows = out.get("tracker_unlinked")
+    if isinstance(_rows, list):
+        out["tracker_unlinked"] = [
+            (dict(u, dismissed=True,
+                  reason_dismissed=_dis[str(u.get("fingerprint"))])
+             if isinstance(u, dict) and str(u.get("fingerprint") or "") in _dis
+             else ({k: v for k, v in u.items()
+                    if k not in ("dismissed", "reason_dismissed")}
+                   if isinstance(u, dict) else u))
+            for u in _rows]
     out["interface_version"] = VERSION
     if problems:
         out["problems"] = problems
@@ -2466,6 +2519,101 @@ def sync_outlook(company_id: str, dry_run: bool = False) -> dict:
                   {"contacts": len(results), "categories": [n for n, _ in cats]})
         return {"ok": True, "interface_version": VERSION,
                 "plan": plan, "results": results}
+    except StoreError as e:
+        return _err(e)
+
+
+DISMISS_REASONS = {"not_a_job", "already_adopted"}
+
+
+def _live_fingerprints():
+    """The fingerprints on the CURRENT sheet. A dismissal may only ever be
+    written for one of these.
+
+    This is the write-side half of the rule the import sweep enforces on the
+    read side: the sweep drops a dismissal whose row is gone, and this refuses
+    to create one for a row that was never there. Together they bound the table
+    at both ends -- it cannot outgrow the sheet, which is the whole difference
+    between this and the accumulating key set it replaced."""
+    return {str(u.get("fingerprint") or "")
+            for u in STORE.load_side("tracker_unlinked.json")
+            if isinstance(u, dict) and u.get("fingerprint")}
+
+
+def _write_dismissal(fingerprint, reason):
+    """Caller must already hold the write lock."""
+    fp = str(fingerprint or "").strip()
+    if not fp:
+        raise StoreError("fingerprint is required")
+    if fp not in _live_fingerprints():
+        raise StoreError(
+            f"no such tracker row: {fp!r} is not on the current sheet. A "
+            f"dismissal only ever applies to a row as it stands in the "
+            f"workbook, so one written for a row that is not there could "
+            f"never be cleared.")
+    if reason not in DISMISS_REASONS:
+        raise StoreError(f"reason must be one of {sorted(DISMISS_REASONS)}")
+    rows = {str(u.get("fingerprint")): u
+            for u in STORE.load_side("tracker_unlinked.json")
+            if isinstance(u, dict)}
+    row = rows.get(fp) or {}
+    kept = [d for d in STORE.load_side("tracker_dismissed.json")
+            if isinstance(d, dict) and str(d.get("fingerprint")) != fp]
+    kept.append({
+        "fingerprint": fp,
+        "reason": reason,
+        "dismissed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        # DISPLAY ONLY, for the import report. Never compared -- the last
+        # heuristic here died by widening a match with fields like these.
+        "client": str(row.get("client") or ""),
+        "sheet_row": row.get("sheet_row"),
+    })
+    STORE.save_side("tracker_dismissed.json", kept)
+    # HISTORY ONLY. This entry exists so the changelog can answer "why is that
+    # row not on the list" months from now. NOTHING reads it back: no
+    # suppression path consults the changelog, and none may -- a log that
+    # decides what the screen shows is a second authority beside
+    # tracker_dismissed.json, and the two would disagree the first time one was
+    # edited. tracker_dismissed.json is the only thing the sweep and the tools
+    # ever read.
+    STORE.log("dismiss", "tracker_row", fp, {"reason": reason})
+    return kept
+
+
+@mcp.tool()
+def dismiss_tracker_row(fingerprint: str, reason: str = "not_a_job") -> dict:
+    """Take a row off the Live Tracker's "Not in the CRM yet" list.
+
+    `reason` is "not_a_job" (this row is not work) or "already_adopted" (it is
+    work, and it is already a project). The two write the identical record and
+    are swept identically; the reason is shown back to the operator and is
+    never matched on.
+
+    The row is not deleted -- it stays on the screen under "Dismissed" with a
+    count, because a dismissal nobody can see is one that can hide a live job.
+    It lasts only while that row is on the sheet: change the row and it is
+    offered again."""
+    try:
+        with STORE.write_lock():
+            kept = _write_dismissal(fingerprint, reason)
+        return {"ok": True, "interface_version": VERSION, "dismissed": len(kept)}
+    except StoreError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def restore_tracker_row(fingerprint: str) -> dict:
+    """Undo a dismissal: put the row back on the "Not in the CRM yet" list."""
+    try:
+        with STORE.write_lock():
+            fp = str(fingerprint or "").strip()
+            if not fp:
+                raise StoreError("fingerprint is required")
+            kept = [d for d in STORE.load_side("tracker_dismissed.json")
+                    if isinstance(d, dict) and str(d.get("fingerprint")) != fp]
+            STORE.save_side("tracker_dismissed.json", kept)
+            STORE.log("restore", "tracker_row", fp, {})   # history only
+        return {"ok": True, "interface_version": VERSION, "dismissed": len(kept)}
     except StoreError as e:
         return _err(e)
 

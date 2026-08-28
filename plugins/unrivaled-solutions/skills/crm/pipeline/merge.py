@@ -242,6 +242,197 @@ def _log_key(fname, rec):
     return _s(rec.get("company_id"))
 
 
+DISMISS_REASONS = ("not_a_job", "already_adopted")
+
+
+def _dismiss_reason(v):
+    """The three the card knows. Anything else is not a reason it can show."""
+    return _s(v) if _s(v) in DISMISS_REASONS else "not_a_job"
+
+
+def _sweep_dismissals(merged, store_dir, report):
+    """The dismissal sweep. ONE implementation, used by both import modes.
+
+    Extracted rather than copied: merge mode and replace mode disagreeing about
+    what bounds this table is exactly how the bound stops being structural.
+    """
+    # ---- what takes a row off the list, and what no longer does -----------
+    #
+    # by_sheet_key is DELETED. It held the sheet's own free-text key, recorded
+    # on the project at adoption, so it accumulated a key from every adoption
+    # ever made and compared it against a sheet that turns over completely.
+    # Free-text keys collide -- "Word Proposal" and "Check" are real shapes on
+    # this workbook -- so a row nobody adopted got retired by a phrase somebody
+    # adopted months ago, which HIDES A LIVE JOB. The workbook is being retired
+    # after a handful more imports, so this list is a one-time migration
+    # checklist rather than a weekly screen, and a job hidden during the
+    # migration is one that never reaches the system of record at all.
+    #
+    # by_key is KEPT: the sheet's parsed project NUMBER against the numbers
+    # currently in the store. One time horizon, both sides read now, nothing
+    # carried forward from a past adoption. It is what makes the checklist burn
+    # down -- adopt a row and it retires itself on the next import, instead of
+    # needing a second click on the one pass through the sheet that matters.
+    #
+    # So there are still TWO things that can take a row off this list, and an
+    # earlier version of this comment claimed there was one. They agree only
+    # because of the ORDER below: by_key retires first, and the dismissal sweep
+    # then runs over the SURVIVORS. A dismissal on a retired row is therefore
+    # swept rather than stranded, and neither path can hide what the other has
+    # already settled. Reverse that order and they disagree exactly as by_key
+    # and by_sheet_key once did -- a row counted in "HOLDING N dismissed" with
+    # no card on screen, returning already-dismissed the day its project is
+    # archived.
+    #
+    # THE DISMISSAL RULE: a dismissal is scoped to the row AS IT EXISTS IN THIS
+    # SHEET. Dismissals whose rows are not among this import's survivors are
+    # SWEPT. That is what bounds the table -- kept is a subset of the rows on
+    # the sheet, so it can never be larger than the sheet. A dismissal store
+    # that accumulates is by_sheet_key with a new name.
+    unl = merged.get("tracker_unlinked.json")
+    if isinstance(unl, list):
+        rows = [u for u in unl if isinstance(u, dict)]
+
+        # An archived COMPANY takes its projects with it. archive_company marks
+        # only the company record, so a project under it stays unarchived --
+        # and by_key went on suppressing its tracker row while build_view
+        # dropped the project itself off the page. The job was then on no list
+        # and in no count, the one outcome this screen exists to prevent.
+        _arch_co = {c.get("company_id")
+                    for c in (merged.get("companies.json") or [])
+                    if isinstance(c, dict) and c.get("archived")}
+        projs = [p for p in (merged.get("projects.json") or [])
+                 if isinstance(p, dict) and not p.get("archived")
+                 and p.get("company_id") not in _arch_co]
+        by_key = {_idkey(p.get("project_no")) for p in projs
+                  if _idkey(p.get("project_no"))}
+
+        # RETIRE FIRST, then sweep against what SURVIVES. `live` used to be
+        # built from every row -- before the by_key drop -- so a row that was
+        # both dismissed and retired kept its dismissal while its row vanished:
+        # no card, no "Put it back", dismiss_tracker_row refusing it as "not on
+        # the current sheet", and "HOLDING 1 dismissed" printed over an empty
+        # section. Archive the project later and the row came back ALREADY
+        # dismissed on a stale reason, defeating the archived exclusion for
+        # exactly the rows that needed it.
+        survivors, adopted = [], []
+        for u in rows:
+            # NUMBERS only, and ALL of them.
+            #
+            # No raw_key fallback: parsed_keys is empty exactly when the key
+            # cell is free text, so falling back to it matched a phrase against
+            # project_no -- and the store really does hold free-text project
+            # numbers ("Word Offer", "Cash Deal?", "INV 1065") while a live row
+            # is keyed "Word Proposal". Same collision by_sheet_key was deleted
+            # for, minus only its accumulation.
+            #
+            # ALL, not ANY: a row keyed "4530 and 4531" carries two jobs.
+            # Retiring it when the first is adopted takes the whole row off the
+            # checklist while the second never reaches the store, and on a
+            # one-time migration a job that leaves the checklist unentered is
+            # simply lost.
+            keys = [k for k in (_idkey(x) for x in (u.get("parsed_keys") or []))
+                    if k]
+            if keys and all(k in by_key for k in keys):
+                adopted.extend(keys)
+                continue    # skip-ok: it IS a project now; named in the report
+            survivors.append(u)
+        live = {_s(u.get("fingerprint")) for u in survivors
+                if _s(u.get("fingerprint"))}
+
+        # Unreadable is NOT empty. Reading a half-written OneDrive file as "no
+        # dismissals" would silently un-dismiss everything; reading it as "all
+        # dismissed" would silently hide live work. Neither is safe to guess,
+        # so every row shows and it SAYS the file could not be read.
+        dismissals, unreadable = [], None
+        dpath = os.path.join(store_dir, "tracker_dismissed.json")
+        try:
+            with open(dpath, encoding="utf-8-sig") as f:
+                raw = json.load(f)
+            dismissals = [d for d in raw if isinstance(d, dict)] \
+                if isinstance(raw, list) else []
+        except FileNotFoundError:
+            pass                # absence is normal on any store before this
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            unreadable = (f"tracker_dismissed.json could not be read ({e}); "
+                          f"every row is being shown, and the file has been "
+                          f"left exactly as it is")
+
+        # DEDUPED, first entry wins -- a conflicted copy concatenated by
+        # OneDrive can carry one fingerprint several times. A duplicate is
+        # DROPPED but not counted as SWEPT: `swept` means "its row left the
+        # sheet", and it is the counter the report offers as proof the bound
+        # is working.
+        #
+        # An EMPTY fingerprint matches nothing: `live` never holds one, and
+        # without the `fp and` guard _s(None) == "" on both sides would flag
+        # every pre-upgrade row at once.
+        kept, seen_fp, swept = [], set(), 0
+        for d in dismissals:
+            fp = _s(d.get("fingerprint"))
+            if fp and fp in live:
+                if fp not in seen_fp:
+                    seen_fp.add(fp)
+                    kept.append(d)
+            else:
+                swept += 1
+        reason_by_fp = {_s(d.get("fingerprint")): _dismiss_reason(d.get("reason"))
+                        for d in kept}
+
+        # Flagged, not deleted. The screen has to be able to show a count: a
+        # dismissal the operator cannot see is one that can hide a live job.
+        # The REASON rides along, because the card reads it off the row.
+        out_rows, n_dismissed_rows = [], 0
+        for u in survivors:
+            fp = _s(u.get("fingerprint"))
+            if fp and fp in reason_by_fp:
+                u = dict(u, dismissed=True, reason_dismissed=reason_by_fp[fp])
+                n_dismissed_rows += 1
+            else:
+                u = {k: v for k, v in u.items()
+                     if k not in ("dismissed", "reason_dismissed")}
+            out_rows.append(u)
+        merged["tracker_unlinked.json"] = out_rows
+        if adopted:
+            report["adopted"] = adopted
+        if unreadable:
+            # NOT written back. _finish writes every key of `merged`, so an
+            # empty list here would DELETE the file the report is telling him
+            # to fix, turning a transient half-written read into permanent
+            # loss of every dismissal.
+            report["dismissals_unreadable"] = unreadable
+        else:
+            merged["tracker_dismissed.json"] = kept
+        if swept:
+            report["dismissals_swept"] = swept
+        if n_dismissed_rows:
+            # ROWS, not records. One dismissal flags every row sharing its
+            # fingerprint -- by design, since the operator cannot tell those
+            # rows apart -- so counting records printed "HOLDING 1" over three
+            # cards. A count he cannot reconcile with the screen is worse than
+            # none, which is the rule the dedupe above states.
+            report["dismissed"] = n_dismissed_rows
+
+
+    return merged
+
+
+def sweep_dismissals_only(merged, store_dir):
+    """--replace path: no record merge, but the dismissal table is still swept.
+
+    Replace mode discards operator RECORDS by design. It does not get to
+    abandon the rule that a dismissal cannot outlive the row it was scoped to.
+
+    Returns (merged, report). The report was discarded here at first, which
+    made replace mode SILENT about both halves it is meant to speak about: a
+    swept dismissal, and a dismissal file it could not read. Merge mode prints
+    a paragraph on each; a mode that quietly does the same work and says
+    nothing is how a operator stops being able to check the bound at all."""
+    report = {}
+    _sweep_dismissals(merged, store_dir, report)
+    return merged, report
+
+
 def merge_all(fresh_files, store_dir):
     """Merge every entity file. Raises RuntimeError if it cannot do so safely.
 
@@ -404,69 +595,23 @@ def merge_all(fresh_files, store_dir):
 
         merged[fname] = out
 
-    # ---- a row he already adopted must not come back -----------------------
-    #
-    # tracker_unlinked is regenerated from the sheet on every run, and the sheet
-    # still has no CRM number on that row -- the number went into the CRM, which
-    # is the direction of travel. Without this the row he adopted last week
-    # returns beside the project it became, "Add to CRM" on the phantom fails
-    # with "project already exists", and saveAdoptTrackerRow only clears a card
-    # on SUCCESS, so the card is undismissable and returns every import.
-    #
-    # ONLY the exact key match. A first attempt also matched a numberless row on
-    # (tracker_row, note), and that heuristic was wrong three ways: both notes
-    # empty collapsed it to the row number alone -- which HIDES a live job, the
-    # outcome this file calls worse than a duplicate card; a note edited in the
-    # adopt form (which the form invites) never matched anyway; and rows move
-    # week to week. A numberless row genuinely has nothing stable to match on,
-    # so it is left showing. A duplicate card is visible and survivable; a
-    # dropped job is neither. See report["adopted"] and format_report.
-    #
-    # _idkey, not _s: a numeric key cell reaches JSON as 7011.0 and normalize
-    # stores raw_key with a bare str(). This module has been bitten by that
-    # exact ".0" mismatch before -- see the _idkey docstring.
-    unl = merged.get("tracker_unlinked.json")
-    if isinstance(unl, list):
-        projs = [p for p in (merged.get("projects.json") or [])
-                 if isinstance(p, dict)]
-        by_key = {_idkey(p.get("project_no")) for p in projs
-                  if _idkey(p.get("project_no"))}
-        # The sheet's OWN key, recorded on the project when the row was
-        # adopted. Needed because a tracker row does not have to be keyed with
-        # a number at all -- on the real workbook one is keyed with a phrase,
-        # which parses to no project number, so matching the parsed key against
-        # project_no could never retire it and the card came back every import
-        # no matter what number he gave it. This is exact: it only matches a
-        # row somebody actually adopted.
-        by_sheet_key = {_s(p.get("tracker_key")) for p in projs
-                        if _s(p.get("tracker_key"))}
-        kept_unl, adopted = [], []
-        for u in unl:
-            if not isinstance(u, dict):
-                continue    # skip-ok: a malformed entry is not a row to show
-            raw = _s(u.get("raw_key"))
-            keys = [_idkey(k) for k in (u.get("parsed_keys") or [])]
-            if not keys:
-                keys = [_idkey(raw)]
-            hit = next((k for k in keys if k and k in by_key), None)
-            if not hit and raw and raw in by_sheet_key:
-                hit = raw
-            if hit:
-                adopted.append(hit)
-                continue    # skip-ok: it IS a project now; listed in report["adopted"]
-            kept_unl.append(u)
-        merged["tracker_unlinked.json"] = kept_unl
-        if adopted:
-            report["adopted"] = adopted
+    _sweep_dismissals(merged, store_dir, report)
 
     report["note"] = report_note
     return merged, report
 
 
 def format_report(report):
-    L = ([f"NOTE: {report['note']}"] if report.get("note") else []) + [f"refreshed {report['refreshed']} record(s) from the workbook, "
-         f"added {report['added']} new one(s)."]
-    if report["preserved"]:
+    # .get() throughout. sweep_dismissals_only produces a report carrying ONLY
+    # the dismissal keys, and three raw subscripts here raised KeyError on it --
+    # AFTER the import had written every file, so the operator got a traceback
+    # and exit 1 on top of a successful import and never saw the line it was
+    # raising about.
+    L = [f"NOTE: {report['note']}"] if report.get("note") else []
+    if "refreshed" in report or "added" in report:
+        L.append(f"refreshed {report.get('refreshed', 0)} record(s) from the "
+                 f"workbook, added {report.get('added', 0)} new one(s).")
+    if report.get("preserved"):
         L.append(f"\nKEPT YOUR EDITS on {len(report['preserved'])} record(s) -- "
                  f"the workbook did not overwrite these:")
         for p in report["preserved"][:40]:
@@ -490,14 +635,27 @@ def format_report(report):
                  f"the same record twice:")
         for a in report["renamed_away"][:20]:
             L.append(f"  {a['file']} {a['key']}")
+    if report.get("dismissals_unreadable"):
+        L.append(f"\nCOULD NOT READ your dismissed-rows file, so every tracker "
+                 f"row is showing:\n  {report['dismissals_unreadable']}")
+    if report.get("dismissals_swept"):
+        # Swept means the row it was scoped to is not on this sheet. Said out
+        # loud because it is the mechanism that keeps this table from growing
+        # into the thing it replaced, and a mechanism nobody can see is one
+        # nobody can check.
+        L.append(f"\nCLEARED {report['dismissals_swept']} dismissal(s) whose "
+                 f"tracker row is no longer on the sheet. A dismissal only ever "
+                 f"applies to the row as it stands in the workbook -- if one of "
+                 f"those rows comes back, or comes back changed, it is offered "
+                 f"again rather than staying hidden on an old decision.")
     if report.get("adopted"):
-        # A row dropped from the Live Tracker with nothing said is the same
-        # silence this module exists to end -- and the two `# skip-ok:` markers
-        # at the drop site claim it is reported here, which has to be true.
+        # A row leaving the screen with nothing said is the silence this module
+        # exists to end, and the skip-ok marker at the drop site claims it is
+        # reported here.
         L.append(f"\nTOOK {len(report['adopted'])} tracker row(s) off the "
-                 f"\"Not in the CRM yet\" list: you already gave each of these a "
-                 f"project number, so the row is now a project and is no longer "
-                 f"offered for adoption:")
+                 f"\"Not in the CRM yet\" list: each of these now has a project "
+                 f"under the same number, so the row is a project and is no "
+                 f"longer offered for adoption:")
         for a in report["adopted"][:40]:
             L.append(f"  project {a}")
         if len(report["adopted"]) > 40:
@@ -505,11 +663,15 @@ def format_report(report):
     if report.get("untouched"):
         L.append(f"\n{report['untouched']} record(s) already in the store were "
                  f"left untouched (see the note above).")
-    if report["kept"]:
+    if report.get("kept"):
         L.append(f"\nKEPT {len(report['kept'])} record(s) the workbook no longer "
                  f"lists. Nothing was deleted -- review these:")
         for k in report["kept"][:40]:
             L.append(f"  {k['file']} {k['key']}  ({k['why']})")
         if len(report["kept"]) > 40:
             L.append(f"  ... and {len(report['kept']) - 40} more")
+    if report.get("dismissed"):
+        L.append(f"\nHOLDING {report['dismissed']} tracker row(s) dismissed -- "
+                 f"they are on the Live screen under \"Dismissed\", not gone.")
+
     return "\n".join(L)

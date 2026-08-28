@@ -47,7 +47,12 @@ M = [
  ("dirty listener never bound",
   "['input','change'].forEach(ev=>\n  document.getElementById('dbody').addEventListener(ev, ()=>{\n    drawerDirty = true;\n  }));", ""),
  ("openDrawer forgets to reset dirty",
-  "function openDrawer(){\n  drawerDirty = false;", "function openDrawer(){"),
+  "function openDrawer(){\n"
+  "  // Bumped on every open, so an in-flight dismissRow can tell whether the\n"
+  "  // drawer standing open when it resolves is the SAME one it was launched\n"
+  "  // from. Without it, a slow call closed whichever drawer happened to be up.\n"
+  "  _openSeq++;\n  drawerDirty = false;",
+  "function openDrawer(){\n  _openSeq++;"),
  ("a successful save no longer clears the dirty flag",
   "      drawerDirty = false;\n      msg.textContent='\u2713 Saved';",
   "      msg.textContent='\u2713 Saved';"),
@@ -91,11 +96,21 @@ M = [
   "e.returnValue = 'You have unsaved changes in the open record.';", "e.returnValue = '';"),
 
  ("doSave clears the dirty flag on the FAILURE path",
-  "    msg.textContent='\u2717 ' + ((r && r.error) || 'save failed'); msg.className='saved show errc';\n    return false;",
-  "    msg.textContent='\u2717 ' + ((r && r.error) || 'save failed'); msg.className='saved show errc';\n    drawerDirty = false;\n    return false;"),
+  "    lastSaveError = (r && r.error) || 'save failed';\n"
+  "    msg.textContent='✗ ' + lastSaveError; msg.className='saved show errc';\n"
+  "    return false;",
+  "    lastSaveError = (r && r.error) || 'save failed';\n"
+  "    msg.textContent='✗ ' + lastSaveError; msg.className='saved show errc';\n"
+  "    drawerDirty = false;\n"
+  "    return false;"),
  ("doSave clears the dirty flag in catch()",
-  "    msg.textContent='\u2717 ' + ((e && e.message) || String(e)); msg.className='saved show errc';\n    return false;",
-  "    msg.textContent='\u2717 ' + ((e && e.message) || String(e)); msg.className='saved show errc';\n    drawerDirty = false;\n    return false;"),
+  "    lastSaveError = (e && e.message) || String(e);\n"
+  "    msg.textContent='✗ ' + lastSaveError; msg.className='saved show errc';\n"
+  "    return false;",
+  "    lastSaveError = (e && e.message) || String(e);\n"
+  "    msg.textContent='✗ ' + lastSaveError; msg.className='saved show errc';\n"
+  "    drawerDirty = false;\n"
+  "    return false;"),
  ("doSave applies the local write even when the store refused",
   "    const r = await CRM.call(tool, args);\n    if (r && r.ok){\n      applyLocal(r);",
   "    const r = await CRM.call(tool, args);\n    applyLocal(r);\n    if (r && r.ok){"),

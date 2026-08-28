@@ -18,7 +18,7 @@ In modes 1–2 every save persists through the MCP's validated write path and
 the header pill shows "Live". Embedded data is always rendered instantly as
 bootstrap, then replaced by a live refresh when a backend is present.
 """
-import argparse, json, os, re, sys
+import argparse, json, os, sys
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1012,9 +1012,20 @@ function renderLiveMain(){
   // and every later one opened the PREVIOUS row's client, note, status and
   // dates under the number typed for the row that was clicked.
   const q = sv(query).trim();
-  const unlinked = arr(DATA.tracker_unlinked)
+  // .map BEFORE .filter, so `i` stays the index into the RAW array -- both
+  // adopt handlers index the raw one, and a leading falsy entry used to shift
+  // every card onto the previous row's data.
+  const _unlAll = arr(DATA.tracker_unlinked)
     .map((u, i)=>({u, i}))
     .filter(x=>x.u && typeof x.u === 'object' && unlinkedMatches(x.u, q));
+  const unlinked  = _unlAll.filter(x=>!x.u.dismissed);
+  const dismissed = _unlAll.filter(x=>x.u.dismissed);
+  // The burn-down is a claim about the WHOLE migration, so it is counted
+  // before the search filter. Computed from `unlinked` it turned a search
+  // result into a false statement about how much work is left -- "6 rows left
+  // to clear" while 14 were.
+  const leftToClear = arr(DATA.tracker_unlinked)
+    .filter(u=>u && typeof u === 'object' && !u.dismissed).length;
   const flagged = rows.filter(r=>r.flags.length).length;
 
   let h = `<div class="co-head"><h1>Live projects</h1>
@@ -1067,7 +1078,8 @@ function renderLiveMain(){
     h += `<div class="section"><div class="lt-head">
       <span class="swatch b-stage"></span>
       <h2 style="border:0;padding:0;margin:0">Not in the CRM yet</h2>
-      <span class="muted">${unlinked.length}</span></div>
+      <span class="muted">${leftToClear} row${leftToClear===1?'':'s'} left to clear${
+        unlinked.length===leftToClear?'':` \u00b7 ${unlinked.length} shown`}</span></div>
       <p class="muted" style="font-size:12px;margin:0 0 10px">
         These are live rows from your tracker that have no project number the
         CRM can match. Give one a number and it becomes a normal project you
@@ -1079,7 +1091,27 @@ function renderLiveMain(){
     }
     h += `</div>`;
   }
-  if(!rows.length && !unlinked.length){
+  // THE FAILURE THIS MUST NEVER PRODUCE: a dismissed card silently hiding a
+  // live job. The count is rendered whenever there is one -- never a
+  // zero-height section, never a silent drop -- and every row here is one
+  // click from coming back. The import sweep is the other half: a dismissal
+  // cannot outlive the row it was scoped to.
+  if(dismissed.length){
+    h += `<div class="section"><div class="lt-head">
+      <span class="swatch b-stage"></span>
+      <h2 style="border:0;padding:0;margin:0">Dismissed</h2>
+      <span class="muted">${dismissed.length}</span></div>
+      <p class="muted" style="font-size:12px;margin:0 0 10px">
+        You took these off the list above. They stay here while the row is on
+        the sheet — edit the row in the workbook and it is offered again.</p>`;
+    h += dismissed.slice(0, LIVE_CAP).map(x=>dismissedCard(x.u)).join('');
+    if(dismissed.length > LIVE_CAP){
+      h += `<div class="muted" style="font-size:12px;padding:4px 2px">Showing
+        the first ${LIVE_CAP} of ${dismissed.length}.</div>`;
+    }
+    h += `</div>`;
+  }
+  if(!rows.length && !unlinked.length && !dismissed.length){
     h += `<div class="empty">No live projects yet.</div>`;
   }
   return h;
@@ -1116,11 +1148,96 @@ function liveCard(r){
   </div>`;
 }
 
+let _openSeq = 0;
+
+async function dismissRow(fp, reason){
+  const _wasOpen = _openSeq;
+  // Optimism is not allowed here: the row moves only when the store says it
+  // moved. A card that slides into "Dismissed" on a call that never landed is
+  // the screen asserting something the store does not say.
+  let r;
+  try{ r = await CRM.call('dismiss_tracker_row', {fingerprint: fp, reason: reason}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
+  if(!r || !r.ok){
+    alert('Could not dismiss that row: ' + ((r && r.error) || 'unknown error'));
+    return false;
+  }
+  // EVERY row sharing it, not the first. The store keys on the fingerprint
+  // alone, so it clears every twin -- and the card promises exactly that
+  // ("N identical rows on the sheet -- this clears both"). A .find() cleared
+  // one and left the screen disagreeing with the store, which is the same
+  // defect as an optimistic move, mirrored.
+  arr(DATA.tracker_unlinked).forEach(x=>{
+    if(x && st(x.fingerprint)===st(fp)){ x.dismissed = true; x.reason_dismissed = reason; }
+  });
+  // Reached from the conflict box inside an OPEN drawer, where doSave has just
+  // written a red mark for the save that failed. The dismissal succeeded, so
+  // every surface still saying it failed has to stop: otherwise this is the
+  // whole sequence inverted -- a write that landed, reported as one that did
+  // not, with the button still up inviting a second press.
+  // The drawer that was open WHEN THE CALL STARTED, captured before the await.
+  // Testing "is a drawer open" afterwards closed whatever happened to be open
+  // by then: Escape out mid-call, open a project, and the in-flight dismissal
+  // shut it -- through closeDrawer() rather than requestCloseDrawer(), so the
+  // "Discard your unsaved changes?" prompt never fired and the edits went.
+  const _d = document.getElementById('drawer');
+  if(_d && _d.classList && _d.classList.contains('open') && _wasOpen === _openSeq){
+    const _m = document.getElementById('savedMsg');
+    if(_m){ _m.textContent = ''; _m.className = 'saved'; }
+    const _c = document.getElementById('a_conflict');
+    if(_c) _c.innerHTML = '';
+    closeDrawer();
+  }
+  renderMain();
+  return true;
+}
+
+async function restoreRow(fp){
+  let r;
+  try{ r = await CRM.call('restore_tracker_row', {fingerprint: fp}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
+  if(!r || !r.ok){
+    alert('Could not restore that row: ' + ((r && r.error) || 'unknown error'));
+    return false;
+  }
+  arr(DATA.tracker_unlinked).forEach(x=>{
+    if(x && st(x.fingerprint)===st(fp)){ delete x.dismissed; delete x.reason_dismissed; }
+  });
+  renderMain();
+  return true;
+}
+
+function dismissedCard(u){
+  const why = u.reason_dismissed === 'already_adopted' ? 'already in the CRM'
+            : 'not a job';
+  return `<div class="lt-card lt-unlinked" style="opacity:.62">
+    <div class="lt-top">
+      <span class="badge b-stage nw">tracker row ${esc(st(u.sheet_row))}</span>
+      <b>${esc(st(u.client)||'unknown client')}</b>
+      <span class="muted nw">${esc(why)}</span>
+      <span style="margin-left:auto">${st(u.fingerprint)
+        ? `<button class="pill-btn" onclick="restoreRow('${jesc(st(u.fingerprint))}')">Put it back</button>`
+        : `<span class="muted nw">re-import to restore</span>`}</span>
+    </div>
+  </div>`;
+}
+
 function unlinkedCard(u, i){
+  // THREE buttons, always, with no recognition of any kind. The app never
+  // decides that a row it is showing is one he adopted before -- that decision
+  // is a matcher, and a matcher on the sheet's own text is exactly what this
+  // release removes. Because the button he needs is on EVERY card, the
+  // adopted-then-retitled row needs no detection at all: it comes back once,
+  // he clicks "Already in the CRM", and it is gone again.
+  //
+  // No dismiss button without a fingerprint. A store imported before this
+  // shipped has rows with no handle, and a button that cannot work is worse
+  // than no button. The next import stamps them.
+  const fp = st(u.fingerprint);
   // arr(), not `||[]`: a legs value that is a string or an object makes .map
   // throw inside renderMain, which doSave re-runs after EVERY save -- so one
   // malformed row blanks the whole pane. Same rule as owner/annotations.
-  const legs = arr(u.legs).map(l=>{
+  const legs = arr(u.legs).filter(l=>l && typeof l === 'object').map(l=>{
     const d = legDate(l.ship_date), paid = legPaid(l.vendor_po_raw);
     return `<div class="lt-leg"><span class="lt-po">${esc(st(l.vendor_po_raw)||'—')}</span>
       <span class="muted nw">${esc(d.text)}</span>
@@ -1132,7 +1249,15 @@ function unlinkedCard(u, i){
       <b>${esc(st(u.client)||'unknown client')}</b>
       ${u.raw_key?`<span class="muted nw">keyed ${esc(st(u.raw_key))}</span>`:''}
       <span class="muted nw">${esc(fmtDate(u.start_date)||st(u.start_date)||'no start date')}</span>
-      <span style="margin-left:auto"><button class="pill-btn pri" onclick="openAdoptTrackerRow(${i})">Add to CRM</button></span>
+      <span style="margin-left:auto">
+        <button class="pill-btn pri" onclick="openAdoptTrackerRow(${i})">Add to CRM</button>
+        ${fp ? `<button class="pill-btn" onclick="dismissRow('${jesc(fp)}','already_adopted')">Already in the CRM</button>
+        <button class="pill-btn" onclick="dismissRow('${jesc(fp)}','not_a_job')">Not a job</button>`
+        : `<span class="muted nw">re-import the workbook to dismiss this row</span>`}
+        ${fp && u.shares_fingerprint > 1
+          ? `<span class="muted nw">${esc(st(u.shares_fingerprint))} identical rows on the sheet — this clears both</span>`
+          : ''}
+      </span>
     </div>
     <div class="lt-note">${esc(st(u.open_orders_notes)||'')||'<span class="muted">no note</span>'}</div>
     <div class="lt-legs">${legs}</div>
@@ -1160,7 +1285,8 @@ function openAdoptTrackerRow(i){
       becomes a normal project you can edit here.</p>
     <div class="field"><label>Project # <span class="muted"
       style="text-transform:none;font-weight:400">(required)</span></label>
-      <input id="a_pno" placeholder="e.g. 1500"/></div>
+      <input id="a_pno" placeholder="e.g. 1500"/>
+      <div id="a_conflict"></div></div>
     <div class="field"><label>Customer</label>
       <select id="a_cid">${
         // No blind default. With no name match the browser selects the FIRST
@@ -1253,15 +1379,18 @@ async function saveAdoptTrackerRow(i){
     open_orders_notes: document.getElementById('a_note').value.trim() || null,
     tracker_status: u.tracker_status || null,
     // The sheet row it was adopted FROM. A numberless row has no key to match
-    // on, so this plus the note is how the next import knows the row is
-    // already a project and stops re-offering it for adoption.
+    // PROVENANCE ONLY, like tracker_key. The comment here used to say this
+    // plus the note was how the next import knew the row was already a
+    // project; that was by_sheet_key's job and by_sheet_key is gone. What
+    // retires an adopted row now is its NUMBER matching a live project.
     tracker_row: u.sheet_row == null ? null : u.sheet_row,
-    // The key the SHEET carries for this row, verbatim, so the next import
-    // knows the row already became a project. Not the same as project_no --
-    // he chooses that, and a tracker row need not be keyed with a number at
-    // all: on the real workbook one is keyed with a phrase, which parses to
-    // nothing, so without this that card returned every import forever no
-    // matter what number he gave it.
+    // PROVENANCE ONLY, read by nothing. This used to be the handle
+    // by_sheet_key matched on, and the comment here claimed the next import
+    // used it to know the row had become a project. by_sheet_key is deleted --
+    // it accumulated a key from every adoption ever made and retired rows
+    // nobody had adopted -- so nothing reads this field. It is kept because it
+    // records which sheet row a project came from, which is worth having
+    // during the migration and costs nothing.
     tracker_key: st(u.raw_key) || null,
     date: u.start_date || null,
     location: u.location || null,
@@ -1274,13 +1403,41 @@ async function saveAdoptTrackerRow(i){
     status: document.getElementById('a_status').value || null,
     year: numOrNull('a_year'),
   };
+  // create_project, not a tracker-specific tool. The row does not need a
+  // dismissal written alongside the project: by_key retires it on the next
+  // import, because the sheet's number is now a project's number. That is the
+  // whole burn-down -- adopt, and the checklist shortens by itself.
   const ok = await doSave('create_project', {fields}, (r)=>{
     DATA.projects.push(r.project || fields);
-    // it is a project now, so it must stop appearing as an unadopted row
-    DATA.tracker_unlinked = (DATA.tracker_unlinked||[])
-      .filter(x=>x !== u);
+    // Removed locally so the card goes now rather than at the next import.
+    DATA.tracker_unlinked = (DATA.tracker_unlinked||[]).filter(x=>x !== u);
     reindex(); renderList(); renderMain(); closeDrawer();
   });
+  if(!ok){
+    // THE NET, not the answer. The answer is the "Already in the CRM" button
+    // on every card. This catches him when he takes the Add to CRM route and
+    // the number is already in use -- which still happens: a row keyed with a
+    // PHRASE has no number for the next import to retire it by, so a row he
+    // adopted comes back once and Add to CRM on it fails "already exists".
+    // Nothing here matches the row to the project; it shows what the store
+    // said and lets him decide.
+    // The RESPONSE, not #savedMsg's text. Scraping the screen matched any
+    // error merely containing the phrase -- a company name would do -- and
+    // then offered a button that dismisses the row without creating anything.
+    // Using the DOM as a message bus also breaks the moment doSave's wording
+    // changes.
+    const said = st(lastSaveError);
+    const fp = st(u.fingerprint);
+    if(fp && /^project .* already exists$/i.test(said.trim())){
+      const box = document.getElementById('a_conflict');
+      if(box){
+        box.innerHTML = `<p class="muted" style="font-size:12px;margin:6px 0">
+          ${esc(said.replace(/^\u2717\s*/, ''))} — if this tracker row IS that
+          project, take the row off the list instead of adding it twice.</p>
+          <button class="pill-btn pri" onclick="dismissRow('${jesc(fp)}','already_adopted')">That's this row — link it</button>`;
+      }
+    }
+  }
   return ok;
 }
 
@@ -2534,7 +2691,13 @@ async function saveShipment(sid){
    something irreversible afterwards -- saveProject's reopen-after-rename --
    must branch on this: doSave reports failure by writing into #savedMsg and
    never throws, so `await doSave(...)` alone cannot tell the two apart. */
+// What the LAST save was refused with, straight from the response. Callers
+// that need to branch on the reason read this rather than scraping #savedMsg,
+// which matched substrings and broke on any wording change.
+let lastSaveError = '';
+
 async function doSave(tool, args, applyLocal){
+  lastSaveError = '';
   const btn=document.getElementById('saveBtn'), msg=document.getElementById('savedMsg');
   btn.disabled=true; msg.className='saved';
   // Lock the WHOLE form, not just the button.
@@ -2574,7 +2737,8 @@ async function doSave(tool, args, applyLocal){
       kpis(); renderMain();
       return true;
     }
-    msg.textContent='✗ ' + ((r && r.error) || 'save failed'); msg.className='saved show errc';
+    lastSaveError = (r && r.error) || 'save failed';
+    msg.textContent='✗ ' + lastSaveError; msg.className='saved show errc';
     return false;
   }catch(e){
     // Not `e.message`: CRM.call has no throw of its own and propagates whatever
@@ -2582,7 +2746,8 @@ async function doSave(tool, args, applyLocal){
     // but cowork mode's value comes from the host's window.cowork.callMcpTool,
     // which can reject with a string or a bare {code:-32603} -- and `undefined`
     // on the screen is the same silence this commit exists to remove.
-    msg.textContent='✗ ' + ((e && e.message) || String(e)); msg.className='saved show errc';
+    lastSaveError = (e && e.message) || String(e);
+    msg.textContent='✗ ' + lastSaveError; msg.className='saved show errc';
     return false;
   }finally{
     locked.forEach(el=>{ el.disabled = false; });
@@ -2681,6 +2846,10 @@ function navFromDrawer(open){
 }
 
 function openDrawer(){
+  // Bumped on every open, so an in-flight dismissRow can tell whether the
+  // drawer standing open when it resolves is the SAME one it was launched
+  // from. Without it, a slow call closed whichever drawer happened to be up.
+  _openSeq++;
   drawerDirty = false;
   const d = document.getElementById('drawer');
   if(!d.classList.contains('open')){
@@ -2918,30 +3087,64 @@ def render_html(store_dir, token=""):
     for p in problems:
         print(f"WARNING: {p}", file=sys.stderr)
     # archived companies never ship into the demo bootstrap
-    _all_companies = list(data["companies"])      # before the filter below
     arch = {c["company_id"] for c in data["companies"] if c.get("archived")}
     data["companies"] = [c for c in data["companies"] if not c.get("archived")]
     for k in ["contacts", "projects", "shipments", "invoices"]:
         data[k] = [x for x in data[k] if x.get("company_id") not in arch]
     data["vendors"] = [v for v in data["vendors"] if not v.get("archived")]
-    # tracker_unlinked could not be caught by the loop above: its rows carry the
-    # sheet's raw client NAME, not a company_id -- that is precisely why they
-    # are unlinked. So an archived customer's tracker row kept rendering its
-    # name and its full note on the Live screen, with an "Add to CRM" button,
-    # after the operator had archived them. Archiving is this product's delete.
+    # The `dismissed` flag on a row is stamped by an IMPORT. A dismissal made
+    # through dismiss_tracker_row lands only in
+    # tracker_dismissed.json, which this step did not read -- so a row he had
+    # just adopted was rendered straight back under "Not in the CRM yet", with
+    # an Add-to-CRM button on it. With a backend the live refresh corrects it a
+    # second later; in the embedded mode this page advertises, it never does.
     #
-    # Matched on a squashed name rather than a slug: build_view must not import
-    # the pipeline, and the comparison only ever HIDES a card, so a near-miss
-    # costs a visible row, never a wrong record.
-    def _squash(v):
-        return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
-
-    arch_names = {_squash(c.get("display_name")) for c in _all_companies
-                  if c.get("archived")}
-    arch_names.discard("")
+    # Same derivation as list_tracker's, from the same authority. The flag in
+    # the file is only ever the initial state.
+    _dis = {}
+    try:
+        with open(os.path.join(store_dir, "tracker_dismissed.json"),
+                  encoding="utf-8-sig") as _f:
+            _raw = json.load(_f)
+        for d in (_raw if isinstance(_raw, list) else []):
+            if isinstance(d, dict) and str(d.get("fingerprint") or ""):
+                _dis[str(d["fingerprint"])] = str(d.get("reason") or "not_a_job")
+    except FileNotFoundError:
+        pass                    # normal on any store from before this shipped
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as ex:
+        # The page is the only way in. A half-written side file must not be
+        # what stops it being built -- every row simply shows, and it says so.
+        _dis = {}
+        # print(), not problems.append(): `problems` is drained ~30 lines above
+        # this point, so appending here reached nothing -- no stderr, no page,
+        # no return value. The comment claimed "and it says so" while it said
+        # nothing anywhere, which is the one silent member of the trio
+        # (merge reports it, list_tracker reports it).
+        print(f"WARNING: tracker_dismissed.json unreadable "
+              f"({type(ex).__name__}) -- every tracker row is being shown",
+              file=sys.stderr)
     data["tracker_unlinked"] = [
-        u for u in data["tracker_unlinked"]
-        if not (isinstance(u, dict) and _squash(u.get("client")) in arch_names)]
+        (dict(u, dismissed=True, reason_dismissed=_dis[str(u.get("fingerprint"))])
+         if isinstance(u, dict) and str(u.get("fingerprint") or "") in _dis
+         else ({k: v for k, v in u.items()
+                if k not in ("dismissed", "reason_dismissed")}
+               if isinstance(u, dict) else u))
+        for u in data["tracker_unlinked"]]
+
+    # NO tracker_unlinked filter here, deliberately.
+    #
+    # A squashed display-name match used to drop these rows for archived
+    # customers, justified as "only ever HIDES a card, so a near-miss costs a
+    # visible row, never a wrong record". That has it backwards: this store
+    # holds real duplicate records for one customer, which makes archiving the
+    # duplicate the likeliest reason to archive anything -- and the squash then
+    # hid the SURVIVOR's live jobs too, because both records squash to the same
+    # string. A hidden job is worse than a duplicate card; merge.py says so at
+    # its own drop site.
+    #
+    # The row carries the sheet's raw client NAME and no company_id -- that is
+    # precisely why it is unlinked -- so there is nothing here to match on that
+    # is not a guess. A row he does not want is one click away on the screen.
     # Embed as a JSON literal in an inline <script>. json.dumps does NOT
     # escape "</script>" or U+2028/2029, so a store value containing those
     # would break out of the script element. Neutralize them.

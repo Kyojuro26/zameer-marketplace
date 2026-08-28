@@ -147,7 +147,30 @@ NORMALIZE = [
  ("an unlinked row loses the key the sheet actually carried",
   '                "raw_key": str(raw_key),', '                "raw_key": None,'),
  ("the unlinked rows are no longer written out",
-  '        "tracker_unlinked.json": unlinked_rows,', '        "tracker_unlinked.json": [],'),
+  "        \"tracker_unlinked.json\": stamp_fingerprints(unlinked_rows),",
+  "        \"tracker_unlinked.json\": [],"),
+ # NEW: the fingerprint is the handle a dismissal is scoped to. A row that
+ # reaches the store without one can never be dismissed.
+ ("the rows are written without their fingerprint",
+  "        \"tracker_unlinked.json\": stamp_fingerprints(unlinked_rows),",
+  "        \"tracker_unlinked.json\": unlinked_rows,"),
+ # The exclusion of sheet_row is the whole reason a reordering does not
+ # resurrect every dismissal.
+ # The ordinal is what stops ONE dismissal retiring TWO rows whose every
+ # visible field is identical -- one of them live work, hidden, with its note
+ # and legs rendered nowhere.
+ # Identical rows are ONE decision -- the operator cannot tell them apart
+ # either -- so they share a handle and one click clears both. The card has to
+ # SAY that; a click that clears two cards silently reads as a bug.
+ ("a shared fingerprint stops being counted, so the card cannot say so",
+  "        if counts[base] > 1:\n"
+  "            row[\"shares_fingerprint\"] = counts[base]\n", ""),
+ ("the fingerprint starts moving with the row",
+  '        "client": _t(u.get("client")),',
+  '        "sheet_row": _t(u.get("sheet_row")),\n'
+  '        "client": _t(u.get("client")),'),
+ ("the fingerprint stops covering the note, so a retitle stays hidden",
+  '        "notes": _t(u.get("open_orders_notes")),\n', ''),
 
  # ---- provenance of a row --------------------------------------------------
  ("the recorded tracker row is off by one",
@@ -170,52 +193,201 @@ MERGE = [
   "                        kept[field] = rec[field]\n"
   "                    else:\n"
   "                        kept.pop(field, None)"),
+ # RETIRED, deliberately, rather than deleted -- seven mutants that graded
+ # key-matching. Every one of them asserted that merge decides which rows leave
+ # the "Not in the CRM yet" list, and merge no longer decides that at all:
+ #
+ #   "an adopted row is offered for adoption again on the next import"
+ #   "the adopted match uses the display string instead of the parsed key"
+ #   "the adopted match goes back to matching on the sheet row"
+ #   "a phrase-keyed row he adopted comes back forever"
+ #   "the sheet-key handle matches any project, adopted or not"
+ #   "the report stops naming the rows it dropped"
+ #   "the report stops printing what it took off the screen"
+ #
+ # by_sheet_key accumulated a key from every adoption ever made and nothing
+ # expired it, so it was compared against a sheet that turns over completely --
+ # and a free-text key collides across weeks, which retires a row NOBODY
+ # adopted. by_key went with it: it reads a real identifier, but it accumulates
+ # the same way. There is nothing left for these to grade, and a mutant with no
+ # reachable target is not evidence.
+ #
+ # What replaced them is below: the operator's own decision, scoped to the row
+ # as it stands in the sheet, swept when that row is gone.
+ # by_key is what makes the migration burn down: adopt a row and it retires
+ # itself next import. Its ARCHIVED exclusion is what stops a deleted project
+ # suppressing a row forever, leaving the job on neither list.
  ("an adopted row is offered for adoption again on the next import",
-  "            hit = next((k for k in keys if k and k in by_key), None)",
-  "            hit = None"),
- ("the adopted match uses the display string instead of the parsed key",
-  '            keys = [_idkey(k) for k in (u.get("parsed_keys") or [])]\n'
-  "            if not keys:\n"
-  "                keys = [_idkey(raw)]",
-  "            keys = [_idkey(raw)]"),
- ("the adopted match goes back to matching on the sheet row",
-  "            hit = next((k for k in keys if k and k in by_key), None)",
-  "            hit = next((k for k in keys if k and k in by_key), None) \\\n"
-  '                  or (u.get("sheet_row") and "row")'),
- ("the report stops printing what it took off the screen",
-  '    if report.get("adopted"):\n'
-  '        # A row dropped from the Live Tracker with nothing said is the same\n'
-  "        # silence this module exists to end -- and the two `# skip-ok:` markers\n"
-  "        # at the drop site claim it is reported here, which has to be true.\n",
-  "    if False:\n"),
- ("the tracker files are merged by key instead of regenerated",
-  'REGENERATED = {"needs_review.json", "tracker_buckets.json",\n'
-  '               "tracker_unlinked.json"}',
-  'REGENERATED = {"needs_review.json"}'),
- ("only the buckets are regenerated, not the unlinked rows",
-  'REGENERATED = {"needs_review.json", "tracker_buckets.json",\n'
-  '               "tracker_unlinked.json"}',
-  'REGENERATED = {"needs_review.json", "tracker_buckets.json"}'),
- ("add-only mode withholds the status colour again (empty tracker on upgrade)",
-  'IMPORTER_OWNED = {"tracker_status", "tracker_row"}',
-  'IMPORTER_OWNED = set()'),
- ("add-only mode force-refreshes the NOTE too, over an operator edit",
-  'IMPORTER_OWNED = {"tracker_status", "tracker_row"}',
-  'IMPORTER_OWNED = {"tracker_status", "tracker_row", "open_orders_notes"}'),
- ("the report stops naming the rows it dropped",
+  "            keys = [k for k in (_idkey(x) for x in (u.get(\"parsed_keys\") or []))\n"
+  "                    if k]\n"
+  "            if keys and all(k in by_key for k in keys):\n"
+  "                adopted.extend(keys)\n"
+  "                continue    # skip-ok: it IS a project now; named in the report",
+  "            keys = []\n"
+  "            if False:\n"
+  "                pass"),
+ ("an ARCHIVED project keeps suppressing its row",
+  "        projs = [p for p in (merged.get(\"projects.json\") or [])\n"
+  "                 if isinstance(p, dict) and not p.get(\"archived\")\n"
+  "                 and p.get(\"company_id\") not in _arch_co]\n"
+  "        by_key = {_idkey(p.get(\"project_no\")) for p in projs\n"
+  "                  if _idkey(p.get(\"project_no\"))}",
+  "        projs = [p for p in (merged.get(\"projects.json\") or [])\n"
+  "                 if isinstance(p, dict)]\n"
+  "        by_key = {_idkey(p.get(\"project_no\")) for p in projs\n"
+  "                  if _idkey(p.get(\"project_no\"))}"),
+ ("the report stops naming the rows it retired",
   '            report["adopted"] = adopted', "            pass"),
- ("a phrase-keyed row he adopted comes back forever",
-  "            if not hit and raw and raw in by_sheet_key:\n"
-  "                hit = raw\n", ""),
- ("the sheet-key handle matches any project, adopted or not",
-  '        by_sheet_key = {_s(p.get("tracker_key")) for p in projs\n'
-  '                        if _s(p.get("tracker_key"))}',
-  '        by_sheet_key = {_s(u2) for u2 in [None]} | {_s(p.get("project_no"))\n'
-  "                        for p in projs}"),
+ ("the sweep is removed, so dismissals accumulate forever",
+  "        kept, seen_fp, swept = [], set(), 0\n"
+  "        for d in dismissals:\n"
+  "            fp = _s(d.get(\"fingerprint\"))\n"
+  "            if fp and fp in live:\n"
+  "                if fp not in seen_fp:\n"
+  "                    seen_fp.add(fp)\n"
+  "                    kept.append(d)\n"
+  "            else:\n"
+  "                swept += 1",
+  "        kept, seen_fp, swept = list(dismissals), set(), 0"),
+ ("a dismissed row is DELETED rather than flagged, so no count can show",
+  "            if fp and fp in reason_by_fp:\n"
+  "                u = dict(u, dismissed=True, reason_dismissed=reason_by_fp[fp])\n"
+  "                n_dismissed_rows += 1\n"
+  "            else:\n"
+  "                u = {k: v for k, v in u.items()\n"
+  "                     if k not in (\"dismissed\", \"reason_dismissed\")}\n"
+  "            out_rows.append(u)",
+  "            if fp not in reason_by_fp:\n"
+  "                out_rows.append(u)"),
+ ("a stale dismissed flag on the row outvotes the swept table",
+  "            if fp and fp in reason_by_fp:\n"
+  "                u = dict(u, dismissed=True, reason_dismissed=reason_by_fp[fp])\n"
+  "                n_dismissed_rows += 1\n"
+  "            else:\n"
+  "                u = {k: v for k, v in u.items()\n"
+  "                     if k not in (\"dismissed\", \"reason_dismissed\")}\n"
+  "            out_rows.append(u)",
+  "            if fp and fp in reason_by_fp:\n"
+  "                u = dict(u, dismissed=True, reason_dismissed=reason_by_fp[fp])\n"
+  "                n_dismissed_rows += 1\n"
+  "            out_rows.append(u)"),
+ ("an unreadable dismissal file reads as 'nothing dismissed', silently",
+  "            unreadable = (f\"tracker_dismissed.json could not be read ({e}); \"\n"
+  "                          f\"every row is being shown, and the file has been \"\n"
+  "                          f\"left exactly as it is\")",
+  "            unreadable = None"),
+ ("the sweep stops de-duplicating, so the count stops meaning anything",
+  "        kept, seen_fp, swept = [], set(), 0\n"
+  "        for d in dismissals:\n"
+  "            fp = _s(d.get(\"fingerprint\"))\n"
+  "            if fp and fp in live:\n"
+  "                if fp not in seen_fp:\n"
+  "                    seen_fp.add(fp)\n"
+  "                    kept.append(d)\n"
+  "            else:\n"
+  "                swept += 1",
+  "        kept, seen_fp, swept = [], set(), 0\n"
+  "        for d in dismissals:\n"
+  "            fp = _s(d.get(\"fingerprint\"))\n"
+  "            if fp and fp in live:\n"
+  "                kept.append(d)\n"
+  "            else:\n"
+  "                swept += 1"),
+ # RETIRED before it ever counted. I wrote this to grade the `fp and` guard in
+ # the kept loop, and it SURVIVED -- because `live` is itself built excluding
+ # empty fingerprints, so "" can never be in it and the guard cannot change an
+ # outcome. It is belt-and-braces, not a decision. A mutant with no reachable
+ # effect is not evidence, and leaving it green would have claimed cover the
+ # suite does not have.
+ ("the report stops saying what it swept",
+  '        if swept:\n            report["dismissals_swept"] = swept\n', ""),
+ ("the report stops saying how many rows are held dismissed",
+  "        if n_dismissed_rows:\n"
+  "            # ROWS, not records. One dismissal flags every row sharing its\n"
+  "            # fingerprint -- by design, since the operator cannot tell those\n"
+  "            # rows apart -- so counting records printed \"HOLDING 1\" over three\n"
+  "            # cards. A count he cannot reconcile with the screen is worse than\n"
+  "            # none, which is the rule the dedupe above states.\n"
+  "            report[\"dismissed\"] = n_dismissed_rows",
+  "        if False:\n"
+  "            report[\"dismissed\"] = n_dismissed_rows"),
 ]
 
 # -------------------------------------------------------------------- view ---
 VIEW = [
+ # RETIRED with the behaviour they graded:
+ #
+ #   "adoption gets its own private write path" -- now INVERTED. Adoption MUST
+ #     have its own path: adopt_tracker_row writes the project and the
+ #     dismissal that retires its row under one lock. Split across two calls, a
+ #     crash between them leaves a project whose row is still offered and
+ #     undismissable, which is 0.1.32's defect.
+ #   "an archived customer's unlinked row is shown again"
+ #   "the archived-name match is taken after the companies are filtered out"
+ #     -- both graded the squashed display-name filter, deleted here. It
+ #     justified itself as "only ever HIDES a card, so a near-miss costs a
+ #     visible row, never a wrong record", which inverts this repo's rule that
+ #     a hidden job is worse than a duplicate card. On a store with duplicate
+ #     records for one customer -- the likeliest reason to archive anything --
+ #     it hid the SURVIVOR's live jobs too.
+ ("cards are numbered off the filtered list again, so the indices shift",
+  "  const _unlAll = arr(DATA.tracker_unlinked)\n"
+  "    .map((u, i)=>({u, i}))\n"
+  "    .filter(x=>x.u && typeof x.u === 'object' && unlinkedMatches(x.u, q));",
+  "  const _unlAll = arr(DATA.tracker_unlinked)\n"
+  "    .filter(u=>u && typeof u === 'object' && unlinkedMatches(u, q))\n"
+  "    .map((u, i)=>({u, i}));"),
+ # ---- the three buttons, and the section that must never be invisible ------
+ ("the dismiss buttons are dropped, so a row can only be adopted or left",
+  "        ${fp ? `<button class=\"pill-btn\" onclick=\"dismissRow('${jesc(fp)}','already_adopted')\">Already in the CRM</button>\n"
+  "        <button class=\"pill-btn\" onclick=\"dismissRow('${jesc(fp)}','not_a_job')\">Not a job</button>`\n"
+  "        : `<span class=\"muted nw\">re-import the workbook to dismiss this row</span>`}",
+  "        "),
+ ("the burndown count goes back to a bare number",
+  "      <span class=\"muted\">${leftToClear} row${leftToClear===1?'':'s'} left to clear${\n"
+  "        unlinked.length===leftToClear?'':` \\u00b7 ${unlinked.length} shown`}</span></div>",
+  "      <span class=\"muted\">${unlinked.length}</span></div>"),
+ ("the card stops saying a click clears two identical rows",
+  "        ${fp && u.shares_fingerprint > 1\n"
+  "          ? `<span class=\"muted nw\">${esc(st(u.shares_fingerprint))} identical rows on the sheet \u2014 this clears both</span>`\n"
+  "          : ''}\n", ""),
+ ("the two dismiss reasons collapse into one soft label",
+  ">Already in the CRM</button>", ">Hide</button>"),
+ ("the Dismissed section is not rendered at all",
+  "  if(dismissed.length){", "  if(false){"),
+ ("a dismissal cannot be undone",
+  "<button class=\"pill-btn\" onclick=\"restoreRow('${jesc(st(u.fingerprint))}')\">Put it back</button>", ""),
+ # A dismissal that LANDED, reported as one that did not: the drawer left
+ # open over a red mark, with the button still up inviting a second press.
+ ("linking it leaves every surface saying the write failed",
+  "  const _d = document.getElementById('drawer');\n"
+  "  if(_d && _d.classList && _d.classList.contains('open') && _wasOpen === _openSeq){",
+  "  const _d = null;\n"
+  "  if(false){"),
+ ("the restore button loses the guard its sibling has",
+  "<span style=\"margin-left:auto\">${st(u.fingerprint)\n"
+  "        ? `<button class=\"pill-btn\" onclick=\"restoreRow('${jesc(st(u.fingerprint))}')\">Put it back</button>`\n"
+  "        : `<span class=\"muted nw\">re-import to restore</span>`}</span>",
+  "<span style=\"margin-left:auto\"><button class=\"pill-btn\" onclick=\"restoreRow('${jesc(st(u.fingerprint))}')\">Put it back</button></span>"),
+ ("the built page stops honouring dismissals made through the tools",
+  "        for d in (_raw if isinstance(_raw, list) else []):",
+  "        for d in []:"),
+ ("Add to CRM dead-ends again on a number already in use",
+  "    const said = st(lastSaveError);\n"
+  "    const fp = st(u.fingerprint);\n"
+  "    if(fp && /^project .* already exists$/i.test(said.trim())){",
+  "    const said = st(lastSaveError);\n"
+  "    const fp = st(u.fingerprint);\n"
+  "    if(false){"),
+ # Anchored with the two lines above it, because `const fp = st(u.fingerprint)`
+ # occurs in saveAdoptTrackerRow too and a bare one-line anchor is AMBIGUOUS --
+ # it could not say which of the two it mutated.
+ ("the dismiss button is offered on a row that has no handle for it",
+  "  // than no button. The next import stamps them.\n"
+  "  const fp = st(u.fingerprint);",
+  "  // than no button. The next import stamps them.\n"
+  "  const fp = st(u.fingerprint) || 'none';"),
+
  # ---- the landing screen ----------------------------------------------------
  ("the live view never paints itself on load",
   "if(filter === 'live') renderMain();\n", ""),
@@ -300,12 +472,6 @@ VIEW = [
  ("adoption stops recording which sheet row it came from",
   "    tracker_row: u.sheet_row == null ? null : u.sheet_row,",
   "    tracker_row: null,"),
- ("adoption gets its own private write path",
-  "  const ok = await doSave('create_project', {fields}, (r)=>{",
-  "  const ok = await doSave('adopt_tracker_row', {fields}, (r)=>{"),
- ("the adopted row stays on the list, inviting a duplicate project",
-  "    DATA.tracker_unlinked = (DATA.tracker_unlinked||[])\n"
-  "      .filter(x=>x !== u);\n", ""),
  ("the unlinked section is hidden altogether",
   "  if(unlinked.length){", "  if(false){"),
 
@@ -342,13 +508,6 @@ VIEW = [
   "    sv(c.display_name).replace(/[^a-z0-9]+/g, '') === n);",
   "  const hit = (DATA.companies||[]).find(c=>\n"
   "    sv(c.display_name).replace(/[^a-z0-9]+/g, '') === n);"),
- ("cards are numbered off the filtered list again, so the indices shift",
-  "  const unlinked = arr(DATA.tracker_unlinked)\n"
-  "    .map((u, i)=>({u, i}))\n"
-  "    .filter(x=>x.u && typeof x.u === 'object' && unlinkedMatches(x.u, q));",
-  "  const unlinked = arr(DATA.tracker_unlinked)\n"
-  "    .filter(u=>u && typeof u === 'object' && unlinkedMatches(u, q))\n"
-  "    .map((u, i)=>({u, i}));"),
  ("saving loses its missing-row guard",
   "  if(!u || typeof u !== 'object'){\n"
   "    msg.textContent='\u2717 that tracker row is no longer on the list \u2014 reload';\n"
@@ -366,7 +525,10 @@ VIEW = [
   "const LEG_DONE = new Set(['delivered', 'installed', 'cancelled']);",
   "const LEG_DONE = new Set(['delivered']);"),
  ("an unlinked row's legs skip arr() again",
-  "  const legs = arr(u.legs).map(l=>{", "  const legs = (u.legs||[]).map(l=>{"),
+  "  const legs = arr(u.legs).filter(l=>l && typeof l === 'object').map(l=>{\n"
+  "    const d = legDate(l.ship_date), paid = legPaid(l.vendor_po_raw);",
+  "  const legs = (u.legs||[]).map(l=>{\n"
+  "    const d = legDate(l.ship_date), paid = legPaid(l.vendor_po_raw);"),
  ("the card reads only p.date, disagreeing with its own TBD flag",
   "${esc(fmtDate(p.date||p.start_date)||st(p.date||p.start_date)||'no start date')}",
   "${esc(fmtDate(p.date)||st(p.date)||'no start date')}"),
@@ -408,16 +570,6 @@ VIEW = [
   """      h += `<div class="muted" style="font-size:12px;padding:4px 2px">Showing
         the first ${LIVE_CAP} of ${mine.length} — search to narrow this
         down.</div>`;""", "      ;"),
- ("an archived customer's unlinked row is shown again",
-  """    data["tracker_unlinked"] = [
-        u for u in data["tracker_unlinked"]
-        if not (isinstance(u, dict) and _squash(u.get("client")) in arch_names)]""",
-  "    pass"),
- ("the archived-name match is taken after the companies are filtered out",
-  "    arch_names = {_squash(c.get(\"display_name\")) for c in _all_companies\n"
-  "                  if c.get(\"archived\")}",
-  "    arch_names = {_squash(c.get(\"display_name\")) for c in data[\"companies\"]\n"
-  "                  if c.get(\"archived\")}"),
  ("adoption goes back to assuming the deal is won",
   "    status: document.getElementById('a_status').value || null,",
   "    status: 'won',"),

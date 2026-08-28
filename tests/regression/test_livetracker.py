@@ -335,9 +335,11 @@ def _merge_checks(r, crm, tmp):
     merge = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(merge)
 
-    def store(name, projects, changelog=None):
+    def store(name, projects, changelog=None, dismissed=None):
         d = tmp / f"mg-{name}"
         d.mkdir(parents=True, exist_ok=True)
+        if dismissed is not None:
+            (d / "tracker_dismissed.json").write_text(json.dumps(dismissed))
         for e in ("companies", "contacts", "shipments", "vendors",
                   "needs_review", "invoices"):
             (d / f"{e}.json").write_text("[]")
@@ -437,124 +439,445 @@ def _merge_checks(r, crm, tmp):
             f"got {got.get('tracker_status')!r} -- the row is off the tracker, "
             f"so a card for it is work the sheet says is finished")
 
-    # ---- an adopted row must not come back --------------------------------
-    r.section("a row already adopted is not offered for adoption again")
-    log = json.dumps({"entity": "project", "key": "1419", "op": "create",
-                      "fields": ["project_no"]}) + "\n"
-    d = store("adopted", [{"project_no": "1419", "company_id": "acme",
-                           "status": "won", "archived": False,
-                           "tracker_status": "action_admin"}], changelog=log)
+    # ---- the dismissal table, and the rule that bounds it -----------------
+    #
+    # Key-matching is gone. A row leaves the "Not in the CRM yet" list because
+    # the OPERATOR said so -- adopting it, or dismissing it -- and never
+    # because something derived a match from the sheet's free text.
+    #
+    # The one rule: a dismissal is scoped to the row AS IT EXISTS IN THE
+    # CURRENT SHEET. Dismissals whose rows are absent from this import are
+    # SWEPT. A dismissal store that accumulates is by_sheet_key with a new
+    # name, and it would grow the same unbounded staleness.
+    r.section("a dismissal suppresses its row, and only while the row exists")
+
+    def fp_of(u):
+        """The fingerprint normalize stamps. Tests read it off the row -- they
+        never recompute it, for the same reason the view never does."""
+        return u.get("fingerprint")
+
+    # parsed_keys, as the real importer writes it: raw_key is for DISPLAY and
+    # parsed_keys is for MATCHING, and they are not the same string -- a
+    # numeric key cell reaches str() as "1419.0" while the project side
+    # de-floats to "1419". by_key matches the parse, never the display text.
+    ROW_A = {"sheet_row": 8, "reason": "no matching project", "raw_key": "1419",
+             "parsed_keys": ["1419"],
+             "client": "Ironvale Supply", "open_orders_notes": "live job",
+             "legs": [], "fingerprint": "aaaaaaaaaaaaaaaa"}
+    ROW_B = {"sheet_row": 9, "reason": "no project number",
+             "client": "Meridian Corp", "open_orders_notes": "also live",
+             "legs": [], "fingerprint": "bbbbbbbbbbbbbbbb"}
+
+    d = store("dis-hold", [], dismissed=[{"fingerprint": "aaaaaaaaaaaaaaaa",
+                                          "reason": "not_a_job",
+                                          "client": "Ironvale Supply",
+                                          "sheet_row": 8}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A), dict(ROW_B)]), str(d))
+    unl = merged["tracker_unlinked.json"]
+    shown = [u for u in unl if not u.get("dismissed")]
+    r.check("a dismissed row is suppressed from the live list",
+            [u.get("sheet_row") for u in shown] == [9],
+            f"got {[u.get('sheet_row') for u in shown]}")
+    r.check("but it is STILL in the store, flagged",
+            any(u.get("sheet_row") == 8 and u.get("dismissed") for u in unl),
+            f"got {unl} -- deleting it means the screen cannot show a count, "
+            f"and a dismissal the operator cannot see is one that can hide a "
+            f"live job")
+    r.check("and the dismissal survives an import where its row is present",
+            len(merged.get("tracker_dismissed.json") or []) == 1,
+            "a dismissal must hold while its row is unchanged")
+
+    # THE SWEEP. Row A is gone from this week's sheet, so its dismissal has
+    # nothing to scope to and is dropped -- permanently, not banked.
+    d = store("dis-sweep", [], dismissed=[{"fingerprint": "aaaaaaaaaaaaaaaa",
+                                           "reason": "not_a_job", "sheet_row": 8},
+                                          {"fingerprint": "bbbbbbbbbbbbbbbb",
+                                           "reason": "already_adopted",
+                                           "sheet_row": 9}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_B)]), str(d))
+    kept = merged.get("tracker_dismissed.json")
+    kept = kept if isinstance(kept, list) else []
+    r.check("a dismissal whose row is absent is SWEPT",
+            [x.get("fingerprint") for x in kept] == ["bbbbbbbbbbbbbbbb"],
+            f"got {[x.get('fingerprint') for x in kept]} -- a dismissal that "
+            f"outlives its row is the accumulation this replaced")
+    r.check("and the report says how many it swept",
+            rep.get("dismissals_swept") == 1,
+            f"got {rep.get('dismissals_swept')!r}")
+
+    # The flag on the ROW is derived; tracker_dismissed.json is the authority.
+    # A row arriving with dismissed:true stamped from a previous import, whose
+    # dismissal has since been swept, must come back -- otherwise the flag
+    # outlives the record that justified it and hides the row forever.
+    d = store("dis-stale-flag", [], dismissed=[])
     merged, rep = merge.merge_all(
-        fresh([], [{"sheet_row": 8, "reason": "no matching project",
-                    "raw_key": "1419", "client": "Ironvale Supply",
-                    "open_orders_notes": "keyed but unmatched", "legs": []},
-                   {"sheet_row": 9, "reason": "no project number",
-                    "client": "Meridian Corp",
-                    "open_orders_notes": "still no number", "legs": []}]),
-        str(d))
+        fresh([], [dict(ROW_A, dismissed=True)]), str(d))
+    shown = [u for u in merged["tracker_unlinked.json"] if not u.get("dismissed")]
+    r.check("a stale dismissed flag with no dismissal behind it is stripped",
+            [u.get("sheet_row") for u in shown] == [8],
+            f"got {merged['tracker_unlinked.json']} -- the flag is derived "
+            f"from the table; a flag that can outvote it is a second "
+            f"authority, and the two will disagree")
+
+    # THE BOUND, asserted directly rather than inferred from the sweep.
+    r.check("the table can never exceed this import's unlinked row count",
+            len(kept) <= len(merged["tracker_unlinked.json"]),
+            f"{len(kept)} dismissals vs "
+            f"{len(merged['tracker_unlinked.json'])} rows -- the table is "
+            f"bounded by construction or it is not bounded at all")
+
+    # THE RETITLE, asserted as EXACTLY once. He dismissed the row; he then
+    # edits it on the sheet; it comes back for a fresh look; he dismisses the
+    # NEW row; it stays gone. A third import with no further change must not
+    # resurface it -- that would be an unbounded loop, not a bounded one.
+    d = store("dis-retitle", [], dismissed=[{"fingerprint": "aaaaaaaaaaaaaaaa",
+                                             "reason": "already_adopted",
+                                             "sheet_row": 8}])
+    RETITLED = dict(ROW_A, client="Ironvale Supply Co",
+                    fingerprint="cccccccccccccccc")
+    merged, rep = merge.merge_all(fresh([], [dict(RETITLED)]), str(d))
+    shown = [u for u in merged["tracker_unlinked.json"] if not u.get("dismissed")]
+    r.check("a retitled row reappears once",
+            [u.get("sheet_row") for u in shown] == [8],
+            f"got {shown} -- its content changed, so the operator gets one "
+            f"fresh look rather than a matcher deciding for him")
+    r.check("and the stale dismissal went with it",
+            merged.get("tracker_dismissed.json") == [],
+            "the old fingerprint scopes to a row that no longer exists")
+    # he dismisses it again
+    d = store("dis-retitle2", [], dismissed=[
+        {"fingerprint": "cccccccccccccccc", "reason": "already_adopted",
+         "sheet_row": 8}])
+    merged, rep = merge.merge_all(fresh([], [dict(RETITLED)]), str(d))
+    shown = [u for u in merged["tracker_unlinked.json"] if not u.get("dismissed")]
+    r.check("and once dismissed again it stays gone -- EXACTLY once",
+            shown == [],
+            f"got {shown} -- reappearing a second time with nothing changed "
+            f"would be an unbounded loop wearing a bounded rule's clothes")
+
+    r.section("a row retires itself once its number is a project")
+    # by_key is KEPT: the sheet's parsed number against the numbers currently in
+    # the store. One time horizon, both sides read now. This is what makes the
+    # migration burn down -- adopt a row and it retires itself next import,
+    # instead of needing a second click on the one pass that matters.
+    d = store("bykey-num", [{"project_no": "1419", "company_id": "acme",
+                             "status": "won", "archived": False}],
+              changelog=json.dumps({"entity": "project", "key": "1419",
+                                    "op": "create", "fields": ["project_no"]}) + "\n")
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
     left = [u.get("sheet_row") for u in merged["tracker_unlinked.json"]]
-    r.check("the keyed row he adopted is gone from the list", left == [9],
-            f"got rows {left} -- the sheet still has no CRM number on that "
-            f"row, so it is regenerated every import; 'Add to CRM' on the "
-            f"phantom fails with 'already exists' and the card only clears on "
-            f"SUCCESS, so it is undismissable and returns forever")
-    r.check("the one still unadopted stays", 9 in left)
-    r.check("and the report names what it dropped",
-            "1419" in str(rep.get("adopted")),
-            f"got {rep.get('adopted')!r} -- a row vanishing off the screen "
-            f"with no record is the same class of silence this fixes")
-
-    # A NUMBERLESS row has no key, and nothing else about it is stable enough
-    # to match on. An earlier attempt matched (tracker_row, note); it dropped a
-    # live job whenever both notes were empty (the tuple degenerates to the row
-    # number, which moves week to week), and it never fired anyway once the
-    # operator edited the note in the adopt form -- which the form invites. So
-    # the card stays. A duplicate card is visible and survivable; a dropped job
-    # is neither.
-    d = store("adopted-nokey", [{"project_no": "1500", "company_id": "acme",
-                                 "status": "won", "archived": False,
-                                 "tracker_row": 9,
-                                 "open_orders_notes": "still no number"}],
-              changelog=log)
-    merged, rep = merge.merge_all(
-        fresh([], [{"sheet_row": 9, "reason": "no project number",
-                    "client": "Meridian Corp",
-                    "open_orders_notes": "still no number", "legs": []}]),
-        str(d))
-    r.check("a numberless row is left showing rather than guessed at",
-            [u.get("sheet_row") for u in merged["tracker_unlinked.json"]] == [9],
-            f"got {merged['tracker_unlinked.json']!r} -- matching it on the "
-            f"sheet row hides a live job the week that row is reused, and this "
-            f"file calls that worse than a duplicate card")
-    r.check("and nothing claims it was adopted", not rep.get("adopted"),
-            f"got {rep.get('adopted')!r}")
-
-    # the ".0" shape that has bitten this module before: raw_key is stored with
-    # a bare str(), so a numeric key cell arrives as "1419.0"
-    d = store("adopted-float", [{"project_no": "1419", "company_id": "acme",
-                                 "status": "won", "archived": False}],
-              changelog=log)
-    merged, _ = merge.merge_all(
-        fresh([], [{"sheet_row": 8, "reason": "no matching project",
-                    # exactly the shape normalize writes for a NUMERIC key
-                    # cell: the display string keeps the ".0", the parsed key
-                    # does not. Matching on the display string re-admits the
-                    # phantom; stripping ".0" from it would undo 0.1.28.
-                    "raw_key": "1419.0", "parsed_keys": ["1419"],
-                    "client": "Ironvale Supply",
-                    "open_orders_notes": "keyed but unmatched", "legs": []}]),
-        str(d))
-    r.check("a .0-suffixed sheet key still matches the project it became",
-            merged["tracker_unlinked.json"] == [],
-            f"got {merged['tracker_unlinked.json']!r} -- the row shows as "
-            f"'1419.0' and the project is '1419'; matching has to use the "
-            f"parse both sides came through, not the display string")
-
-    # A row keyed with a PHRASE parses to no project number at all -- the real
-    # workbook has one. Adopting it under any CRM number could never retire it
-    # by key, so the card came back on every import forever. The sheet's own
-    # key, recorded on the project at adoption, is the handle that works.
-    d = store("adopted-phrase", [{"project_no": "1500", "company_id": "acme",
-                                  "status": "won", "archived": False,
-                                  "tracker_key": "Word Proposal"}],
-              changelog=log)
-    merged, rep = merge.merge_all(
-        fresh([], [{"sheet_row": 2, "reason": "no matching project",
-                    "raw_key": "Word Proposal", "parsed_keys": [],
-                    "client": "Ironvale Supply",
-                    "open_orders_notes": "no number on this one", "legs": []},
-                   {"sheet_row": 9, "reason": "no matching project",
-                    "raw_key": "Another Phrase", "parsed_keys": [],
-                    "client": "Meridian Corp",
-                    "open_orders_notes": "still live", "legs": []}]),
-        str(d))
-    left = [u.get("raw_key") for u in merged["tracker_unlinked.json"]]
-    r.check("a phrase-keyed row he adopted is retired",
-            left == ["Another Phrase"],
-            f"got {left} -- it parses to no number, so matching the parsed key "
-            f"against project_no can never retire it")
-    r.check("a phrase-keyed row he has NOT adopted still shows",
-            "Another Phrase" in left)
+    r.check("a row whose number is now a project retires itself",
+            left == [], f"got {left}")
     r.check("and the report names it",
-            "Word Proposal" in str(rep.get("adopted")),
-            f"got {rep.get('adopted')!r}")
+            "1419" in str(rep.get("adopted")), f"got {rep.get('adopted')!r}")
 
-    # and the report has to SAY what it took off the screen
-    d = store("adopted-report", [{"project_no": "1419", "company_id": "acme",
-                                  "status": "won", "archived": False}],
-              changelog=log)
-    merged, rep = merge.merge_all(
-        fresh([], [{"sheet_row": 8, "reason": "no matching project",
-                    "raw_key": "1419", "client": "Ironvale Supply",
-                    "open_orders_notes": "keyed but unmatched", "legs": []}]),
-        str(d))
+    # Archiving is this product's delete. A mistakenly-adopted project that has
+    # been archived must RELEASE its row rather than keep suppressing it --
+    # otherwise the job is on neither list and the only way back is a tool call
+    # through chat. There is no second suppression path left to disagree.
+    d = store("bykey-arch", [{"project_no": "1419", "company_id": "acme",
+                              "status": "won", "archived": True}],
+              changelog=json.dumps({"entity": "project", "key": "1419",
+                                    "op": "create", "fields": ["project_no"]}) + "\n")
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    left = [u.get("sheet_row") for u in merged["tracker_unlinked.json"]]
+    r.check("an ARCHIVED project releases its row again",
+            left == [8],
+            f"got {left} -- archiving is delete; a row suppressed by a deleted "
+            f"project is on neither list")
+    # by_sheet_key is the half that was deleted: the sheet's own free-text key,
+    # recorded on the project at adoption and accumulated forever.
+    d = store("nokey-phrase", [{"project_no": "1500", "company_id": "acme",
+                                "status": "won", "archived": False,
+                                "tracker_key": "1419"}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    shown = [u for u in merged["tracker_unlinked.json"] if not u.get("dismissed")]
+    r.check("a stored tracker_key suppresses nothing",
+            [u.get("sheet_row") for u in shown] == [8],
+            f"got {shown} -- it accumulated a key from every adoption ever "
+            f"made and compared it against a sheet that turns over, so a row "
+            f"nobody adopted was retired by a phrase somebody adopted months "
+            f"ago. tracker_key is provenance now, read by nothing")
+
+    r.section("the sweep does not destroy what it could not read")
+    d = store("dis-preserve", [])
+    (d / "tracker_dismissed.json").write_text("{ half writ")
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    r.check("an unreadable dismissal file is LEFT ALONE, not rewritten empty",
+            "tracker_dismissed.json" not in merged,
+            "_finish writes every key of the merged dict, so putting an empty "
+            "list there deletes the file the report just told him to fix -- "
+            "and a half-written OneDrive file is readable again in ten minutes")
+    r.check("and the file on disk still holds what it held",
+            (d / "tracker_dismissed.json").read_text() == "{ half writ")
+
+    r.section("replace mode is not silent about what it swept")
+    d = store("repl-report", [], dismissed=[
+        {"fingerprint": "gone-from-the-sheet", "reason": "not_a_job"}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    # EXECUTED, not grepped. This was a source-text assertion that the word
+    # "report" appeared inside sweep_dismissals_only -- and it stayed green
+    # over a format_report that raised KeyError on the very report that
+    # function produces. A check that reads the source cannot tell whether the
+    # thing it names works.
+    d = store("repl-crash", [], dismissed=[
+        {"fingerprint": "gone-from-the-sheet", "reason": "not_a_job"}])
+    _m, _rep = merge.sweep_dismissals_only(
+        fresh([], [dict(ROW_A)]), str(d))
+    blew = None
+    try:
+        printed = merge.format_report(_rep)
+    except Exception as exc:                                  # noqa: BLE001
+        printed, blew = "", f"{type(exc).__name__}: {exc}"
+    r.check("replace mode's report can actually be PRINTED",
+            blew is None,
+            f"{blew} -- the import has already written every file by then, so "
+            f"this is a traceback and exit 1 on top of a successful import, "
+            f"and he never sees the line it was raising about")
+    r.check("and it says what it swept",
+            "CLEARED" in printed and "1" in printed, f"got:\n{printed}")
+
+    r.section("an unvalidated reason from the store does not mislabel a card")
+    d = store("dis-badreason", [], dismissed=[
+        {"fingerprint": "aaaaaaaaaaaaaaaa", "reason": "whatever he typed"}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    _rows = merged["tracker_unlinked.json"]
+    row = _rows[0] if _rows else {}
+    r.check("an unrecognised reason is normalised, not passed through",
+            row.get("reason_dismissed") in ("not_a_job", "already_adopted",
+                                            "adopted_here"),
+            f"got {row.get('reason_dismissed')!r} -- the card maps three "
+            f"literals and falls through to 'not a job', so a hand-edited "
+            f"reason silently relabels a row he dismissed as already-in-the-CRM")
+
+    r.section("the report still names what the workbook stopped listing")
+    # A RANGE deletion took these out with the dead report["adopted"] block.
+    # merge_all still populates both, so records the workbook no longer lists
+    # were being kept SILENTLY -- the exact silence this module exists to end,
+    # reintroduced by a tidy-up.
+    out = merge.format_report({"note": "", "refreshed": 1, "added": 0,
+                               "preserved": [], "untouched": 3,
+                               "kept": [{"file": "invoices.json", "key": "7001",
+                                         "why": "not in the workbook"}]})
+    r.check("records kept but no longer in the workbook are named",
+            "7001" in out and "no longer" in out.lower(),
+            f"got:\n{out}")
+    r.check("and untouched records are counted",
+            "3 record(s)" in out and "untouched" in out, f"got:\n{out}")
+
+    r.section("de-duplication is not reported as sweeping")
+    d = store("dis-count", [], dismissed=[
+        {"fingerprint": "aaaaaaaaaaaaaaaa", "reason": "not_a_job"},
+        {"fingerprint": "aaaaaaaaaaaaaaaa", "reason": "not_a_job"},
+        {"fingerprint": "bbbbbbbbbbbbbbbb", "reason": "not_a_job"}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    r.check("only the row that LEFT the sheet counts as swept",
+            rep.get("dismissals_swept") == 1,
+            f"got {rep.get('dismissals_swept')} -- counting a duplicate as a "
+            f"sweep makes the counter that is supposed to prove the bound is "
+            f"working into evidence nobody can trust")
     out = merge.format_report(rep)
-    r.check("the printed report names the row it stopped offering",
-            "1419" in out and "Not in the CRM yet" in out,
-            f"got:\n{out}\n-- the drop site's two skip-ok markers both claim "
-            f"it is recorded in the report, and that has to be true: a row "
-            f"leaving the screen with nothing said is the silence this "
-            f"module exists to end")
+    r.check("and the sentence it prints is true",
+            "CLEARED 1 dismissal" in out, f"got:\n{out}")
+
+    r.section("the sweep de-duplicates, so the count means something")
+    d = store("dis-dupes", [], dismissed=[
+        {"fingerprint": "aaaaaaaaaaaaaaaa", "reason": "not_a_job"},
+        {"fingerprint": "aaaaaaaaaaaaaaaa", "reason": "not_a_job"},
+        {"fingerprint": "aaaaaaaaaaaaaaaa", "reason": "already_adopted"}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    r.check("three entries for one row collapse to one",
+            len(merged["tracker_dismissed.json"]) == 1,
+            f"got {merged['tracker_dismissed.json']} -- a conflicted copy "
+            f"concatenated by OneDrive would report 'HOLDING 3 rows' for one")
+    r.check("and the reported count matches the rows",
+            rep.get("dismissed") == 1, f"got {rep.get('dismissed')}")
+
+    r.section("a legacy row with no fingerprint is never swept up by accident")
+    d = store("dis-legacy", [], dismissed=[{"fingerprint": None}])
+    merged, rep = merge.merge_all(
+        fresh([], [{"sheet_row": 8, "client": "Old", "legs": []}]), str(d))
+    r.check("a null fingerprint does not match a row that has none",
+            not any(u.get("dismissed") for u in merged["tracker_unlinked.json"]),
+            f"got {merged['tracker_unlinked.json']} -- str(None) is 'None' on "
+            f"both sides, which flags EVERY pre-upgrade row at once")
+
+    r.section("the reason survives the round trip to the screen")
+    d = store("dis-reason", [], dismissed=[{"fingerprint": "aaaaaaaaaaaaaaaa",
+                                            "reason": "already_adopted"}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    out_rows = merged["tracker_unlinked.json"]
+    # .get on a possibly-empty list, not [0]: a mutant that DELETES the
+    # dismissed row instead of flagging it would crash here, and a module that
+    # dies has evaluated nothing -- which this suite scores as no evidence
+    # rather than as a kill.
+    row = out_rows[0] if out_rows else {}
+    r.check("the dismissed row is kept, and carries WHY",
+            len(out_rows) == 1 and row.get("reason_dismissed") == "already_adopted",
+            f"got {out_rows} -- deleting it leaves the screen no count to "
+            f"show, and without the reason a project he adopted is labelled "
+            f"'not a job' after any refresh")
+
+    r.section("a row retired by its number takes its dismissal with it")
+    # `live` was computed BEFORE the by_key drop, so a row that was both
+    # dismissed and retired kept its dismissal while its row vanished: counted
+    # in "HOLDING N dismissed" with zero cards on screen, no "Put it back", and
+    # dismiss_tracker_row refusing it as "not on the current sheet". Archive
+    # the project later and it came back ALREADY dismissed on a stale reason,
+    # which defeats the archived exclusion for exactly the rows that used it.
+    d = store("retire-sweeps", [{"project_no": "1419", "company_id": "acme",
+                                 "status": "won", "archived": False}],
+              dismissed=[{"fingerprint": "aaaaaaaaaaaaaaaa",
+                          "reason": "already_adopted"}],
+              changelog=json.dumps({"entity": "project", "key": "1419",
+                                    "op": "create", "fields": ["project_no"]}) + "\n")
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    r.check("the row is retired by its number", rep.get("adopted") == ["1419"],
+            f"got {rep.get('adopted')}")
+    r.check("and its dismissal is SWEPT, not stranded",
+            merged.get("tracker_dismissed.json") == [],
+            f"got {merged.get('tracker_dismissed.json')} -- a dismissal whose "
+            f"row is gone is unreachable: no card, no button, and the tool "
+            f"refuses it")
+    r.check("so nothing claims to be holding it",
+            not rep.get("dismissed"), f"got {rep.get('dismissed')}")
+
+    r.section("an archived COMPANY releases its rows too")
+    # by_key excluded archived PROJECTS. archive_company archives the company
+    # record only, so the project stayed unarchived and by_key kept suppressing
+    # its row -- while render_html drops archived companies' projects from the
+    # page. The job was then on no list at all, which is the one thing this
+    # screen exists to prevent.
+    d = store("arch-co", [{"project_no": "1419", "company_id": "acme",
+                           "status": "won", "archived": False}],
+              changelog=json.dumps({"entity": "project", "key": "1419",
+                                    "op": "create", "fields": ["project_no"]}) + "\n")
+    (d / "companies.json").write_text(json.dumps(
+        [{"company_id": "acme", "display_name": "Ace", "role": "customer",
+          "archived": True}]))
+    fr = fresh([], [dict(ROW_A)])
+    fr["companies.json"] = [{"company_id": "acme", "display_name": "Ace",
+                             "role": "customer", "archived": True}]
+    merged, rep = merge.merge_all(fr, str(d))
+    left = [u.get("sheet_row") for u in merged["tracker_unlinked.json"]]
+    r.check("a row whose customer is archived comes back",
+            left == [8],
+            f"got {left} -- the project is off the page and the row is "
+            f"suppressed, so the job is on no list and in no count")
+
+    r.section("by_key matches NUMBERS, and only when it has them all")
+    d = store("multi", [{"project_no": "4530", "company_id": "acme",
+                         "status": "won", "archived": False}],
+              changelog=json.dumps({"entity": "project", "key": "4530",
+                                    "op": "create", "fields": ["project_no"]}) + "\n")
+    merged, rep = merge.merge_all(
+        fresh([], [dict(ROW_A, raw_key="4530 and 4531",
+                        parsed_keys=["4530", "4531"])]), str(d))
+    left = [u.get("sheet_row") for u in merged["tracker_unlinked.json"]]
+    r.check("a row carrying TWO numbers stays until both are projects",
+            left == [8],
+            f"got {left} -- retiring on the first match drops the whole row "
+            f"off the checklist while the second job never reaches the store")
+
+    d = store("freetext", [{"project_no": "Word Offer", "company_id": "acme",
+                            "status": "won", "archived": False}],
+              changelog=json.dumps({"entity": "project", "key": "Word Offer",
+                                    "op": "create", "fields": ["project_no"]}) + "\n")
+    merged, rep = merge.merge_all(
+        fresh([], [dict(ROW_A, raw_key="Word Proposal", parsed_keys=[])]), str(d))
+    left = [u.get("sheet_row") for u in merged["tracker_unlinked.json"]]
+    r.check("a phrase-keyed row is never matched against a project number",
+            left == [8],
+            f"got {left} -- the store really does hold free-text project_no "
+            f"values ('Word Offer', 'Cash Deal?', 'INV 1065'), and falling "
+            f"back to raw_key is the same free-text collision by_sheet_key "
+            f"was deleted for")
+
+    r.section("a corrupt dismissal file does not take down the import")
+    d = store("dis-corrupt", [])
+    (d / "tracker_dismissed.json").write_text("{ not json")
+    try:
+        merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+        blew = None
+    except Exception as exc:                                  # noqa: BLE001
+        merged, rep, blew = None, None, f"{type(exc).__name__}: {exc}"
+    r.check("the import still completes", blew is None, str(blew))
+    r.check("and it names the file rather than guessing it was empty",
+            "tracker_dismissed" in str((rep or {}).get("dismissals_unreadable") or ""),
+            f"got {(rep or {}).get('dismissals_unreadable')!r} -- a "
+            f"half-written OneDrive file read as 'no dismissals' would "
+            f"un-dismiss everything silently")
+
+    # ---- an adopted row must not come back --------------------------------
+    r.section("old_groups is append-only, which is what makes 334-335 safe")
+    # ambiguous = {k for k,v in old_groups.items() if len(v) > 1}
+    # old_by_key = {k: v[0] for k,v in old_groups.items() if len(v) == 1}
+    # Two count shapes for one question. They are exact complements ONLY
+    # because old_groups is built by setdefault(...).append(...), so no group
+    # is ever empty. Seed it with empty lists for known keys and a zero-length
+    # group is neither ambiguous nor prior -- `prior is None` then treats an
+    # existing record as NEW and re-adds it. This was cleared by reasoning in
+    # the commit before this one; here it is pinned instead.
+    src = (crm / "pipeline" / "merge.py").read_text()
+    blk = src.split("old_groups = {}", 1)[-1].split("ambiguous", 1)[0]
+    r.check("groups are only ever appended to, never pre-seeded",
+            "setdefault" in blk and ".append(" in blk and "= []" not in blk,
+            f"got:\n{blk}\n-- any construction that can produce an EMPTY "
+            f"group breaks the complement and silently re-adds records")
+    d = store("groups-dupes", [{"project_no": "1419", "company_id": "acme",
+                                "status": "won", "archived": False},
+                               {"project_no": "1419", "company_id": "acme",
+                                "status": "lost", "archived": True}],
+              changelog=json.dumps({"entity": "project", "key": "1419",
+                                    "op": "update", "fields": ["status"]}) + "\n")
+    merged, rep = merge.merge_all(
+        fresh([{"project_no": "1419", "company_id": "acme", "status": "pending"}],
+              []), str(d))
+    r.check("a duplicated key is reported ambiguous, not silently re-added",
+            len(rep.get("ambiguous") or []) == 1
+            and len(merged["projects.json"]) == 2,
+            f"ambiguous={rep.get('ambiguous')} "
+            f"projects={len(merged['projects.json'])} -- a third record here "
+            f"is the zero-length-group failure arriving by another route")
+
+    r.section("the sweep is reported where the operator will read it")
+    # RETIRED, deliberately, rather than deleted: the checks that stood here
+    # asserted by_key and by_sheet_key -- "the keyed row he adopted is gone",
+    # "a .0-suffixed sheet key still matches the project it became", "a
+    # phrase-keyed row he adopted is retired". Every one of them is now the
+    # WRONG expectation. Nothing derives a match from the sheet any more, so a
+    # row stays on the list until the operator adopts or dismisses it, and the
+    # replacements are in "key-matching is gone, both halves" above plus the
+    # adopt_tracker_row checks on the server side.
+    #
+    # The _idkey/".0" lesson those checks carried is not lost: it moved to the
+    # fingerprint, which is built from the row's own content by ONE producer in
+    # normalize.py, so there is no second parse to disagree with.
+    #
+    # What survives here is the rule the two `# skip-ok:` markers at the old
+    # drop site claimed and this module exists to enforce: nothing leaves the
+    # screen with nothing said.
+    d = store("swept-report", [], dismissed=[
+        {"fingerprint": "aaaaaaaaaaaaaaaa", "reason": "not_a_job", "sheet_row": 8},
+        {"fingerprint": "bbbbbbbbbbbbbbbb", "reason": "already_adopted",
+         "sheet_row": 9}])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_B)]), str(d))
+    out = merge.format_report(rep)
+    r.check("the printed report names the dismissals it swept",
+            "1" in out and "dismiss" in out.lower(),
+            f"got:\n{out}\n-- a dismissal disappearing with nothing said is "
+            f"the same silence as a row disappearing")
+    r.check("and names how many rows are being held dismissed",
+            "held dismissed" in out.lower() or "dismissed" in out.lower(),
+            f"got:\n{out}")
+
+    d = store("clean-report", [])
+    merged, rep = merge.merge_all(fresh([], [dict(ROW_A)]), str(d))
+    out = merge.format_report(rep)
+    r.check("and says nothing at all when there is nothing to say",
+            "dismiss" not in out.lower(),
+            f"got:\n{out} -- a line printed on every clean import is a line "
+            f"he stops reading, and then misses the one that matters")
 
 
 def run(server, crm_dir=None):
@@ -809,6 +1132,104 @@ def run(server, crm_dir=None):
         # Only its NAME is missing. The projects still have to group under it,
         # and the importer has to say the name is missing rather than drop the
         # bucket -- a dropped bucket takes its live projects off the screen.
+        r.section("every unlinked row carries a fingerprint, from ONE producer")
+        # The fingerprint is what a dismissal is scoped to. It is built HERE,
+        # by the importer that produces the row, and read everywhere else --
+        # merge sweeps on it, the server validates against it, the view sends
+        # it back untouched. A second implementation anywhere is a second parse
+        # to disagree with, which is the ".0" bug the old matcher carried.
+        fp = getattr(nrm, "unlinked_fingerprint", None)
+        r.check("normalize exposes the fingerprint function",
+                callable(fp), "nothing else may compute one")
+        if callable(fp):
+            base = {"sheet_row": 8, "client": "Ironvale", "raw_key": "1419",
+                    "start_date": "2026-01-05", "open_orders_notes": "live",
+                    "legs": [{"vendor_po_raw": "PO-1", "ship_date": "2026-02-01"}]}
+            r.check("it is stable for identical content",
+                    fp(dict(base)) == fp(dict(base)))
+            r.check("and it does NOT move when the row moves",
+                    fp(dict(base, sheet_row=41)) == fp(dict(base)),
+                    "rows shift week to week; a dismissal that dies on a "
+                    "reordering resurrects everything every import")
+            for field, val in (("client", "Ironvale Supply Co"),
+                               ("open_orders_notes", "changed"),
+                               ("raw_key", "1420"),
+                               ("start_date", "2026-01-06")):
+                r.check(f"and it DOES move when {field} changes",
+                        fp(dict(base, **{field: val})) != fp(dict(base)),
+                        "a material edit must offer the row again rather than "
+                        "leave it hidden on a decision about different text")
+            r.check("and it moves when a vendor leg changes",
+                    fp(dict(base, legs=[{"vendor_po_raw": "PO-2",
+                                         "ship_date": "2026-02-01"}])) != fp(dict(base)))
+            r.check("it is a short hex string, not the row itself",
+                    isinstance(fp(dict(base)), str) and 12 <= len(fp(dict(base))) <= 64
+                    and all(c in "0123456789abcdef" for c in fp(dict(base))),
+                    f"got {fp(dict(base))!r} -- it travels through the page and "
+                    f"back, so it must carry no customer text")
+
+        r.section("two rows the operator cannot tell apart still dismiss apart")
+        # THE COLLISION. The fingerprint is content, and sheet_row is excluded
+        # so a reordering does not resurrect every dismissal. That means two
+        # rows whose every visible field is identical hash the same, and ONE
+        # dismissal retired BOTH -- one of them live work, hidden, with its
+        # note and legs rendered nowhere.
+        #
+        # The fix is NOT to make the fingerprint stickier (sheet_row back in);
+        # that is the matcher tuning this release removes. It is to make it
+        # DISCRIMINATING: among rows sharing a payload, an occurrence ordinal
+        # in sheet order. Identical rows are interchangeable to the operator,
+        # so "the first of them" is a meaningful thing to dismiss.
+        stamp = getattr(nrm, "stamp_fingerprints", None)
+        r.check("normalize exposes the row-list stamper",
+                callable(stamp),
+                "the ordinal cannot be computed one row at a time")
+        if callable(stamp):
+            twin = {"sheet_row": 8, "client": "Meridian Corp", "legs": [],
+                    "open_orders_notes": "", "raw_key": ""}
+            out = stamp([dict(twin), dict(twin, sheet_row=9),
+                         dict(twin, client="Other")])
+            # IDENTICAL ROWS ARE ONE DECISION, and the card says so.
+            #
+            # sheet_row is excluded so a reordering does not resurrect every
+            # dismissal, which means two rows identical on every field the card
+            # shows hash the same. That is not a defect to engineer around: the
+            # operator cannot tell them apart either, so they are one decision
+            # and one click clears both.
+            #
+            # Two attempts to engineer around it were both worse. An occurrence
+            # ORDINAL gave them distinct handles, but the handle depended on
+            # which OTHER rows were present, so it re-bound when the population
+            # changed and walked a dismissal onto a row nobody had adopted.
+            # REFUSING to fingerprint them left an undismissable card instead.
+            r.check("identical rows share one fingerprint",
+                    out[0]["fingerprint"] == out[1]["fingerprint"],
+                    f"got {[x.get('fingerprint') for x in out]}")
+            r.check("and the row SAYS how many it speaks for",
+                    out[0].get("shares_fingerprint") == 2
+                    and out[1].get("shares_fingerprint") == 2,
+                    f"got {out} -- one click clearing two cards has to be said "
+                    f"on the card, or it reads as a bug")
+            r.check("a row with no twin says nothing extra",
+                    isinstance(out[2].get("fingerprint"), str)
+                    and "shares_fingerprint" not in out[2], f"got {out[2]}")
+            moved = stamp([dict(twin, sheet_row=41), dict(twin, client="Other"),
+                           dict(twin, sheet_row=42)])
+            r.check("and none of it depends on position",
+                    [x.get("shares_fingerprint") for x in moved] == [2, None, 2]
+                    and moved[1]["fingerprint"] == out[2]["fingerprint"],
+                    f"got {[(x.get('fingerprint'), x.get('shares_fingerprint')) for x in moved]}"
+                    f" -- a fingerprint must be a function of its own row only")
+            # The payload has to cover what actually distinguishes rows.
+            r.check("the bucket the row sits in is part of its identity",
+                    fp(dict(twin, tracker_status="action_admin"))
+                    != fp(dict(twin, tracker_status="awaiting_materials")),
+                    "two rows in different buckets are not the same row")
+            r.check("and so is why it could not be matched",
+                    fp(dict(twin, reason="no project number"))
+                    != fp(dict(twin, reason="no matching project")),
+                    "a keyless row and an unmatched-key row are different rows")
+
         r.section("a bucket with no legend row still groups")
         err2, load2 = _import(nrm, crm, tmp, "nolegend",
                               legend=(L_ADMIN, L_OWNER, None))
@@ -982,6 +1403,40 @@ def run(server, crm_dir=None):
         # ---- the regeneration interlock ------------------------------------
         # Both files are the importer's reading of THIS run. Merging them by key
         # would resurrect a row he has already adopted into the CRM.
+        r.section("the rows the importer writes carry their fingerprint")
+        _e1, _l1 = _import_edge(nrm, crm, tmp, "fp-a", trailing_unkeyed=True)
+        _u = _l1("tracker_unlinked") or []
+        r.check("every unlinked row the importer wrote has one",
+                bool(_u) and all(x.get("fingerprint") for x in _u),
+                f"got {[x.get('fingerprint') for x in _u]} -- a row with no "
+                f"fingerprint can never be dismissed, and the button must not "
+                f"be offered on it")
+        _e2, _l2 = _import_edge(nrm, crm, tmp, "fp-b", trailing_unkeyed=True)
+        r.check("and the same workbook produces the same ones",
+                [x.get("fingerprint") for x in (_l2("tracker_unlinked") or [])]
+                == [x.get("fingerprint") for x in _u],
+                "an unstable fingerprint un-dismisses everything every import")
+
+        r.section("--replace does not leave the dismissal table unswept")
+        # merge_all runs only in merge mode, so under --replace nothing swept
+        # and dismiss_tracker_row kept appending: the table grew past the
+        # sheet it is supposed to be a subset of. That is the unbounded
+        # accumulation this whole release removes, reappearing on the one path
+        # nobody looked at.
+        _e, _l = _import_edge(nrm, crm, tmp, "repl-a", trailing_unkeyed=True)
+        _rows = _l("tracker_unlinked") or []
+        _sdir = tmp / "store-repl-a"
+        (_sdir / "tracker_dismissed.json").write_text(json.dumps(
+            [{"fingerprint": "not-on-any-sheet-1", "reason": "not_a_job"},
+             {"fingerprint": "not-on-any-sheet-2", "reason": "not_a_job"}]))
+        nrm.run(str(tmp / "repl-a.xlsx"), str(_sdir), force=True, mode="replace")
+        left = json.loads((_sdir / "tracker_dismissed.json").read_text())
+        r.check("a --replace import sweeps dismissals like a merge does",
+                left == [],
+                f"got {left} -- neither of those fingerprints is on the sheet; "
+                f"left unswept the table grows without bound, which is the "
+                f"exact property this design claims is structural")
+
         r.section("both tracker files are regenerated, never merged")
         mg = (crm / "pipeline" / "merge.py").read_text()
         regen = mg.split("REGENERATED", 1)[-1].split("\n\n", 1)[0]
@@ -1066,6 +1521,124 @@ def run(server, crm_dir=None):
                         res.get("ok") is False and "_raised" not in res,
                         f"got {res} -- accepted, so the project is counted as "
                         f"live and rendered in no bucket")
+            r.section("dismissing a tracker row, server side")
+            ROW = {"sheet_row": 8, "reason": "no matching project",
+                   "raw_key": "1419", "client": "Ironvale Supply",
+                   "open_orders_notes": "live job", "legs": [],
+                   "fingerprint": "aaaaaaaaaaaaaaaa"}
+            OTHER = {"sheet_row": 9, "reason": "no project number",
+                     "client": "Meridian", "open_orders_notes": "x", "legs": [],
+                     "fingerprint": "bbbbbbbbbbbbbbbb"}
+
+            def read_dis():
+                f = st.path / "tracker_dismissed.json"
+                if not f.exists():
+                    return []
+                try:
+                    return json.loads(f.read_text())
+                except Exception:                            # noqa: BLE001
+                    return []
+
+            def seed(rows):
+                st.reset(companies=[company()], projects=[])
+                (st.path / "tracker_unlinked.json").write_text(json.dumps(rows))
+                st.rebind()
+
+            seed([dict(ROW), dict(OTHER)])
+            res = st.call("dismiss_tracker_row",
+                          fingerprint="aaaaaaaaaaaaaaaa", reason="not_a_job")
+            r.check("a dismissal is accepted", res.get("ok") is True, f"got {res}")
+            dis = read_dis()
+            r.check("and written to the store",
+                    [d.get("fingerprint") for d in dis] == ["aaaaaaaaaaaaaaaa"],
+                    f"got {dis}")
+            r.check("with the reason recorded",
+                    bool(dis) and dis[0].get("reason") == "not_a_job", f"got {dis}")
+
+            tk = st.call("list_tracker")
+            flags = {u.get("sheet_row"): bool(u.get("dismissed"))
+                     for u in tk.get("tracker_unlinked") or []}
+            r.check("list_tracker marks it dismissed without deleting it",
+                    flags == {8: True, 9: False},
+                    f"got {flags} -- the screen has to be able to show a count")
+
+            # THE WRITE-SIDE BOUND. A fingerprint that is not on the current
+            # sheet cannot be dismissed. With the import sweep this bounds the
+            # table at BOTH ends, and a forged or stale value fails closed
+            # instead of hiding some arbitrary row.
+            res = st.call("dismiss_tracker_row", fingerprint="zzzzzzzzzzzzzzzz")
+            r.check("a fingerprint not on the current sheet is REFUSED",
+                    res.get("ok") is False,
+                    f"got {res} -- unchecked, this writes a dismissal that "
+                    f"nothing can sweep and that may match a future row")
+            r.check("and the refusal names why",
+                    "not on the current" in str(res.get("error", "")).lower()
+                    or "no such" in str(res.get("error", "")).lower(),
+                    f"got {res.get('error')!r}")
+
+            res = st.call("restore_tracker_row", fingerprint="aaaaaaaaaaaaaaaa")
+            r.check("a dismissal can be undone", res.get("ok") is True, f"got {res}")
+            r.check("and the row comes back",
+                    read_dis() == [],
+                    "an undo that leaves the record is not an undo")
+
+            # RETIRED with the tool. adopt_tracker_row created the project
+            # and wrote the dismissal that retired its row under one lock. It
+            # is gone: by_key retires an adopted row on the next import,
+            # because the sheet's number is now a project's number. The two
+            # halves it existed to keep together no longer exist -- there is
+            # only the project create, which create_project already does.
+            #
+            # Its atomicity could not be delivered anyway. The lock does not
+            # make a save() and a save_side() one transaction, and reporting
+            # ok:false when the second failed put a project on disk under a
+            # message saying nothing was written.
+            r.section("the new writes are as hardened as every other write")
+            src = (crm / "mcp" / "server.py").read_text()
+            body = src.split("def save_side", 1)[-1].split("\n    def ", 1)[0]
+            # after the docstring: the docstring NAMES os.replace to explain
+            # why it is gone, and a check that reads its own explanation as
+            # the defect is measuring the comment, not the code.
+            body = body.split('"""')[-1]
+            r.check("save_side goes through _write, not its own os.replace",
+                    "self._write(" in body and "os.replace" not in body,
+                    f"got:\n{body[:300]}\n-- _write carries the retry/backoff "
+                    f"for the Windows case where OneDrive holds the target "
+                    f"open, the StoreError translation, and a .~*.tmp name the "
+                    f"startup sweep collects. A hand-rolled copy has none.")
+
+            r.section("a dismissal is written to history, and never read back")
+            seed([dict(ROW), dict(OTHER)])
+            st.call("dismiss_tracker_row", fingerprint="aaaaaaaaaaaaaaaa",
+                    reason="already_adopted")
+            log = (st.path / "changelog.jsonl")
+            entries = [json.loads(l) for l in log.read_text().splitlines()
+                       if l.strip()] if log.exists() else []
+            r.check("the dismissal is in the changelog",
+                    any(e.get("entity") == "tracker_row" for e in entries),
+                    f"got {entries} -- months from now 'why is that row not on "
+                    f"the list' has to have an answer")
+            src = (crm / "mcp" / "server.py").read_text() \
+                + (crm / "pipeline" / "merge.py").read_text()
+            r.check("and NOTHING reads the changelog to decide what is hidden",
+                    "tracker_row" not in src.split("_entities_in_changelog", 1)[-1]
+                    .split("def ", 1)[0],
+                    "a log that decides what the screen shows is a second "
+                    "authority beside tracker_dismissed.json, and the two "
+                    "disagree the first time one is edited")
+
+            r.section("list_tracker carries the reason to the card")
+            seed([dict(ROW), dict(OTHER)])
+            st.call("dismiss_tracker_row", fingerprint="aaaaaaaaaaaaaaaa",
+                    reason="already_adopted")
+            tk = st.call("list_tracker")
+            got = {u.get("sheet_row"): u.get("reason_dismissed")
+                   for u in tk.get("tracker_unlinked") or []}
+            r.check("the dismissed row says WHY on the very next read",
+                    got == {8: "already_adopted", 9: None},
+                    f"got {got} -- the card reads it off the row, so without "
+                    f"this every dismissal reads 'not a job'")
+
             # ---- moving a project must carry its legs ------------------
             #
             # rename_project cascades a number change and reassign_shipment

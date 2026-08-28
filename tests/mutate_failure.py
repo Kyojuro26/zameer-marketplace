@@ -104,8 +104,12 @@ SITES = [
  # mutants -- the catch is still there, still catching. Only a check that reads
  # the screen and fails on the string "undefined" kills them.
  ("doSave prints a non-Error rejection as \"undefined\"",
-  "    msg.textContent='\u2717 ' + ((e && e.message) || String(e)); msg.className='saved show errc';",
-  "    msg.textContent='\u2717 ' + e.message; msg.className='saved show errc';"),
+  "    lastSaveError = (e && e.message) || String(e);\n"
+  "    msg.textContent='✗ ' + lastSaveError; msg.className='saved show errc';\n"
+  "    return false;",
+  "    lastSaveError = e.message;\n"
+  "    msg.textContent='✗ ' + lastSaveError; msg.className='saved show errc';\n"
+  "    return false;"),
  ("replyToThread alerts a non-Error rejection as \"undefined\"",
   "    alert('Could not create reply draft: ' + ((e && e.message) || String(e)));",
   "    alert('Could not create reply draft: ' + e.message);"),
