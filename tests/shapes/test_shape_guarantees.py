@@ -31,6 +31,10 @@ def run(server, crm_dir=None):
 
     # ------------------------------------------------------------------ 1 --
     r.section('graph.py: "DRAFTS ONLY -- nothing here can send mail"')
+    # SOURCE CHECK, and not executable here: reaching it means calling
+    # Microsoft Graph. CAN detect: a message_id interpolated into a Graph URL
+    # path without quote(). CANNOT detect: whether the encoding is correct, or
+    # anything about a live response.
     graph_src = (crm / "mcp" / "graph.py").read_text()
     promises_drafts_only = "nothing here can send mail" in graph_src.lower()
     if promises_drafts_only:
@@ -49,6 +53,14 @@ def run(server, crm_dir=None):
 
     # ------------------------------------------------------------------ 2 --
     r.section('normalize.py: "anything ambiguous is flagged, never dropped"')
+    # SOURCE CHECK, and the only one in this sweep that already carries its
+    # own positive control (the _pat probe below), because the pattern it
+    # scans with silently stopped matching for three releases.
+    # CAN detect: a `continue` in a row loop with no needs_review append near
+    # it. CANNOT detect: whether the append is reached, or whether it records
+    # the right thing.
+    # Not executable: "every drop is flagged" is universal over every row shape
+    # the workbook can hold, and no fixture enumerates them.
     nrm = crm / "pipeline" / "normalize.py"
     nrm_src = nrm.read_text() if nrm.exists() else ""
     promises_never_drop = "never dropped" in nrm_src.lower()
@@ -106,6 +118,13 @@ def run(server, crm_dir=None):
 
     # ------------------------------------------------------------------ 3 --
     r.section('server.py _key: "every comparison MUST go through this"')
+    # SOURCE CHECK by design -- this whole module audits docstring promises
+    # against the code, which is a claim no single execution can settle.
+    # CAN detect: a bare str() identifier comparison ANYWHERE in the file.
+    # CANNOT detect: whether any particular comparison is reached, or whether
+    # a comparison written some other way is equally wrong.
+    # Not executable: "no site in this file does X" is universally quantified
+    # over code paths, and no fixture visits them all.
     srv_src = (crm / "mcp" / "server.py").read_text()
     bare = re.findall(r'str\(\s*\w+(?:\.get\()?["\']?(?:project_no|invoice_no)'
                       r'["\']?\)?\s*\)\s*==', srv_src)

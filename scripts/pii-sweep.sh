@@ -20,6 +20,61 @@ set -uo pipefail
 # positive control run that way proves the sweep can exit 1, not that it can
 # find a name. The pre-commit hook passes an absolute mktemp path, which is why
 # this survived.
+# --- --positive-control ----------------------------------------------------
+# THREE steps, because the sweep has three ways to find a name and only one of
+# them had ever been exercised. A gate nobody has watched fail is a gate nobody
+# knows works.
+#
+#   1. CONTENT   a name inside a file            -> must exit 1
+#   2. FILENAME  a name in a path                -> must exit 1
+#   3. CLEAN     the tree as it stands           -> must exit 0
+#
+# Step 2 is the one with history: the comment at the FILENAME sweep records
+# that the name was once in two filenames and a directory, and that path had
+# never been shown to fire. Step 3 matters just as much -- a sweep that exits 1
+# on everything detects nothing and teaches people to skip it.
+#
+# The needle is read from .pii-names, never written here: this file is public.
+if [ "${1:-}" = "--positive-control" ]; then
+  SELFROOT="$(cd "$(dirname "$0")/.." && pwd)"
+  NEEDLE=$(grep -vE '^\s*(#|$)' "$SELFROOT/.pii-names" | head -1 | sed 's/|.*//')
+  if [ -z "$NEEDLE" ]; then
+    echo "FATAL: .pii-names has no pattern to plant." >&2; exit 1
+  fi
+  TMP=$(mktemp -d) || exit 1
+  trap 'rm -rf "$TMP"' EXIT
+  ( cd "$SELFROOT" && git ls-files -z | tr '\0' '\n' ) | while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    mkdir -p "$TMP/$(dirname "$f")"
+    cp "$SELFROOT/$f" "$TMP/$f" 2>/dev/null || true
+  done
+  cp "$SELFROOT/.pii-names" "$TMP/.pii-names"
+  ( cd "$TMP" && git init -q . && git add -A >/dev/null 2>&1 )
+
+  FAILED=0
+  printf 'planted name in FILE CONTENT ... '
+  printf 'contact %s about this\n' "$NEEDLE" > "$TMP/leak_probe.txt"
+  ( cd "$TMP" && git add -A >/dev/null 2>&1 )
+  if "$0" "$TMP" >/dev/null 2>&1; then echo "NOT CAUGHT -- the sweep is blind"; FAILED=1
+  else echo "caught"; fi
+  rm -f "$TMP/leak_probe.txt"
+
+  printf 'planted name in a FILENAME ...... '
+  : > "$TMP/notes-$NEEDLE.txt"
+  ( cd "$TMP" && git add -A >/dev/null 2>&1 )
+  if "$0" "$TMP" >/dev/null 2>&1; then echo "NOT CAUGHT -- the sweep is blind"; FAILED=1
+  else echo "caught"; fi
+  rm -f "$TMP/notes-$NEEDLE.txt"
+
+  printf 'clean tree ..................... '
+  ( cd "$TMP" && git add -A >/dev/null 2>&1 )
+  if "$0" "$TMP" >/dev/null 2>&1; then echo "exits 0"
+  else echo "FAILS ON A CLEAN TREE -- it will be ignored, and then it is not a gate"; FAILED=1; fi
+
+  [ "$FAILED" -eq 0 ] && echo "POSITIVE CONTROL PASSED -- all three ways of finding a name work."
+  exit "$FAILED"
+fi
+
 ROOT="$(cd "${1:-$(dirname "$0")/..}" 2>/dev/null && pwd)" \
   || { echo "FATAL: cannot cd to ${1:-.}" >&2; exit 1; }
 cd "$ROOT" || { echo "FATAL: cannot cd to $ROOT" >&2; exit 1; }
@@ -33,6 +88,14 @@ add_hit() { HITS="$HITS$1"$'\n'; FAIL=1; }
 # No names live in this file — it is itself public. ALLOWED_EMAIL is the one
 # address deliberately published as a contact line.
 ALLOWED_EMAIL="zeeshan@zameer.io"
+if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  IN_GIT=1
+else
+  IN_GIT=""
+  echo "note: not a git repo -- sweeping every file under $ROOT, including" >&2
+  echo "  anything a .gitignore would have excluded." >&2
+fi
+
 SHAPES=$(grep -rInoE \
   -e '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
   -e 'C:\\Users\\[^\\<> ]+' \
@@ -124,6 +187,31 @@ if [ "$NPAT" -eq 0 ]; then
 fi
 
 
+# WHAT THIS SWEEPS: everything git would let you commit -- tracked files plus
+# untracked ones that are not ignored. NOT a bare `find`.
+#
+# A bare find walked dist/*.plugin, which is gitignored build output: binary,
+# not an allowlisted format, so the sweep said "cannot read it, cannot clear
+# it" and exited 1 on a clean tree. The pre-commit hook sweeps the index, so
+# the real gate passed while the standalone command failed -- and a fail-closed
+# gate that fails for a benign reason is one people learn to ignore. The next
+# real hit would have looked exactly like the noise.
+#
+# Ignored files are out of scope because they cannot reach the repo. If that
+# ever stops being true -- a build that commits its own output -- this is the
+# line to change, and the reason is here rather than in a commit message.
+#
+# Outside a git repo there is nothing to ask, so it falls back to find and
+# SAYS it did: the two modes sweep different sets and must not be confused.
+list_files() {
+  if [ -n "$IN_GIT" ]; then
+    ( cd "$ROOT" && git ls-files --cached --others --exclude-standard -z \
+        | tr '\0' '\n' | sed "s|^|$ROOT/|" )
+  else
+    find "$ROOT" -type f -not -path '*/.git/*' -not -path '*/__pycache__/*' 2>/dev/null
+  fi
+}
+
 # --- 3. Binary and non-UTF-8 files -----------------------------------------
 # grep -I skips binary files ENTIRELY, so the formats a leak is most likely to
 # arrive in walked straight through: an .xlsx (the client's sales tracker is a
@@ -149,7 +237,7 @@ while IFS= read -r f; do
     BINARIES="$BINARIES$f: binary, and not an allowlisted format -- the sweep cannot read it, so it cannot clear it"$'\n'
   fi
 done <<EOF
-$(find "$ROOT" -type f -not -path '*/.git/*' -not -path '*/__pycache__/*' 2>/dev/null)
+$(list_files)
 EOF
 if [ -n "$(printf '%s' "$BINARIES" | tr -d '[:space:]')" ]; then
   add_hit "$BINARIES"

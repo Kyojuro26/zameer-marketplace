@@ -224,11 +224,28 @@ async function run(crmDir) {
     `got ${ev('todayISO()')} -- every lateness answer below would drift`);
 
   // ---- the landing screen ---------------------------------------------------
-  r.check('there is a Live tab', /data-f="live"/.test(html));
-  r.check('Live is the tab that starts selected',
+  // Two markup greps stood here -- /data-f="live"/ and
+  // /data-f="live" class="on"/ over the generated html. Both are replaced by
+  // reading the rendered sidebar and the app's own state, which is what the
+  // third line already did.
+  // SOURCE CHECKS, and I tried to convert these and could not. The filter tabs
+  // are not among the elements lib/dom.js registers (it tracks id-bearing
+  // nodes; the tabs carry data-f, not ids), and the shim's body.innerHTML is
+  // empty -- so there is no rendered surface to read them off. Executing them
+  // needs a real DOM, which this suite deliberately does not have.
+  // CAN detect: the Live tab being removed, or the selected marker moving to
+  // another tab. CANNOT detect: whether clicking it does anything.
+  // The behavioural half is the two checks below -- the app's own filter
+  // state, and that the live pane is what actually got painted.
+  r.check('there is a Live tab (SOURCE CHECK)', /data-f="live"/.test(html));
+  r.check('Live is the tab that starts selected (SOURCE CHECK)',
     /data-f="live" class="on"/.test(html),
     'the daily screen is the reason he opens the app');
   r.check('the app starts on the live filter', ev('filter') === 'live');
+  r.check('and it is the live screen that got painted',
+    /Not in the CRM yet|No live projects yet|lt-card/.test(
+      (app.el('main') || { innerHTML: '' }).innerHTML || ''),
+    'the filter can say live while the pane shows the old screen');
   // #main ships with "Select a company to begin."; a cross-company landing
   // view has to paint ITSELF as the bundle loads, because renderMain is
   // otherwise only reached by selecting a company or switching tabs. Read what
@@ -346,7 +363,12 @@ async function run(crmDir) {
   // The invariant, independent of the fixture: whatever expression the flags
   // read for a start date, the card reads the same one. A fixture alone cannot
   // pin this, because the field it needs cannot exist on a real project.
-  r.check('the card and the flags read the same start-date expression',
+  // SOURCE CHECK: a DRY claim -- two places must read the date the same way.
+  // CAN detect: one of them being rewritten to read a different field.
+  // CANNOT detect: whether either is right. Not executable for the same reason
+  // as the receivables one: both spellings agree on every input until they
+  // diverge, and the divergence is the defect.
+  r.check('the card and the flags read the same start-date expression (SOURCE CHECK)',
     (js.match(/p\.date\s*\|\|\s*p\.start_date/g) || []).length >= 2,
     'they disagreed once and a row wore a TBD badge while showing no start '
     + 'date at all');
@@ -405,7 +427,10 @@ async function run(crmDir) {
     + 'cuts a different string and can sever an entity');
 
   // ---- the note -------------------------------------------------------------
-  r.check('the note wraps rather than being clipped',
+  // SOURCE CHECK: a CSS claim, and this shim does no layout.
+  // CAN detect: the wrapping rule being removed. CANNOT detect: whether text
+  // actually wraps.
+  r.check('the note wraps rather than being clipped (SOURCE CHECK)',
     /\.lt-note\{[^}]*white-space:pre-wrap/.test(html),
     'a one-line note box turns the substance of the screen into a tooltip');
   r.check('the whole note is on the page, not a prefix of it',
@@ -833,12 +858,30 @@ async function run(crmDir) {
     !/Status not recognised/.test(app.doc.getElementById('main').innerHTML),
     'it was the only unrecognised row');
 
-  // ---- adoption records the key the SHEET carries --------------------------
-  r.check('adoption writes the sheet key so the row can be retired',
-    /tracker_key: st\(u\.raw_key\)/.test(js),
-    'a tracker row need not be keyed with a number -- on the real workbook one '
-    + 'is keyed with a phrase, which parses to nothing, so without this that '
-    + 'card returns every import no matter what number he gives it');
+  // ---- adoption records the key the SHEET carried --------------------------
+  // EXECUTED, and its claim CORRECTED. This was a grep for the literal
+  // `tracker_key: st(u.raw_key)` in the bundle source, and its stated reason --
+  // "without this that card returns every import" -- became false when
+  // by_sheet_key was deleted. Nothing reads tracker_key now. It is kept as
+  // PROVENANCE, a record of which sheet row a project came from, and that is
+  // what this asserts: adopt a row, and the project carries the key the sheet
+  // had. A grep could not have told the difference between a field that is
+  // still written and a field that still means something.
+  {
+    const pk = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http',
+      onCall: () => ({ ok: true }) });
+    pk.eval("setFilter('live'); renderMain();");
+    pk.eval("openAdoptTrackerRow(2)");          // row 8, keyed '1419'
+    pk.el('a_pno').value = '7001';
+    pk.el('a_cid').value = 'acme';
+    await pk.eval("saveAdoptTrackerRow(2)");
+    const sent = pk.calls().filter(c => c.tool === 'create_project');
+    r.check('adopting a row records the key the sheet carried',
+      sent.length === 1 && String((sent[0].args.fields || {}).tracker_key) === '1419',
+      `got ${JSON.stringify(sent.map(c => (c.args.fields || {}).tracker_key))} `
+      + '-- provenance only: nothing reads it back, and the row is retired by '
+      + 'its NUMBER matching a live project');
+  }
 
   // ---- the refresh reaches the tracker sections ----------------------------
   // Behavioural, not a grep. These were source-text assertions and broke the

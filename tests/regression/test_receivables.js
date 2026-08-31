@@ -72,9 +72,18 @@ function run(crmDir) {
 
   // ---- the shared definition -----------------------------------------------
   r.check('the receivables filter button exists', /data-f="receivable"/.test(html));
-  r.check('only ONE definition of the overdue bucket',
+  // SOURCE CHECK, and not executable by construction: "there is exactly ONE
+  // definition of this function" is a claim about the file, and both copies
+  // would answer identically until the day someone edits one of them -- which
+  // is precisely the failure it guards.
+  // CAN detect: a second inline copy of the bucket rule appearing.
+  // CANNOT detect: whether the one definition is correct. The behavioural half
+  // is the bucket assertions further down, which do execute.
+  r.check('only ONE definition of the overdue bucket (SOURCE CHECK)',
     (js.match(/function invoiceBucket\s*\(/g) || []).length === 1);
-  r.check('the company page uses the shared bucket, not its own copy',
+  // SOURCE CHECK, same DRY claim as above: two spellings agree on every input
+  // until one is edited, and that divergence is the defect.
+  r.check('the company page uses the shared bucket, not its own copy (SOURCE CHECK)',
     /const bucketOf = \(v\)=> invoiceBucket\(/.test(js),
     'a second inline copy is the same store answering one question two ways');
 
@@ -93,10 +102,38 @@ function run(crmDir) {
   r.check('a linked project with no revenue also has no amount',
     ev("String(outstanding(DATA.invoices.find(i=>String(i.invoice_no)==='7005')))") === 'null');
 
-  // an amount must belong to THIS company's project of that number
-  r.check('the amount is matched on company as well as project number',
-    /String\(x\.project_no\) === String\(pno\)[\s\S]{0,80}company_id/.test(js),
-    'two customers can hold the same project number');
+  // an amount must belong to THIS company's project of that number.
+  // EXECUTED: the grep that stood here matched an expression in the bundle and
+  // would have passed on any rewrite that kept those two tokens near each
+  // other, however it combined them.
+  {
+    const dupDir = path.join(tmp, 'store-dupno');
+    fs.cpSync(store, dupDir, { recursive: true });
+    fs.writeFileSync(path.join(dupDir, 'companies.json'), JSON.stringify([
+      { company_id: 'acme', display_name: 'Ace', role: 'customer', archived: false },
+      { company_id: 'beta', display_name: 'Beta', role: 'customer', archived: false }]));
+    // SAME project number under two different customers, different revenue
+    // BETA FIRST, deliberately. DATA.projects.find returns the first match, so
+    // with acme first the guard could be deleted and the check would still
+    // pass -- it would be finding the right revenue by accident of ordering.
+    fs.writeFileSync(path.join(dupDir, 'projects.json'), JSON.stringify([
+      { company_id: 'beta', project_no: '900', status: 'won', year: 2026,
+        archived: false, revenue: 9000 },
+      { company_id: 'acme', project_no: '900', status: 'won', year: 2026,
+        archived: false, revenue: 1000 }]));
+    fs.writeFileSync(path.join(dupDir, 'invoices.json'), JSON.stringify([
+      { company_id: 'acme', invoice_no: 'I-900', project_no: '900',
+        payment_status: 'open', invoice_date: '2026-01-05' }]));
+    fs.writeFileSync(path.join(dupDir, 'shipments.json'), '[]');
+    const dupApp = launch({ crmDir, storeDir: dupDir, outDir: tmp, mode: 'http' });
+    dupApp.eval("setFilter('receivable'); renderMain();");
+    const dupMain = dupApp.el('main').innerHTML || '';
+    r.check('an amount comes from THIS company\'s project of that number',
+      /1,000/.test(dupMain) && !/9,000/.test(dupMain),
+      `got ${(dupMain.match(/[\d,]{3,}/g) || []).join(' ')} -- two customers `
+      + 'can hold the same project number, and pricing an invoice from the '
+      + "wrong one bills Ace for Beta's job");
+  }
 
   // ---- bucketing and lateness ----------------------------------------------
   ev("__t='2026-08-07';");

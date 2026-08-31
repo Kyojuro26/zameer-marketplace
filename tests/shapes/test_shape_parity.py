@@ -19,8 +19,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.harness import Result, Store, company, project, invoice  # noqa: E402
 
 
-def run(server):
+def run(server, crm_dir=None):
     r = Result("SHAPE/parity", since="all")
+
+    # ---- every tool the server exposes is in the interface doc ------------
+    #
+    # SOURCE CHECK, and the only honest kind here: the claim is about what the
+    # DOC says, and no execution can read a markdown table for you.
+    # CAN detect: a tool added to server.py and never documented, and a tool
+    # deleted from server.py whose row was left behind.
+    # CANNOT detect: whether a row DESCRIBES its tool correctly.
+    #
+    # renumber_duplicate_shipments shipped in 0.1.28 and was never written
+    # down. It is the way out of a store that predates that release -- legs
+    # sharing one shipment_id, which update_shipment and reassign_shipment both
+    # refuse -- so the one tool that unsticks an operator was the one tool he
+    # could not find.
+    import re as _re
+    from pathlib import Path as _Path
+    crm = _Path(crm_dir) if crm_dir else (
+        _Path(__file__).resolve().parents[2]
+        / "plugins/unrivaled-solutions/skills/crm")
+    _srv = (crm / "mcp" / "server.py").read_text()
+    _tools = set(_re.findall(r"^@mcp\.tool\(\)\s*\n(?:@\w+\s*\n)*def (\w+)",
+                             _srv, _re.M))
+    _doc = (crm / "references" / "interface-v0.1.md").read_text()
+    _documented = set(_re.findall(r"^\|\s*`(\w+)`", _doc, _re.M))
+    r.section("every tool is in the interface doc, and vice versa")
+    r.check("no tool is undocumented",
+            not (_tools - _documented),
+            f"missing from interface-v0.1.md: {sorted(_tools - _documented)}")
+    r.check("no documented tool has been deleted",
+            not (_documented - _tools),
+            f"in the doc but not in server.py: {sorted(_documented - _tools)}")
+
     s = Store(server)
 
     # ---- pair: linking to a soft-deleted parent -----------------------------

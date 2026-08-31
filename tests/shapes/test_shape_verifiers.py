@@ -167,6 +167,11 @@ def run(server, crm_dir=None):
     # ---- the store/workbook audit must not certify a sabotaged store -------
     r.section("workbook audit: it must not report a destroyed store as clean")
     audit = crm / "pipeline" / "audit_workbook_vs_store.py"
+    # SOURCE CHECK. CAN detect: invoices.json dropped from the audit's entity
+    # list. CANNOT detect: whether the audit compares them correctly, or
+    # whether it is ever run. Left as source because executing it needs a
+    # workbook AND a store deliberately diverged from it, which is the audit's
+    # own subject rather than this module's.
     src = audit.read_text() if audit.exists() else ""
     # look at the entity list it actually loads, wherever that lives
     loads = re.search(r'for\s+n\s+in\s+\[([^\]]*)\]', src)

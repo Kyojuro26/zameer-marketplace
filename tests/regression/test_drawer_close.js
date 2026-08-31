@@ -118,12 +118,22 @@ async function run(crmDir) {
   // in this repo before.
   const { js, html } = buildBundle(crmDir, store, tmp);
 
-  r.check('scrim element is in the page', /id="scrim"/.test(html));
+  // SOURCE CHECKS, this block. The scrim's whole job is CSS -- covering the
+  // viewport, eating clicks only when open, sitting under the drawer and over
+  // the page -- and the header of this module says plainly that the shim does
+  // no CSS layout. So there is nothing to execute: a rendered DOM with no
+  // style engine cannot tell you whether an overlay covers anything.
+  // CAN detect: the rule being deleted or its value changed.
+  // CANNOT detect: whether the scrim actually covers, blocks or stacks.
+  r.check('scrim element is in the page (SOURCE CHECK)', /id="scrim"/.test(html));
 
   // Anchored to the DRAWER's own X (id=drawerX), not to "any element with
   // class=x anywhere on the page" -- the looser form was satisfied by a decoy
   // button elsewhere in the document while the real X had been reverted.
-  r.check('the X routes through the guard, not a bare close',
+  // SOURCE CHECK. CAN detect: the X rewired to closeDrawer(). CANNOT detect:
+  // whether the guard then does anything -- the behavioural half is the Escape
+  // and scrim drives below, which click through the real handlers.
+  r.check('the X routes through the guard, not a bare close (SOURCE CHECK)',
     /id="drawerX"[^>]*onclick="requestCloseDrawer\(\)"|onclick="requestCloseDrawer\(\)"[^>]*id="drawerX"/.test(html),
     'the X must ask about unsaved edits too -- it discards just as much');
 
@@ -423,9 +433,10 @@ async function run(crmDir) {
   //    regardless -- wiping the error AND the typed values, and redrawing from
   //    data the failed save never updated. The operator saw the new number with
   //    the old figures and no error.
-  r.check('saveProject only reopens when the save succeeded',
-    /if\(renamed && ok\) openProject/.test(js),
-    'reopening after a refused save destroys the error and the typed values');
+  // The grep that stood here -- /if\(renamed && ok\) openProject/ over the
+  // bundle source -- is deleted rather than annotated: the block immediately
+  // below DRIVES a refused rename and asserts the drawer's state afterwards,
+  // so the grep added nothing but a second thing to break on a rename.
   {
     const failApp = launch({
       crmDir, storeDir: store, outDir: tmp, mode: 'http',

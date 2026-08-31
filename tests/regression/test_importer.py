@@ -121,13 +121,11 @@ def run(server, crm_dir=None):
                     nrm.commission_like(note) is False,
                     "a real collection percentage would be discarded")
 
-    r.section("the importer mints unique shipment ids")
-    if nrm:
-        src = (crm / "pipeline" / "normalize.py").read_text()
-        r.check("leg numbering does not restart per row",
-                "_next_leg" in src and "L{leg_no}" not in src,
-                "a project number on two open-order rows mints the same "
-                "shipment_id twice, and no tool can then tell the legs apart")
+    # "the importer mints unique shipment ids" MOVED to
+    # test_livetracker.py, where the workbook fixtures live. It was a grep for
+    # "_next_leg" and the absence of "L{leg_no}" in normalize.py, which could
+    # see a rename and nothing else; it is now an import of a sheet carrying
+    # one project number on two open-order rows, asserting the two ids differ.
 
     # ---- presence vs coercion -------------------------------------------
     # clean() answers "what is the string form of this key" and MUST keep

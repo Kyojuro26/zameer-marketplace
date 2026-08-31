@@ -36,6 +36,7 @@ The bucket LABELS in particular are read from the sheet at import and stored,
 never written into source -- on the real workbook they name people.
 """
 import json
+import os
 import re
 import shutil
 import sys
@@ -171,7 +172,7 @@ def _build_workbook(path, legend=(L_ADMIN, L_OWNER, L_AWAIT)):
 def _build_edge_workbook(path, *, trailing_unkeyed=False, stray_col_a=False,
                          theme_row=False, default_fill_row=False,
                          keyed_bodyless_unknown=False, footer_stray_leg=False,
-                         legend_unreadable=False):
+                         legend_unreadable=False, dup_project_rows=False):
     """A minimal sheet for the boundary and fill-decode edge cases.
 
     Kept separate from the main fixture: each flag here changes what the
@@ -196,7 +197,14 @@ def _build_edge_workbook(path, *, trailing_unkeyed=False, stray_col_a=False,
     pt.append(["Unrivaled Project#:", "Client PO#:", "Start Date:",
                "Client Name:", "Client Location:", "Open Orders Notes:",
                "Vendor 1 PO#:", "Vendor 1 Ship Date:"])
-    pt.append(_tracker_row("6001", "Brightwater Fabrication", "on the bench"))
+    pt.append(_tracker_row("6001", "Brightwater Fabrication", "on the bench",
+                          legs=(("VPO-A", "2026-03-01"),) if dup_project_rows else ()))
+    if dup_project_rows:
+        # The SAME project number on a second open-order row, each with its own
+        # vendor leg. Real shape: one job whose shipments are tracked on
+        # separate lines.
+        pt.append(_tracker_row("6001", "Brightwater Fabrication", "second leg",
+                              legs=(("VPO-B", "2026-03-08"),)))
     pt.append(_tracker_row("6002", "Brightwater Fabrication", "theme fill here"))
     # row 4 is the LAST row that is both keyed and carries a body, so the
     # boundary sits here and everything below is footer as far as position goes
@@ -320,6 +328,15 @@ def _import(nrm, crm, tmp, name, **wbkw):
         p = out / f"{entity}.json"
         return json.loads(p.read_text()) if p.exists() else None
     return err, load
+
+
+def _load_merge(crm):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_lt_merge2", crm / "pipeline" / "merge.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
 def _merge_checks(r, crm, tmp):
@@ -793,6 +810,38 @@ def _merge_checks(r, crm, tmp):
             f"back to raw_key is the same free-text collision by_sheet_key "
             f"was deleted for")
 
+    r.section("the changelog is history, and never an input")
+    # EXECUTED, not grepped. The claim is that the changelog is
+    # HISTORY and never an input: delete the table it duplicates and
+    # the row must come straight back, however loudly the log says it
+    # was dismissed.
+    _log_only = tmp / "mg-logonly"
+    _log_only.mkdir(parents=True, exist_ok=True)
+    for _e in ("companies", "contacts", "shipments", "vendors",
+               "needs_review", "invoices", "projects"):
+        (_log_only / f"{_e}.json").write_text("[]")
+    (_log_only / "companies.json").write_text(json.dumps(
+        [{"company_id": "acme", "display_name": "Ace",
+          "role": "customer", "archived": False}]))
+    (_log_only / "changelog.jsonl").write_text(json.dumps(
+        {"entity": "tracker_row", "key": "aaaaaaaaaaaaaaaa",
+         "op": "dismiss", "fields": {"reason": "not_a_job"}}) + "\n")
+    _merged, _rep = merge.merge_all(
+        {"companies.json": [{"company_id": "acme",
+                             "display_name": "Ace", "role": "customer",
+                             "archived": False}],
+         "contacts.json": [], "shipments.json": [], "invoices.json": [],
+         "vendors.json": [], "needs_review.json": [],
+         "projects.json": [], "tracker_buckets.json": [],
+         "tracker_unlinked.json": [dict(ROW_A)]}, str(_log_only))
+    r.check("a dismissal in the changelog hides NOTHING on its own",
+            not any(u.get("dismissed")
+                    for u in _merged["tracker_unlinked.json"]),
+            f"got {_merged['tracker_unlinked.json']} -- a log that "
+            f"decides what the screen shows is a second authority "
+            f"beside tracker_dismissed.json, and the two disagree the "
+            f"first time one is edited")
+
     r.section("a corrupt dismissal file does not take down the import")
     d = store("dis-corrupt", [])
     (d / "tracker_dismissed.json").write_text("{ not json")
@@ -818,9 +867,22 @@ def _merge_checks(r, crm, tmp):
     # group is neither ambiguous nor prior -- `prior is None` then treats an
     # existing record as NEW and re-adds it. This was cleared by reasoning in
     # the commit before this one; here it is pinned instead.
+    # KEPT AS A SOURCE CHECK, and here is exactly what it can and cannot do.
+    #
+    # CAN detect: someone changing how old_groups is BUILT -- pre-seeding it
+    # with empty lists for known keys, which is the one construction that
+    # breaks the complement.
+    # CANNOT detect: anything about behaviour. It is blind to a rename, and it
+    # would pass on any wrong construction that still uses setdefault/append.
+    #
+    # It is not executable: a zero-length group cannot be produced from any
+    # input, only by editing the constructor, so there is no store that makes
+    # today's code fail. The behavioural half of this pairing is the duplicate-
+    # key check immediately below, which DOES execute -- treat this line as a
+    # tripwire on a refactor, not as coverage.
     src = (crm / "pipeline" / "merge.py").read_text()
     blk = src.split("old_groups = {}", 1)[-1].split("ambiguous", 1)[0]
-    r.check("groups are only ever appended to, never pre-seeded",
+    r.check("groups are only ever appended to, never pre-seeded (SOURCE CHECK)",
             "setdefault" in blk and ".append(" in blk and "= []" not in blk,
             f"got:\n{blk}\n-- any construction that can produce an EMPTY "
             f"group breaks the complement and silently re-adds records")
@@ -918,8 +980,13 @@ def run(server, crm_dir=None):
 
     # A label read from the sheet must never be committed to source. On the
     # real workbook these name people and this repo is public.
+    # KEPT, and it is the one kind of claim that is ONLY answerable in source.
+    # CAN detect: a real person's name committed into the importer.
+    # CANNOT detect: anything about what the importer does at run time.
+    # Not executable by construction -- the claim is about the file's contents,
+    # not its behaviour, and a passing import proves nothing either way.
     src = (crm / "pipeline" / "normalize.py").read_text()
-    r.check("no bucket LABEL is hardcoded in the importer",
+    r.check("no bucket LABEL is hardcoded in the importer (SOURCE CHECK)",
             "tracker_buckets.json" in src
             and not any(w in src for w in ("action_admin\":", "= \"Waiting")),
             "the labels are read from the legend at import; a hardcoded one "
@@ -1437,16 +1504,56 @@ def run(server, crm_dir=None):
                 f"left unswept the table grows without bound, which is the "
                 f"exact property this design claims is structural")
 
+        r.section("leg numbering does not restart per open-order row")
+        # EXECUTED, and moved here from test_importer.py, which had no workbook
+        # machinery and so could only grep normalize.py for "_next_leg" and the
+        # absence of "L{leg_no}". That grep could see a rename and nothing else
+        # -- it would have passed on any implementation that still restarted
+        # the counter under a different variable name.
+        _e6, _l6 = _import_edge(nrm, crm, tmp, "dup-rows", dup_project_rows=True)
+        _sids = [x.get("shipment_id") for x in (_l6("shipments") or [])
+                 if str(x.get("project_no")) == "6001"]
+        r.check("one project on two rows mints DISTINCT shipment ids",
+                len(_sids) == len(set(_sids)) and len(_sids) >= 2,
+                f"got {_sids} -- restarting the counter per row mints the same "
+                f"id twice, and no tool can then tell the legs apart")
+
         r.section("both tracker files are regenerated, never merged")
-        mg = (crm / "pipeline" / "merge.py").read_text()
-        regen = mg.split("REGENERATED", 1)[-1].split("\n\n", 1)[0]
-        r.check("tracker_unlinked.json is regenerated wholesale",
-                "tracker_unlinked.json" in regen,
-                "merged by key, a row adopted into the CRM comes back as an "
-                "unadopted card on the next import")
-        r.check("tracker_buckets.json is regenerated wholesale",
-                "tracker_buckets.json" in regen,
-                "a bucket he renamed in the sheet would keep its old label")
+        # EXECUTED. This was a grep for each filename inside the REGENERATED
+        # literal, which could only see whether a name had been deleted from a
+        # set -- not whether the merge actually replaces the file. So put stale
+        # content in the store, import different content, and look.
+        _rg = tmp / "mg-regen"
+        _rg.mkdir(parents=True, exist_ok=True)
+        for _e in ("companies", "contacts", "shipments", "vendors",
+                   "needs_review", "invoices", "projects"):
+            (_rg / f"{_e}.json").write_text("[]")
+        (_rg / "companies.json").write_text(json.dumps(
+            [{"company_id": "acme", "display_name": "Ace", "role": "customer",
+              "archived": False}]))
+        (_rg / "tracker_unlinked.json").write_text(json.dumps(
+            [{"sheet_row": 99, "client": "STALE ROW", "legs": [],
+              "fingerprint": "stalestalestale1"}]))
+        (_rg / "tracker_buckets.json").write_text(json.dumps(
+            [{"key": "action_admin", "label": "OLD LABEL", "argb": "FFFF00FF"}]))
+        _mg2, _ = _load_merge(crm).merge_all(
+            {"companies.json": [{"company_id": "acme", "display_name": "Ace",
+                                 "role": "customer", "archived": False}],
+             "contacts.json": [], "shipments.json": [], "invoices.json": [],
+             "vendors.json": [], "needs_review.json": [], "projects.json": [],
+             "tracker_buckets.json": [{"key": "action_admin",
+                                       "label": "NEW LABEL", "argb": "FFFF00FF"}],
+             "tracker_unlinked.json": [{"sheet_row": 3, "client": "FRESH ROW",
+                                        "legs": [], "fingerprint": "freshfresh12345"}]},
+            str(_rg))
+        r.check("tracker_unlinked.json is replaced wholesale, not merged",
+                [u.get("client") for u in _mg2["tracker_unlinked.json"]] == ["FRESH ROW"],
+                f"got {_mg2['tracker_unlinked.json']} -- merged by key, a row "
+                f"he adopted comes back as an unadopted card every import")
+        r.check("tracker_buckets.json is replaced wholesale too",
+                [b.get("label") for b in _mg2["tracker_buckets.json"]] == ["NEW LABEL"],
+                f"got {_mg2['tracker_buckets.json']} -- a bucket he renamed in "
+                f"the sheet would keep its old label forever")
 
         # ---- re-import, where the tracker meets the operator's own work ----
         _merge_checks(r, crm, tmp)
@@ -1594,18 +1701,44 @@ def run(server, crm_dir=None):
             # ok:false when the second failed put a project on disk under a
             # message saying nothing was written.
             r.section("the new writes are as hardened as every other write")
-            src = (crm / "mcp" / "server.py").read_text()
-            body = src.split("def save_side", 1)[-1].split("\n    def ", 1)[0]
-            # after the docstring: the docstring NAMES os.replace to explain
-            # why it is gone, and a check that reads its own explanation as
-            # the defect is measuring the comment, not the code.
-            body = body.split('"""')[-1]
-            r.check("save_side goes through _write, not its own os.replace",
-                    "self._write(" in body and "os.replace" not in body,
-                    f"got:\n{body[:300]}\n-- _write carries the retry/backoff "
-                    f"for the Windows case where OneDrive holds the target "
-                    f"open, the StoreError translation, and a .~*.tmp name the "
-                    f"startup sweep collects. A hand-rolled copy has none.")
+            # EXECUTED. This was a grep for "self._write(" in save_side's body,
+            # which could only ever see whether that call site had been renamed
+            # away -- not whether the protections it exists for actually run.
+            # So: hold the target open the way OneDrive does and watch what
+            # happens.
+            seed([dict(ROW), dict(OTHER)])
+            _real_replace = os.replace
+            _tries = []
+
+            def _locked(a, b):
+                _tries.append(a)
+                raise PermissionError(13, "locked by OneDrive")
+
+            os.replace = _locked
+            try:
+                res = st.call("dismiss_tracker_row",
+                              fingerprint="aaaaaaaaaaaaaaaa", reason="not_a_job")
+            finally:
+                os.replace = _real_replace
+            r.check("a locked target is RETRIED, not failed on the first go",
+                    len(_tries) >= 5,
+                    f"{len(_tries)} attempt(s) -- _write backs off five times "
+                    f"because OneDrive, robocopy and Defender all hold a file "
+                    f"open for a moment on Windows")
+            r.check("and it comes back as a sentence, not a stack trace",
+                    res.get("ok") is False and "_raised" not in res
+                    and "locked" in str(res.get("error", "")).lower(),
+                    f"got {res} -- a hand-rolled writer skipped the StoreError "
+                    f"translation and escaped as a raw ToolError")
+            r.check("and its temp file is one the startup sweep collects",
+                    all(os.path.basename(t).startswith(".~")
+                        and t.endswith(".tmp") for t in _tries),
+                    f"got {[os.path.basename(t) for t in _tries]} -- the sweep "
+                    f"globs .~*.tmp, so any other name orphans forever")
+            r.check("and nothing was left behind",
+                    not [f for f in os.listdir(st.path) if f.endswith(".tmp")],
+                    f"got {[f for f in os.listdir(st.path) if f.endswith('.tmp')]}")
+
 
             r.section("a dismissal is written to history, and never read back")
             seed([dict(ROW), dict(OTHER)])
@@ -1618,14 +1751,7 @@ def run(server, crm_dir=None):
                     any(e.get("entity") == "tracker_row" for e in entries),
                     f"got {entries} -- months from now 'why is that row not on "
                     f"the list' has to have an answer")
-            src = (crm / "mcp" / "server.py").read_text() \
-                + (crm / "pipeline" / "merge.py").read_text()
-            r.check("and NOTHING reads the changelog to decide what is hidden",
-                    "tracker_row" not in src.split("_entities_in_changelog", 1)[-1]
-                    .split("def ", 1)[0],
-                    "a log that decides what the screen shows is a second "
-                    "authority beside tracker_dismissed.json, and the two "
-                    "disagree the first time one is edited")
+
 
             r.section("list_tracker carries the reason to the card")
             seed([dict(ROW), dict(OTHER)])
