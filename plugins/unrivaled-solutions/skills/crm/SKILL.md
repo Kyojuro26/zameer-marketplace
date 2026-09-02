@@ -74,8 +74,8 @@ Use the read tools; they are side-effect-free:
   tools also carries a `metrics` object (cycle time; won revenue, quoted
   gross profit, open exposure, oldest overdue). **Each figure is a shape,
   not a number**: `{value, counted, population, excluded: {reason: n},
-  basis}`. Always say the denominator with the value — "$3,100 across 3 of
-  139 invoices; 136 have no project link" — and never read a `null` value as
+  basis}`. Always say the denominator with the value — "$48,000 across 41 of
+  139 invoices; 98 have no project link" — and never read a `null` value as
   zero: `null` means nothing could be counted. Per-customer figures sum over
   invoices that HAVE a customer; `receivables_ageing` counts every live
   invoice, so its population can be larger by the invoices with none. When `excluded` dominates,
