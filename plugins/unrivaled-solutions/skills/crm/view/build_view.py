@@ -574,18 +574,24 @@ function kpis(){
   const openShip = DATA.shipments.filter(s=>['Ordered','Shipped','On Hold'].includes(st(s.stage))).length;
   const won = curProjects.filter(p=>st(p.status)==='won').reduce((a,p)=>a+num(p.revenue),0);
   const pend = curProjects.filter(p=>st(p.status)==='pending').reduce((a,p)=>a+num(p.revenue),0);
-  const recv = curProjects.filter(p=>{const c=st(p.collection_status);return c && c!=='paid';})
-                          .reduce((a,p)=>a+num(p.revenue),0);
   // The receivables tile is the one he opens the app for, so it is the one
-  // that goes somewhere. Left as invoiced value, NOT net of deposits, so this
-  // number does not silently change meaning -- the Receivables view states the
-  // difference in its own summary line.
+  // that goes somewhere -- and it is the one that used to lie by omission. It
+  // summed projects with a collection status filled in: 8 of 261, shown as if
+  // it were the receivables. It now reads the SERVER's exposure shape (see
+  // ledgerExposure) and says beside the figure how many invoices it could
+  // price. A store the server has not described yet shows a dash and says so;
+  // it never falls back to a sum of its own, because a second definition is
+  // how two figures on one screen come to disagree.
+  const ex = ledgerExposure();
+  const recvN = ex && ex.value != null ? money(ex.value) : '\u2014';
+  const recvL = ex ? `Open receivables \u00b7 ${ex.counted} of ${ex.population} invoice${ex.population===1?'':'s'} priced`
+                   : 'Open receivables \u00b7 needs the server';
   document.getElementById('kpis').innerHTML = [
     ['Companies', DATA.companies.length, null],
     ['Open shipments', openShip, null],
     [`Won revenue (${thisYear})`, money(won), null],
     [`Pending pipeline (${thisYear})`, money(pend), null],
-    [`Open receivables (${thisYear})`, money(recv), 'receivable'],
+    [recvL, recvN, 'receivable'],
   ].map(([l,n,go])=>go
     ? `<div class="kpi go" role="button" tabindex="0" onclick="setFilter('${jesc(go)}')"
          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setFilter('${jesc(go)}')}"
@@ -832,12 +838,25 @@ function renderReceivables(){
   const unknown = rows.length - known.length;
   const total = known.reduce((a,r)=>a+r.owed,0);
 
+  // The headline figure is the SERVER's, across every open invoice, with its
+  // denominator beside it. It used to be this bucket's own sum, which priced 1
+  // invoice in 140 and read as the receivables. The per-bucket total still
+  // appears in the table footer, where it names what it excludes.
+  const ex = ledgerExposure();
+  const head = ex
+    ? (ex.value == null
+        ? `<span class="muted">· nothing priced: ${esc(shapeCaveat(ex))}</span>`
+        : `<span class="muted">· ${money(ex.value)} outstanding across ${esc(shapeCaveat(ex))}</span>`)
+    : `<span class="muted">· total needs the server</span>`;
   let h = `<div class="co-head"><h1>Receivables</h1>
     <span class="muted">${rows.length} ${esc(recvBucket.toLowerCase())}</span>
-    <span class="muted">· ${money(total)} outstanding</span></div>`;
+    ${head}</div>`;
   h += `<p class="muted" style="margin:2px 0 16px;font-size:12px">
     Outstanding is what is left to collect — a part-paid invoice counts only its
-    remainder. The header total counts full invoiced value.</p>`;
+    remainder. The figure above is the server's, over every open invoice, and
+    says how many it could price; an invoice with no project link or no revenue
+    on its project has no amount anywhere and is named rather than counted as
+    zero.</p>`;
 
   if(!rows.length){
     return h + `<div class="empty">Nothing ${esc(recvBucket.toLowerCase())}.</div>`;
@@ -1602,6 +1621,38 @@ function fmtDate(v){
   if(!iso) return t;                       // unparseable: show what is stored
   const [y,m,d] = iso.split('-').map(Number);
   return d + ' ' + MONTHS[m-1] + ' ' + y;
+}
+
+/* ------------------------------------------------- the server's shape --
+   company.metrics.exposure_open_receivable_usd arrives on every company from
+   list_companies (and is embedded at build time from the same builder):
+   {value, counted, population, excluded: {reason: n}, basis}. This function
+   only ADDS those shapes up across customers -- it prices nothing itself, so
+   the tile and the Receivables header cannot disagree with the server about
+   what a single invoice is worth. Returns null when no company carries a
+   shape (a server older than 0.1.36, or a page built without one). */
+function ledgerExposure(){
+  const shapes = (DATA.companies||[])
+    .map(c => c && c.metrics && c.metrics.exposure_open_receivable_usd)
+    .filter(s => s && typeof s === 'object' && 'population' in s);
+  if(!shapes.length) return null;
+  const out = {value: 0, counted: 0, population: 0, excluded: {}};
+  shapes.forEach(s => {
+    const n = (v)=>{ const x = Number(v); return isNaN(x) ? 0 : x; };
+    out.counted += n(s.counted); out.population += n(s.population);
+    if(s.value != null) out.value += n(s.value);
+    Object.keys(s.excluded||{}).forEach(k => {
+      out.excluded[k] = (out.excluded[k]||0) + n(s.excluded[k]); });
+  });
+  if(!out.counted) out.value = null;          // nothing counted is not $0
+  return out;
+}
+/* "3 of 5 invoices priced \u00b7 1 no project link \u00b7 1 no revenue on project" */
+function shapeCaveat(sh){
+  const parts = [`${sh.counted} of ${sh.population} invoice${sh.population===1?'':'s'} priced`];
+  Object.keys(sh.excluded).sort((a,b)=>sh.excluded[b]-sh.excluded[a])
+    .forEach(k => parts.push(`${sh.excluded[k]} ${String(k).replace(/_/g,' ')}`));
+  return parts.join(' \u00b7 ');
 }
 
 /* ---------------------------------------------------- receivables model --
@@ -3042,6 +3093,38 @@ CRM.detect();
 </html>
 """
 
+def _attach_metrics(data, store_dir):
+    """company.metrics from mcp/server.py's builder -- the SAME code that
+    answers list_companies -- so the tile the page paints first and the one
+    it repaints after refresh are one definition. The view computes none of
+    these figures itself. If the server module cannot be imported (a page
+    built somewhere without the mcp package) the page ships without shapes and
+    SAYS so on the tile, rather than falling back to a sum of its own."""
+    mcp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mcp")
+    if mcp_dir not in sys.path:
+        sys.path.insert(0, mcp_dir)
+    try:
+        import server as _srv
+    except Exception as ex:                                       # noqa: BLE001
+        print(f"WARNING: metrics not embedded ({type(ex).__name__}: {ex}) -- "
+              f"the receivables tile will say it needs the server", file=sys.stderr)
+        return
+    from pathlib import Path as _P
+    prev = getattr(_srv, "STORE", None)
+    try:
+        if prev is None or _P(prev.root).resolve() != _P(store_dir).resolve():
+            _srv.STORE = _srv.Store(_P(store_dir))
+        ctx = _srv._MetricsCtx()
+        data["companies"] = [dict(c, metrics=ctx.company_metrics(c))
+                             for c in data["companies"]]
+    except Exception as ex:                                       # noqa: BLE001
+        print(f"WARNING: metrics not embedded ({type(ex).__name__}: {ex}) -- "
+              f"the receivables tile will say it needs the server", file=sys.stderr)
+    finally:
+        if prev is not None:
+            _srv.STORE = prev
+
+
 def render_html(store_dir, token=""):
     """Build the self-contained HTML app for the given store, embedding
     `token` as the bridge auth secret (empty string if none -- the app will
@@ -3092,6 +3175,7 @@ def render_html(store_dir, token=""):
     for k in ["contacts", "projects", "shipments", "invoices"]:
         data[k] = [x for x in data[k] if x.get("company_id") not in arch]
     data["vendors"] = [v for v in data["vendors"] if not v.get("archived")]
+    _attach_metrics(data, store_dir)
     # The `dismissed` flag on a row is stamped by an IMPORT. A dismissal made
     # through dismiss_tracker_row lands only in
     # tracker_dismissed.json, which this step did not read -- so a row he had

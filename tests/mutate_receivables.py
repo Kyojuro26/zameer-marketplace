@@ -76,10 +76,43 @@ M = [
  ("an unlinked invoice shows an empty project cell",
   "      : '<span class=\"badge b-stage\">Not linked</span>';", "      : '';"),
 
+ # ---- the server's shape (0.1.36) -------------------------------------------
+ ("the tile falls back to its own project sum when there is no shape",
+  "  const recvN = ex && ex.value != null ? money(ex.value) : '\\u2014';",
+  "  const recvN = ex && ex.value != null ? money(ex.value)\n"
+  "    : money(curProjects.filter(p=>{const c=st(p.collection_status);return c && c!=='paid';}).reduce((a,p)=>a+num(p.revenue),0));"),
+ ("a ledger with nothing counted renders $0",
+  "  if(!out.counted) out.value = null;          // nothing counted is not $0",
+  "  if(!out.counted) out.value = 0;"),
+ ("the tile drops its denominator",
+  "  const recvL = ex ? `Open receivables \\u00b7 ${ex.counted} of ${ex.population} invoice${ex.population===1?'':'s'} priced`",
+  "  const recvL = ex ? `Open receivables`"),
+ ("the population is summed from counted alone",
+  "    out.counted += n(s.counted); out.population += n(s.population);",
+  "    out.counted += n(s.counted); out.population += n(s.counted);"),
+ ("exclusions are not carried into the ledger tally",
+  "    Object.keys(s.excluded||{}).forEach(k => {\n"
+  "      out.excluded[k] = (out.excluded[k]||0) + n(s.excluded[k]); });",
+  ""),
+ ("the header keeps its own bucket total instead of the server's figure",
+  "        : `<span class=\"muted\">· ${money(ex.value)} outstanding across ${esc(shapeCaveat(ex))}</span>`)",
+  "        : `<span class=\"muted\">· ${money(total)} outstanding</span>`)"),
+ ("the page is built without the server's shapes",
+  "    _attach_metrics(data, store_dir)\n", ""),
+ ("build-time shapes come from a copy of the rule, not the server's builder",
+  "        ctx = _srv._MetricsCtx()\n"
+  "        data[\"companies\"] = [dict(c, metrics=ctx.company_metrics(c))\n"
+  "                             for c in data[\"companies\"]]",
+  "        data[\"companies\"] = [dict(c, metrics={\"exposure_open_receivable_usd\": {\n"
+  "            \"value\": sum(float(p.get(\"revenue\") or 0) for p in data[\"projects\"]\n"
+  "                         if p.get(\"company_id\") == c.get(\"company_id\")),\n"
+  "            \"unit\": \"usd\", \"counted\": 1, \"population\": 1, \"excluded\": {}, \"basis\": \"b\"}})\n"
+  "                             for c in data[\"companies\"]]"),
+
  # ---- wiring -------------------------------------------------------------
  ("the receivables KPI stops navigating",
-  "    [`Open receivables (${thisYear})`, money(recv), 'receivable'],",
-  "    [`Open receivables (${thisYear})`, money(recv), null],"),
+  "    [recvL, recvN, 'receivable'],",
+  "    [recvL, recvN, null],"),
  ("the KPI is mouse-only",
   """         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setFilter('${jesc(go)}')}\"""",
   '         data-nokeys="1"'),

@@ -220,6 +220,60 @@ function run(crmDir) {
   r.check('and is reachable by keyboard',
     /tabindex="0"[\s\S]{0,200}onkeydown=/.test(app.doc.getElementById('kpis').innerHTML));
 
+  // ---- the tile and the header read the SERVER's shape (0.1.36) -----------
+  //
+  // Before this the tile summed projects with a collection status filled in
+  // (8 of 261 in the real store) and read as the receivables. Now both
+  // surfaces read company.metrics.exposure_open_receivable_usd -- embedded at
+  // build time by mcp/server.py's own builder and refreshed from
+  // list_companies -- and say beside the figure how many invoices they could
+  // price. In this fixture: acme 89,600 (7001 at 30% received) + 0 (7002 paid)
+  // over 2 of 2; mer 83,000 over 1 of 3, one unlinked, one unpriced. Ledger:
+  // 172,600 across 3 of 5.
+  ev("kpis();");
+  const kpi = app.doc.getElementById('kpis').innerHTML;
+  r.check('the tile shows the server\'s ledger exposure, net of part-payments',
+    kpi.includes('172,600'), `tile reads: ${kpi.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').slice(0,200)}`);
+  r.check('and says how many invoices it could price, beside the figure',
+    /3 of 5 invoices priced/.test(kpi),
+    'a figure without its denominator is the defect this release exists for');
+  r.check('the tile no longer sums projects by collection status',
+    !kpi.includes('211,000') && !kpi.includes('128,000'),
+    '128000 (partial) + 83000 (open) is the old project-based figure');
+  r.check('ledgerExposure adds shapes; it prices nothing itself (SOURCE CHECK)',
+    !/function ledgerExposure[\s\S]{0,1200}(outstanding|invoiceAmount)\(/.test(js),
+    'a second pricing rule in the view is how two figures on one screen disagree');
+  const led = JSON.parse(ev("JSON.stringify(ledgerExposure())"));
+  r.check('the ledger tally is additive: counted + excluded == population',
+    led && led.counted + Object.values(led.excluded).reduce((a,b)=>a+b,0) === led.population
+      && led.population === 5 && led.counted === 3,
+    JSON.stringify(led));
+  r.check('and names the exclusions by reason',
+    led && led.excluded.no_project_link === 1 && led.excluded.no_revenue_on_project === 1,
+    JSON.stringify(led && led.excluded));
+  ev("setFilter('receivable');");
+  const headHtml = app.doc.getElementById('main').innerHTML;
+  r.check('the Receivables header carries the same figure and the same denominator',
+    headHtml.includes('172,600') && /3 of 5 invoices priced/.test(headHtml),
+    headHtml.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').slice(0,240));
+  r.check('and no longer claims the header counts full invoiced value',
+    !/header total counts full invoiced value/.test(headHtml));
+  // A page whose companies carry no shape -- an older server, or a build
+  // without one -- must say so, and must never show $0 or fall back to a sum.
+  ev("DATA.companies.forEach(c => { delete c.metrics; }); kpis();");
+  const tile = (h) => h.split('class="kpi go"')[1] || '';   // the receivables tile alone
+  const bare = tile(app.doc.getElementById('kpis').innerHTML);
+  r.check('without a shape the tile shows a dash and says it needs the server',
+    /needs the server/.test(bare) && !/\$0\b/.test(bare) && !bare.includes('211,000'),
+    bare.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').slice(0,200));
+  // A shape with nothing counted is null, and null is not $0.
+  ev("DATA.companies.forEach(c => { c.metrics = {exposure_open_receivable_usd: "
+     + "{value: null, unit: 'usd', counted: 0, population: 2, excluded: {no_project_link: 2}, basis: 'b'}}; }); kpis();");
+  const nul = tile(app.doc.getElementById('kpis').innerHTML);
+  r.check('a ledger with nothing priced shows a dash, not $0',
+    !/\$0\b/.test(nul) && /0 of 4 invoices priced/.test(nul),
+    nul.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').slice(0,200));
+
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;
 }
