@@ -1103,6 +1103,430 @@ def _with_due_on(invoices):
     return [dict(i, effective_due_on=_effective_due_on(i)) for i in invoices]
 
 
+# ------------------------------------------------------------- metrics ---
+#
+# Every derived number leaves this server inside ONE shape:
+#
+#     {"value": 89600, "unit": "usd", "counted": 1, "population": 140,
+#      "excluded": {"no_project_link": 136, ...},
+#      "basis": "what was summed and how", "as_of": "2026-09-01"?}
+#
+# The shape exists because two figures in the app -- the "Open receivables"
+# tile and the Receivables total -- summed 8 of 261 projects and priced 1 of
+# 140 invoices, and both looked authoritative. A number here cannot be built
+# without saying what it counted and what it left out:
+#
+#   * counted + sum(excluded) == population. A record is excluded for exactly
+#     ONE reason -- the first failing check in a fixed order -- so the tally is
+#     additive and the operator can read it as a to-do list.
+#   * value is None if and only if counted == 0. A denominator of zero never
+#     renders as a numeric zero; a real zero (a fully paid customer) is 0 with
+#     counted > 0.
+#   * every exclusion reason comes from EXCLUSION_REASONS. A reason outside it
+#     is a bug, and tests/regression/test_metrics.py fails on it.
+#   * anything derived from revenue minus cost says "quoted" in its name and
+#     its basis. These are the deal log's quoted figures, not realised margin.
+#   * as_of appears only on metrics that depend on today's date.
+#
+# Computed on the way out of a read tool, exactly as effective_due_on is, and
+# NEVER persisted: `metrics` is in no *_FIELDS set, so every create and update
+# already refuses it. A per-record metric is a population of one; a company
+# rollup is the tally of its records' shapes; an aggregate is the tally over
+# the store. One builder produces all three levels so they cannot disagree.
+
+EXCLUSION_REASONS = (
+    # money
+    "no_project_link", "no_revenue_on_project", "no_cost_on_project", "paid",
+    "not_won", "no_won_revenue",
+    # dates
+    "no_date", "unparseable_date", "ship_before_project_date",
+    # legs
+    "no_shipment", "no_shipped_leg", "ship_date_is_estimate", "not_yet_shipped",
+    "cancelled", "no_vendor_on_leg", "no_eta",
+)
+# A leg in one of these stages has left the vendor. The importer sets Shipped
+# exactly when a ship date exists; Delivered and Installed are later states of
+# the same fact. Ordered and On Hold have not shipped; Cancelled never will.
+SHIPPED_STAGES = {"Shipped", "Delivered", "Installed"}
+METRIC_REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time")
+AGE_BUCKETS = ("not_yet_due", "0-30", "31-60", "61-90", "90+")
+
+
+def _today():
+    """Today, as a date. A hook so tests can freeze the clock: every metric
+    that carries as_of reads the day through here and nowhere else."""
+    return datetime.now().date()
+
+
+def _shape(value, unit, counted, excluded, basis, as_of=None):
+    """Build the one shape. Enforces the zero-population rule and the additive
+    tally at construction, so no caller can assemble a shape that lies."""
+    exc = {k: v for k, v in excluded.items() if v}
+    for k in exc:
+        if k not in EXCLUSION_REASONS:
+            raise StoreError(f"internal: exclusion reason {k!r} is not in the vocabulary")
+    sh = {"value": value if counted else None, "unit": unit,
+          "counted": counted, "population": counted + sum(exc.values()),
+          "excluded": exc, "basis": basis}
+    if as_of is not None:
+        sh["as_of"] = as_of
+    return sh
+
+
+def _tally(reasons):
+    """{reason: count} from an iterable of reason strings."""
+    out = {}
+    for k in reasons:
+        out[k] = out.get(k, 0) + 1
+    return out
+
+
+def _num(v):
+    """A stored money field as a number, or None. Strings are coerced because
+    nothing validates the type of revenue; bools are not numbers."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None          # NaN
+
+
+def _parse_ship_date(s):
+    """(date, is_estimate) for a ship-date cell. The tracker writes "EST
+    8/03/26" for a promised date; that is a plan, not a shipment, and the
+    Live Tracker already strips the prefix in its own lateness flags. Returns
+    (None, est) when the remainder is not a date."""
+    if s is None or isinstance(s, bool):
+        return None, False
+    t = str(s).strip()
+    est = bool(re.match(r"^\s*est\.?\s+", t, re.I))
+    if est:
+        t = re.sub(r"^\s*est\.?\s+", "", t, flags=re.I)
+    d = _parse_date_loose(t)
+    return (d.date() if d else None), est
+
+
+def _pct_paid(payment_status):
+    """The received share of a "partial:30%" status, as a fraction, or None
+    when the status carries no usable percentage."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(payment_status or ""))
+    if not m:
+        return None
+    p = float(m.group(1))
+    return p / 100 if 0 <= p <= 100 else None
+
+
+class _MetricsCtx:
+    """The store, loaded once and indexed, for one tool response. Every
+    per-record and aggregate metric reads from here so a list_companies call
+    over a few hundred companies is a handful of file reads, not thousands."""
+
+    def __init__(self):
+        self.arch_cids = _archived_ids()
+        self.arch_pnos = _archived_project_nos()
+        self.companies = STORE.load("companies")
+        self.projects = [p for p in STORE.load("projects")
+                         if not p.get("archived")
+                         and p.get("company_id") not in self.arch_cids]
+        self.shipments = [s for s in STORE.load("shipments")
+                          if s.get("company_id") not in self.arch_cids
+                          and not _shipment_hidden(s, self.arch_pnos)]
+        self.invoices = [i for i in STORE.load("invoices")
+                         if i.get("company_id") not in self.arch_cids
+                         and _key(i.get("project_no")) not in self.arch_pnos]
+        self.vendors = {v.get("company_id"): v for v in STORE.load("vendors")}
+        self.proj_by_key = {}
+        self.proj_by_cid = {}
+        for p in self.projects:
+            self.proj_by_key.setdefault((_key(p.get("project_no")), p.get("company_id")), p)
+            self.proj_by_cid.setdefault(p.get("company_id"), []).append(p)
+        self.legs_by_pno = {}
+        for s in self.shipments:
+            for n in _shipment_project_nos(s):
+                self.legs_by_pno.setdefault(n, []).append(s)
+        self.inv_by_cid = {}
+        for i in self.invoices:
+            self.inv_by_cid.setdefault(i.get("company_id"), []).append(i)
+        self.today = _today()
+
+    # ---- per-invoice ----
+    def invoice_amount(self, inv):
+        """(amount, reason). The invoice's value lives on its linked project;
+        an invoice carries no amount of its own."""
+        pno = _key(inv.get("project_no"))
+        if not pno:
+            return None, "no_project_link"
+        p = self.proj_by_key.get((pno, inv.get("company_id")))
+        if not p:
+            return None, "no_project_link"
+        amt = _num(p.get("revenue"))
+        if amt is None:
+            return None, "no_revenue_on_project"
+        return amt, None
+
+    def outstanding(self, inv):
+        """(usd, reason). "partial:30%" means 30% RECEIVED; the outstanding
+        share is the remainder. A paid invoice owes 0 whether or not it is
+        priced -- that is a real zero, not a missing amount."""
+        if str(inv.get("payment_status") or "").startswith("paid"):
+            return 0, None
+        amt, why = self.invoice_amount(inv)
+        if why:
+            return None, why
+        pct = _pct_paid(inv.get("payment_status"))
+        return (round(amt * (1 - pct)) if pct is not None else round(amt)), None
+
+    def days_late(self, inv):
+        """(days, reason). Whole days past the effective due date, clamped at
+        zero; None with a reason when there is no usable date."""
+        if str(inv.get("payment_status") or "").startswith("paid"):
+            return None, "paid"
+        due = _effective_due_on(inv)
+        if not due:
+            return None, "no_date"
+        d = _parse_date_loose(due)
+        if not d:
+            return None, "unparseable_date"
+        return max(0, (self.today - d.date()).days), None
+
+    # ---- per-project ----
+    def cycle_time(self, p):
+        """Days from the project's date to the EARLIEST actual ship date across
+        its legs. A leg contributes only if it has shipped (SHIPPED_STAGES) and
+        carries a real, non-estimate date; a cancelled leg or a planned date on
+        an Ordered leg never does."""
+        basis = ("days from the project's date to the earliest actual vendor "
+                 "ship date across its legs; EST dates and cancelled or "
+                 "unshipped legs do not count")
+        legs = self.legs_by_pno.get(_key(p.get("project_no")), [])
+        if not legs:
+            return _shape(None, "days", 0, {"no_shipment": 1}, basis)
+        shipped = []
+        for s in legs:
+            if s.get("stage") not in SHIPPED_STAGES:
+                continue
+            d, est = _parse_ship_date(s.get("ship_date"))
+            if d and not est:
+                shipped.append(d)
+        if not shipped:
+            return _shape(None, "days", 0, {"no_shipped_leg": 1}, basis)
+        if not p.get("date"):
+            return _shape(None, "days", 0, {"no_date": 1}, basis)
+        start = _parse_date_loose(p.get("date"))
+        if not start:
+            return _shape(None, "days", 0, {"unparseable_date": 1}, basis)
+        days = (min(shipped) - start.date()).days
+        if days < 0:
+            return _shape(None, "days", 0, {"ship_before_project_date": 1}, basis)
+        return _shape(days, "days", 1, {}, basis)
+
+    def project_metrics(self, p):
+        return {"cycle_time_days": self.cycle_time(p)}
+
+    # ---- per-company ----
+    def won_revenue(self, projects):
+        """(sum, excluded) over a company's live projects."""
+        total, counted, exc = 0, 0, []
+        for p in projects:
+            if p.get("status") != "won":
+                exc.append("not_won"); continue
+            rev = _num(p.get("revenue"))
+            if rev is None:
+                exc.append("no_revenue_on_project"); continue
+            total += rev; counted += 1
+        return round(total), counted, _tally(exc)
+
+    def company_metrics(self, c):
+        cid = c.get("company_id")
+        projects = self.proj_by_cid.get(cid, [])
+        invoices = self.inv_by_cid.get(cid, [])
+        total, counted, exc = self.won_revenue(projects)
+        rev = _shape(total, "usd", counted, exc,
+                     "sum of quoted revenue over won projects, all years")
+        gp_total, gp_n, gp_exc = 0, 0, []
+        for p in projects:
+            if p.get("status") != "won":
+                gp_exc.append("not_won"); continue
+            r_ = _num(p.get("revenue"))
+            if r_ is None:
+                gp_exc.append("no_revenue_on_project"); continue
+            c_ = _num(p.get("total_cost"))
+            if c_ is None:
+                gp_exc.append("no_cost_on_project"); continue
+            gp_total += r_ - c_; gp_n += 1
+        gp = _shape(round(gp_total), "usd", gp_n, _tally(gp_exc),
+                    "quoted revenue minus quoted total cost over won projects; "
+                    "quoted at the deal, not realised")
+        owed, owed_n, owed_exc = 0, 0, []
+        for i in invoices:
+            v, why = self.outstanding(i)
+            if why:
+                owed_exc.append(why); continue
+            owed += v; owed_n += 1
+        exposure = _shape(owed, "usd", owed_n, _tally(owed_exc),
+                          "quoted revenue of the linked project, net of recorded "
+                          "part-payments; a paid invoice counts as 0")
+        oldest, old_n, old_exc = 0, 0, []
+        for i in invoices:
+            d, why = self.days_late(i)
+            if why:
+                old_exc.append(why); continue
+            oldest = max(oldest, d); old_n += 1
+        overdue = _shape(oldest, "days", old_n, _tally(old_exc),
+                         "days past the effective due date of the most overdue "
+                         "unpaid invoice, clamped at zero",
+                         as_of=self.today.isoformat())
+        return {"revenue_won_usd": rev, "quoted_gross_profit_usd": gp,
+                "exposure_open_receivable_usd": exposure,
+                "oldest_overdue_days": overdue}
+
+    # ---- aggregates ----
+    def customer_concentration(self, year=None):
+        rows, exc = [], []
+        customers = [c for c in self.companies
+                     if not c.get("archived") and c.get("role") == "customer"]
+        for c in customers:
+            projects = self.proj_by_cid.get(c.get("company_id"), [])
+            if year is not None:
+                projects = [p for p in projects if _key(p.get("year")) == _key(year)]
+            total, counted, _x = self.won_revenue(projects)
+            if not counted:
+                exc.append("no_won_revenue"); continue
+            rows.append({"company_id": c.get("company_id"),
+                         "display_name": c.get("display_name"),
+                         "revenue_won_usd": total})
+        total = sum(r_["revenue_won_usd"] for r_ in rows)
+        rows.sort(key=lambda r_: (-r_["revenue_won_usd"], str(r_["company_id"])))
+        for r_ in rows:
+            # share of the COUNTED total: the shape's value is what the shares
+            # are of, so a share is only ever read next to its denominator
+            r_["share"] = (r_["revenue_won_usd"] / total) if total else 0.0
+        sh = _shape(total, "usd", len(rows), _tally(exc),
+                    "each live customer's quoted won revenue"
+                    + (f" for year {year}" if year is not None else ", all years")
+                    + ", as a share of the total over customers that have any")
+        sh["rows"] = rows
+        return sh
+
+    def receivables_ageing(self):
+        as_of = self.today.isoformat()
+        buckets = {b: [] for b in AGE_BUCKETS}
+        exc = []
+        for i in self.invoices:
+            d, why = self.days_late(i)
+            if why:
+                exc.append(why); continue
+            due = _parse_date_loose(_effective_due_on(i)).date()
+            if due > self.today:
+                b = "not_yet_due"
+            elif d <= 30:
+                b = "0-30"
+            elif d <= 60:
+                b = "31-60"
+            elif d <= 90:
+                b = "61-90"
+            else:
+                b = "90+"
+            buckets[b].append(i)
+        out = {}
+        for b in AGE_BUCKETS:
+            amt, n, a_exc = 0, 0, []
+            for i in buckets[b]:
+                v, why = self.outstanding(i)
+                if why:
+                    a_exc.append(why); continue
+                amt += v; n += 1
+            out[b] = {"count": len(buckets[b]),
+                      "amount_usd": _shape(amt, "usd", n, _tally(a_exc),
+                                           "outstanding on the invoices in this "
+                                           "bucket that can be priced",
+                                           as_of=as_of)}
+        aged = sum(len(v) for v in buckets.values())
+        sh = _shape(aged, "invoices", aged, _tally(exc),
+                    "unpaid invoices with a readable effective due date, "
+                    "bucketed by whole days past it", as_of=as_of)
+        sh["buckets"] = out
+        return sh
+
+    def vendor_on_time(self):
+        """On time means the actual ship date is on or before the ETA. Only
+        completed legs are judged; an open leg past its ETA is the Live
+        Tracker's job, and mixing it in would make the rate unreadable."""
+        judged = {}          # vendor_id -> [days_late, ...]
+        per_vendor_exc = {}  # vendor_id -> [reason, ...]
+        exc = []
+        for s in self.shipments:
+            vid = s.get("vendor_id")
+            if s.get("stage") == "Cancelled":
+                why = "cancelled"
+            elif not vid or isinstance(vid, bool):
+                why = "no_vendor_on_leg"
+            elif s.get("stage") not in SHIPPED_STAGES:
+                why = "not_yet_shipped"
+            elif not s.get("eta"):
+                why = "no_eta"
+            else:
+                eta = _parse_date_loose(s.get("eta"))
+                if not eta:
+                    why = "unparseable_date"
+                elif not s.get("ship_date"):
+                    why = "no_date"
+                else:
+                    shipped, est = _parse_ship_date(s.get("ship_date"))
+                    if est:
+                        why = "ship_date_is_estimate"
+                    elif not shipped:
+                        why = "unparseable_date"
+                    else:
+                        why = None
+                        judged.setdefault(vid, []).append(
+                            max(0, (shipped - eta.date()).days))
+            if vid and not isinstance(vid, bool):
+                per_vendor_exc.setdefault(vid, [])
+                if why:
+                    per_vendor_exc[vid].append(why)
+            if why:
+                exc.append(why)
+        basis = ("legs that have shipped with an actual date and an ETA; on "
+                 "time is ship date on or before ETA; cancelled and open legs "
+                 "are not judged")
+        rows = []
+        for vid in per_vendor_exc:
+            lates = judged.get(vid, [])
+            n = len(lates)
+            on_time = sum(1 for d in lates if d == 0)
+            row = _shape((on_time / n) if n else None, "ratio", n,
+                         _tally(per_vendor_exc[vid]), basis)
+            row["value"] = round(row["value"], 3) if row["value"] is not None else None
+            row["vendor_id"] = vid
+            row["display_name"] = (self.vendors.get(vid) or {}).get("display_name")
+            row["mean_days_late"] = round(sum(lates) / n, 1) if n else None
+            rows.append(row)
+        # worst rate first; vendors with nothing judged last
+        rows.sort(key=lambda r_: (r_["value"] is None,
+                                  r_["value"] if r_["value"] is not None else 0,
+                                  str(r_["vendor_id"])))
+        all_lates = [d for v in judged.values() for d in v]
+        n = len(all_lates)
+        sh = _shape((round(sum(1 for d in all_lates if d == 0) / n, 3) if n else None),
+                    "ratio", n, _tally(exc), basis)
+        sh["mean_days_late"] = round(sum(all_lates) / n, 1) if n else None
+        sh["rows"] = rows
+        return sh
+
+
+def _with_project_metrics(ctx, projects):
+    """Copies of project records with their metrics attached -- tool responses
+    only, never persisted."""
+    return [dict(p, metrics=ctx.project_metrics(p)) for p in projects]
+
+
+def _with_company_metrics(ctx, companies):
+    return [dict(c, metrics=ctx.company_metrics(c)) for c in companies]
+
+
 def _err(e):
     return {"ok": False, "error": str(e), "interface_version": VERSION}
 
@@ -1149,8 +1573,10 @@ def get_company(ref: str) -> dict:
                 and _key(x.get("project_no")) not in arch_pnos]
     flags = [x for x in STORE.load("needs_review")
              if cid in (x.get("company_ids") or []) or x.get("company_id") == cid]
-    return {"ok": True, "interface_version": VERSION, "company": c,
-            "contacts": contacts, "projects": projects,
+    ctx = _MetricsCtx()
+    return {"ok": True, "interface_version": VERSION,
+            "company": dict(c, metrics=ctx.company_metrics(c)),
+            "contacts": contacts, "projects": _with_project_metrics(ctx, projects),
             "shipments": shipments, "invoices": _with_due_on(invoices),
             "needs_review": flags,
             "enrichment": STORE.load_enrichment().get(cid)}
@@ -1172,7 +1598,7 @@ def list_companies(role: str = None, query: str = None,
         q = _norm(query)
         out = [c for c in out if q in _norm(c["display_name"])]
     return {"ok": True, "interface_version": VERSION,
-            "count": len(out), "companies": out}
+            "count": len(out), "companies": _with_company_metrics(_MetricsCtx(), out)}
 
 
 @mcp.tool()
@@ -1192,7 +1618,8 @@ def get_project(project_no: str) -> dict:
     company = next((c for c in companies if c["company_id"] == p["company_id"]), None)
     contacts = [c for c in STORE.load("contacts") if c["company_id"] == p["company_id"]]
     flags = _review_flags(STORE.load("needs_review"), project_no=project_no)
-    return {"ok": True, "interface_version": VERSION, "project": p,
+    return {"ok": True, "interface_version": VERSION,
+            "project": dict(p, metrics=_MetricsCtx().project_metrics(p)),
             "company": company, "contacts": contacts,
             "shipments": shipments, "needs_review": flags}
 
@@ -1221,7 +1648,7 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
         out = [p for p in out
                if str(p.get("collection_status") or "").startswith(collection_status)]
     return {"ok": True, "interface_version": VERSION,
-            "count": len(out), "projects": out}
+            "count": len(out), "projects": _with_project_metrics(_MetricsCtx(), out)}
 
 
 @mcp.tool()
@@ -1336,6 +1763,32 @@ def find_contacts(company: str = None, query: str = None,
                or q in _norm(x.get("title"))]
     return {"ok": True, "interface_version": VERSION,
             "count": len(out), "contacts": out}
+
+
+@mcp.tool()
+@_store_errors
+def crm_metrics(report: str = None, year: int = None) -> dict:
+    """Cross-record metrics, each in the counted/population/excluded shape:
+    customer_concentration (won revenue by customer with share of total; the
+    only report `year` applies to), receivables_ageing (unpaid invoices in
+    not_yet_due / 0-30 / 31-60 / 61-90 / 90+ buckets by days past the
+    effective due date, each with a priced amount), and vendor_on_time (per
+    vendor: completed legs shipped on or before their ETA). Name one report
+    or omit for all three. Read-only; nothing is persisted."""
+    if report is not None and report not in METRIC_REPORTS:
+        return _err(f"report must be one of {list(METRIC_REPORTS)} or omitted")
+    ctx = _MetricsCtx()
+    want = [report] if report else list(METRIC_REPORTS)
+    reports = {}
+    for name in want:
+        if name == "customer_concentration":
+            reports[name] = ctx.customer_concentration(year=year)
+        elif name == "receivables_ageing":
+            reports[name] = ctx.receivables_ageing()
+        else:
+            reports[name] = ctx.vendor_on_time()
+    return {"ok": True, "interface_version": VERSION,
+            "as_of": ctx.today.isoformat(), "reports": reports}
 
 
 # --------- writes (validated, atomic, logged) ---------

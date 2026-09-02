@@ -67,6 +67,19 @@ Use the read tools; they are side-effect-free:
   one was set, else `invoice_date` + Net 30 — never guess a due date when
   `invoice_date` itself is missing/unparseable, it just comes back `null`.
 - People → `find_contacts`; vendor routing → `get_vendor`.
+- "How concentrated is our revenue", "age our receivables", "which vendors
+  ship late" → `crm_metrics` (`report=` one of `customer_concentration`,
+  `receivables_ageing`, `vendor_on_time`, or omit for all; `year=` applies
+  to concentration only). Every project and company returned by the read
+  tools also carries a `metrics` object (cycle time; won revenue, quoted
+  gross profit, open exposure, oldest overdue). **Each figure is a shape,
+  not a number**: `{value, counted, population, excluded: {reason: n},
+  basis}`. Always say the denominator with the value — "$89,600 across 1 of
+  140 invoices; 136 have no project link" — and never read a `null` value as
+  zero: `null` means nothing could be counted. When `excluded` dominates,
+  the reasons are the fix list (link the invoice, price the project, put a
+  vendor and ETA on the leg). Profit figures are *quoted* at the deal, not
+  realised; say so.
 
 Project numbers are the user's QuickBooks quote numbers. Shipments are
 keyed by vendor PO numbers, not project numbers — some legitimately have no
