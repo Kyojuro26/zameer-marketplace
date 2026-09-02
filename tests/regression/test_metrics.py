@@ -68,7 +68,7 @@ def fixture_a():
         project("4525", "acme", status="won", revenue=None, total_cost=None,
                 date="2026-02-01 00:00:00", year=2026),
         project("4526", "beta", status="won", revenue=10000, total_cost=4000,
-                date="bad date", year=2026),
+                date="bad date", year="2026"),           # a TEXT year, as chat writes them
         # never in any population
         project("9001", "ghost", status="won", revenue=999999, year=2026),
         project("4599", "acme", status="won", revenue=777777, year=2026,
@@ -131,6 +131,8 @@ def fixture_a():
                 invoice_date="not a date"),                    # no due date
         invoice("7008", "acme", project_no="4521", payment_status="open",
                 due_on="someday"),                             # unreadable due
+        invoice("7009", "acme", project_no="4521", payment_status="open",
+                due_on="2026-09-01"),                          # due TODAY: 0 late
         invoice("8001", "beta", project_no="4523", payment_status="open",
                 invoice_date="2026-08-31"),                    # not yet due
         invoice("8002", "beta", project_no="4526", payment_status="partial:50%",
@@ -138,6 +140,10 @@ def fixture_a():
         invoice("8003", "beta", project_no="4523", payment_status="paid"),
         invoice("8004", "beta", project_no=None, payment_status="open",
                 invoice_date="2026-08-01"),                    # 1 late, unlinked
+        invoice("8005", "beta", project_no="4521", payment_status="open",
+                invoice_date="2026-08-01"),                    # ANOTHER company's project
+        invoice("8006", "beta", project_no="4526", payment_status="open",
+                invoice_date="2026-06-03"),                    # due 07-03: exactly 60 late
         # never in the population
         invoice("9101", "ghost", project_no="9001", payment_status="open",
                 invoice_date="2026-01-01"),
@@ -336,9 +342,9 @@ def run(server, crm_dir=None):
                 for p in plist),
             "a second margin definition invites the two-definitions defect")
     exp = cm.get("exposure_open_receivable_usd") or {}
-    r.check("acme exposure == 320000: 5 of 8 invoices, paid counted as 0",
-            exp.get("value") == 320000 and exp.get("counted") == 5
-            and exp.get("population") == 8
+    r.check("acme exposure == 420000: 6 of 9 invoices, paid counted as 0",
+            exp.get("value") == 420000 and exp.get("counted") == 6
+            and exp.get("population") == 9
             and exp.get("excluded") == {"no_project_link": 2, "no_revenue_on_project": 1},
             str(exp)[:220])
     r.check("exposure basis says quoted and net of part-payments",
@@ -346,8 +352,8 @@ def run(server, crm_dir=None):
             and "part" in str(exp.get("basis", "")).lower(), str(exp.get("basis")))
     r.check("exposure carries no as_of", "as_of" not in exp)
     old = cm.get("oldest_overdue_days") or {}
-    r.check("acme oldest_overdue_days == 213 over 5 of 8, as_of frozen today",
-            old.get("value") == 213 and old.get("counted") == 5
+    r.check("acme oldest_overdue_days == 213 over 6 of 9, as_of frozen today",
+            old.get("value") == 213 and old.get("counted") == 6
             and old.get("excluded") == {"paid": 1, "no_date": 1, "unparseable_date": 1}
             and old.get("as_of") == "2026-09-01",
             str(old)[:220])
@@ -359,9 +365,11 @@ def run(server, crm_dir=None):
     r.check("beta quoted_gross_profit_usd == 16000",
             _m(bc, "quoted_gross_profit_usd", "value") == 16000,
             str(bc.get("quoted_gross_profit_usd"))[:200])
-    r.check("beta exposure == 35000 with partial:50% read as half RECEIVED",
-            _m(bc, "exposure_open_receivable_usd", "value") == 35000
-            and _m(bc, "exposure_open_receivable_usd", "counted") == 3,
+    r.check("beta exposure == 45000 with partial:50% read as half RECEIVED; a link "
+            "to ANOTHER customer's project is no link",
+            _m(bc, "exposure_open_receivable_usd", "value") == 45000
+            and _m(bc, "exposure_open_receivable_usd", "counted") == 4
+            and _m(bc, "exposure_open_receivable_usd", "excluded") == {"no_project_link": 2},
             str(bc.get("exposure_open_receivable_usd"))[:200])
     r.check("beta oldest_overdue_days == 93",
             _m(bc, "oldest_overdue_days", "value") == 93,
@@ -457,14 +465,14 @@ def run(server, crm_dir=None):
     # ---- aggregate: receivables ageing --------------------------------------
     r.section("crm_metrics: receivables_ageing")
     age = _m(cm_all, "reports", "receivables_ageing") or {}
-    r.check("12 live invoices; 8 aged; paid 2, no_date 1, unparseable_date 1",
-            age.get("population") == 12 and age.get("counted") == 8
+    r.check("15 live invoices; 11 aged; paid 2, no_date 1, unparseable_date 1",
+            age.get("population") == 15 and age.get("counted") == 11
             and age.get("excluded") == {"paid": 2, "no_date": 1, "unparseable_date": 1}
             and age.get("as_of") == "2026-09-01", str(age)[:260])
     bexp = {
         "not_yet_due": (2, 80000, 2, {}),
-        "0-30": (2, 70000, 1, {"no_project_link": 1}),
-        "31-60": (1, None, 0, {"no_project_link": 1}),
+        "0-30": (4, 170000, 2, {"no_project_link": 2}),      # incl. due TODAY
+        "31-60": (2, 10000, 1, {"no_project_link": 1}),        # incl. exactly 60
         "61-90": (1, 100000, 1, {}),
         "90+": (2, 5000, 1, {"no_revenue_on_project": 1}),
     }
@@ -477,9 +485,9 @@ def run(server, crm_dir=None):
                 and a.get("population") == cnt and a.get("excluded") == exc,
                 str(a)[:220])
     r.check("bucket counts add up to the counted total",
-            sum((_m(age, "buckets", b) or {}).get("count", -99) for b in bexp) == 8)
+            sum((_m(age, "buckets", b) or {}).get("count", -99) for b in bexp) == 11)
     r.check("the top-level ageing value is the count aged (unit invoices)",
-            age.get("value") == 8 and age.get("unit") == "invoices", str(age)[:120])
+            age.get("value") == 11 and age.get("unit") == "invoices", str(age)[:120])
 
     # ---- aggregate: vendor on-time ------------------------------------------
     r.section("crm_metrics: vendor_on_time")
@@ -594,6 +602,17 @@ def run(server, crm_dir=None):
             seen |= set((sh.get("excluded") or {}).keys())
     r.check("the fixture exercises every reason in the vocabulary",
             seen == VOCAB, f"never produced: {sorted(VOCAB - seen)}")
+    # The builder is the one place the vocabulary is enforced, and no tool
+    # path can reach a reason outside it -- which is the point. A direct call
+    # is the only way to show the guard is real rather than decorative.
+    build = getattr(srv, "_shape", None)
+    try:
+        build(1, "usd", 1, {"bogus_reason": 1}, "b")
+        rejected = False
+    except Exception:                                             # noqa: BLE001
+        rejected = True
+    r.check("the builder refuses a reason outside the vocabulary",
+            callable(build) and rejected)
 
     # ---- the tool is documented ---------------------------------------------
     r.section("crm_metrics is in the interface doc")

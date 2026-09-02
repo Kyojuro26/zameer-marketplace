@@ -1161,7 +1161,7 @@ def _today():
 def _shape(value, unit, counted, excluded, basis, as_of=None):
     """Build the one shape. Enforces the zero-population rule and the additive
     tally at construction, so no caller can assemble a shape that lies."""
-    exc = {k: v for k, v in excluded.items() if v}
+    exc = dict(excluded)
     for k in exc:
         if k not in EXCLUSION_REASONS:
             raise StoreError(f"internal: exclusion reason {k!r} is not in the vocabulary")
@@ -1368,12 +1368,12 @@ class _MetricsCtx:
         exposure = _shape(owed, "usd", owed_n, _tally(owed_exc),
                           "quoted revenue of the linked project, net of recorded "
                           "part-payments; a paid invoice counts as 0")
-        oldest, old_n, old_exc = 0, 0, []
+        oldest, old_n, old_exc = None, 0, []
         for i in invoices:
             d, why = self.days_late(i)
             if why:
                 old_exc.append(why); continue
-            oldest = max(oldest, d); old_n += 1
+            oldest = d if oldest is None else max(oldest, d); old_n += 1
         overdue = _shape(oldest, "days", old_n, _tally(old_exc),
                          "days past the effective due date of the most overdue "
                          "unpaid invoice, clamped at zero",

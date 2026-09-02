@@ -35,6 +35,7 @@ not evidence. Re-run it after any change to the harness, and bump
 | `regression/test_view.js` | render robustness, date preservation, saves |
 | `regression/test_livetracker.py` | the fill-colour decode, the legend boundary, unlinked rows, re-import |
 | `regression/test_livetracker.js` | the Live screen: lateness flags, adoption, the note |
+| `regression/test_metrics.py` | every derived number's shape: `counted + Σexcluded == population`, `null` iff nothing counted, a closed exclusion vocabulary, "quoted" on anything profit-shaped, never persisted. Clock frozen at 2026-09-01; every expected figure hand-derived. Mutated by `mutate_metrics.py` |
 | `regression/test_harness.js` | **the instrument itself** — the four ways it has been unable to fail, and refreshData's three failure states |
 | `shapes/test_shape_*.py` | the three recurring failure shapes |
 
@@ -187,7 +188,7 @@ Green on its own is still not the claim. What makes it mean something:
 
 ```bash
 python3 tests/run_all.py --positive-control   # must FAIL against BASELINE_REF
-python3 tests/mutate_drawer.py                # and the other four
+python3 tests/mutate_drawer.py                # and the other five
 ```
 
 `--positive-control` writes `.positive-control-ran`; until it exists,
