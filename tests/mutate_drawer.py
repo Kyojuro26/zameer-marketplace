@@ -67,8 +67,8 @@ M = [
  ("failed save still triggers the reopen (hides a partial write)",
   "if(renamed && ok) openProject(pno);", "if(renamed) openProject(pno);"),
  ("doSave stops reporting success",
-  "      kpis(); renderMain();\n      return true;",
-  "      kpis(); renderMain();\n      return undefined;"),
+  "      refreshMetrics();     // the server's shapes predate this write\n      return true;",
+  "      refreshMetrics();     // the server's shapes predate this write\n      return undefined;"),
 
  # ---- the scrim ----------------------------------------------------------
  ("scrim never shown on open",
