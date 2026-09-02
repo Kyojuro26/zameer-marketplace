@@ -13,7 +13,7 @@ description: >
   contacts and statuses into Outlook, and keeping the desktop app copy in
   sync with the plugin.
 metadata:
-  version: "0.1.35"
+  version: "0.1.36"
 ---
 
 # Unrivaled CRM
@@ -74,9 +74,11 @@ Use the read tools; they are side-effect-free:
   tools also carries a `metrics` object (cycle time; won revenue, quoted
   gross profit, open exposure, oldest overdue). **Each figure is a shape,
   not a number**: `{value, counted, population, excluded: {reason: n},
-  basis}`. Always say the denominator with the value — "$89,600 across 1 of
-  140 invoices; 136 have no project link" — and never read a `null` value as
-  zero: `null` means nothing could be counted. When `excluded` dominates,
+  basis}`. Always say the denominator with the value — "$3,100 across 3 of
+  139 invoices; 136 have no project link" — and never read a `null` value as
+  zero: `null` means nothing could be counted. Per-customer figures sum over
+  invoices that HAVE a customer; `receivables_ageing` counts every live
+  invoice, so its population can be larger by the invoices with none. When `excluded` dominates,
   the reasons are the fix list (link the invoice, price the project, put a
   vendor and ETA on the leg). Profit figures are *quoted* at the deal, not
   realised; say so.
