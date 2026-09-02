@@ -581,7 +581,10 @@ async function run(crmDir) {
      + JSON.stringify('Keyed 1419 on the sheet; edited before adopting.') + ";");
   ev("document.getElementById('a_status').value='pending';");
   await ev('saveAdoptTrackerRow(2)');
-  const calls = app.calls();
+  // Reads are not writes: since 0.1.36 every successful save is followed by a
+  // list_companies read that refreshes the server's metric shapes, and that
+  // read must not be mistaken for a second write.
+  const calls = app.calls().filter(c => c.tool !== 'list_companies');
   r.check('with both, exactly one write is made', calls.length === 1,
     `got ${JSON.stringify(calls)}`);
   if (calls.length === 1) {

@@ -23,17 +23,17 @@ M = [
   "  const amt = invoiceAmount(v); if(amt == null) return null;",
   "  const amt = invoiceAmount(v); if(amt == null) return 0;"),
  ("an unlinked invoice is given an amount of zero",
-  "  const pno = st(v.project_no); if(!pno) return null;",
-  "  const pno = st(v.project_no); if(!pno) return 0;"),
+  "  const pno = st(v.project_no).trim(); if(!pno) return null;",
+  "  const pno = st(v.project_no).trim(); if(!pno) return 0;"),
  ("the amount ignores which company the project belongs to",
-  """  const p = DATA.projects.find(x => String(x.project_no) === String(pno)
+  """  const p = DATA.projects.find(x => st(x.project_no).trim() === pno
                                  && st(x.company_id) === st(v.company_id));""",
-  "  const p = DATA.projects.find(x => String(x.project_no) === String(pno));"),
+  "  const p = DATA.projects.find(x => st(x.project_no).trim() === pno);"),
  ("a paid invoice still shows its full value outstanding",
   "  if(ps.startsWith('paid')) return 0;\n  const m = ps.match",
   "  const m = ps.match"),
  ("a project with no revenue is counted as zero",
-  "  if(!p || p.revenue == null || isNaN(Number(p.revenue))) return null;",
+  "  if(!p || p.revenue == null || String(p.revenue).trim() === '' || isNaN(Number(p.revenue))) return null;",
   "  if(!p) return null;\n  if(p.revenue == null) return 0;"),
 
  # ---- lateness and bucketing --------------------------------------------
@@ -108,6 +108,21 @@ M = [
   "                         if p.get(\"company_id\") == c.get(\"company_id\")),\n"
   "            \"unit\": \"usd\", \"counted\": 1, \"population\": 1, \"excluded\": {}, \"basis\": \"b\"}})\n"
   "                             for c in data[\"companies\"]]"),
+
+ ("a save no longer refreshes the shapes",
+  "      refreshMetrics();     // the server's shapes predate this write\n", ""),
+ ("the refresh replaces the company record instead of copying its metrics",
+  "        if(fresh && fresh.metrics) c.metrics = fresh.metrics; else delete c.metrics;",
+  "        if(fresh) Object.assign(c, fresh); else delete c.metrics;"),
+ ("a failed refresh keeps the stale shapes",
+  "    .catch(() => { DATA.companies.forEach(c => { delete c.metrics; }); })",
+  "    .catch(() => {})"),
+ ("row pricing compares project keys untrimmed",
+  "  const p = DATA.projects.find(x => st(x.project_no).trim() === pno",
+  "  const p = DATA.projects.find(x => st(x.project_no) === pno"),
+ ("an empty-string revenue prices as $0 on the row",
+  "  if(!p || p.revenue == null || String(p.revenue).trim() === '' || isNaN(Number(p.revenue))) return null;",
+  "  if(!p || p.revenue == null || isNaN(Number(p.revenue))) return null;"),
 
  # ---- wiring -------------------------------------------------------------
  ("the receivables KPI stops navigating",

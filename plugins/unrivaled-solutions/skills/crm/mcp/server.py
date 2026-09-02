@@ -1074,7 +1074,8 @@ def _parse_date_loose(s):
     if not s:
         return None
     s = str(s).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d",
+                "%m/%d/%Y", "%m/%d/%y"):
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
@@ -1183,14 +1184,31 @@ def _tally(reasons):
 
 def _num(v):
     """A stored money field as a number, or None. Strings are coerced because
-    nothing validates the type of revenue; bools are not numbers."""
+    nothing validates the type of revenue; bools are not numbers, and neither
+    are NaN or Infinity -- json.dumps writes both, and round(inf) raises."""
     if v is None or isinstance(v, bool):
         return None
     try:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return f if f == f else None          # NaN
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
+
+
+def _hk(v):
+    """A stored identifier as a DICT KEY, or None. Nothing validates the type
+    of company_id or vendor_id, so a record can hold a list or a dict there;
+    hashing one raises TypeError, and @_store_errors catches only StoreError --
+    so a single malformed record would take every read tool down as a raw
+    exception across the wire. None matches nothing, which is the safe
+    direction, and the record is then counted as having no link."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        hash(v)
+    except TypeError:
+        return None
+    return v
 
 
 def _parse_ship_date(s):
@@ -1201,9 +1219,13 @@ def _parse_ship_date(s):
     if s is None or isinstance(s, bool):
         return None, False
     t = str(s).strip()
-    est = bool(re.match(r"^\s*est\.?\s+", t, re.I))
+    # "EST 8/03/26", "Est. 8/3/26", "EST8/3/26", "estimated 8/3/26" -- a
+    # digit must follow, so a bare "EST" or "TBD" is an unreadable date, not
+    # an estimate of nothing.
+    m = re.match(r"^\s*est(?:imated)?\.?\s*(?=\d)", t, re.I)
+    est = bool(m)
     if est:
-        t = re.sub(r"^\s*est\.?\s+", "", t, flags=re.I)
+        t = t[m.end():]
     d = _parse_date_loose(t)
     return (d.date() if d else None), est
 
@@ -1229,26 +1251,33 @@ class _MetricsCtx:
         self.companies = STORE.load("companies")
         self.projects = [p for p in STORE.load("projects")
                          if not p.get("archived")
-                         and p.get("company_id") not in self.arch_cids]
+                         and _hk(p.get("company_id")) not in self.arch_cids]
         self.shipments = [s for s in STORE.load("shipments")
-                          if s.get("company_id") not in self.arch_cids
+                          if _hk(s.get("company_id")) not in self.arch_cids
                           and not _shipment_hidden(s, self.arch_pnos)]
         self.invoices = [i for i in STORE.load("invoices")
-                         if i.get("company_id") not in self.arch_cids
+                         if _hk(i.get("company_id")) not in self.arch_cids
                          and _key(i.get("project_no")) not in self.arch_pnos]
-        self.vendors = {v.get("company_id"): v for v in STORE.load("vendors")}
+        self.vendors = {}
+        for v in STORE.load("vendors"):
+            self.vendors.setdefault(_hk(v.get("company_id")), v)
         self.proj_by_key = {}
         self.proj_by_cid = {}
         for p in self.projects:
-            self.proj_by_key.setdefault((_key(p.get("project_no")), p.get("company_id")), p)
-            self.proj_by_cid.setdefault(p.get("company_id"), []).append(p)
-        self.legs_by_pno = {}
+            cid = _hk(p.get("company_id"))
+            self.proj_by_key.setdefault((_key(p.get("project_no")), cid), p)
+            self.proj_by_cid.setdefault(cid, []).append(p)
+        # Keyed by (project_no, company_id), like proj_by_key. Project numbers
+        # are unique per customer, not store-wide -- two customers can share
+        # one -- and a leg keyed by number alone would lend its ship date to
+        # the other customer's project of the same number.
+        self.legs_by_key = {}
         for s in self.shipments:
             for n in _shipment_project_nos(s):
-                self.legs_by_pno.setdefault(n, []).append(s)
+                self.legs_by_key.setdefault((n, _hk(s.get("company_id"))), []).append(s)
         self.inv_by_cid = {}
         for i in self.invoices:
-            self.inv_by_cid.setdefault(i.get("company_id"), []).append(i)
+            self.inv_by_cid.setdefault(_hk(i.get("company_id")), []).append(i)
         self.today = _today()
 
     # ---- per-invoice ----
@@ -1258,7 +1287,7 @@ class _MetricsCtx:
         pno = _key(inv.get("project_no"))
         if not pno:
             return None, "no_project_link"
-        p = self.proj_by_key.get((pno, inv.get("company_id")))
+        p = self.proj_by_key.get((pno, _hk(inv.get("company_id"))))
         if not p:
             return None, "no_project_link"
         amt = _num(p.get("revenue"))
@@ -1300,7 +1329,8 @@ class _MetricsCtx:
         basis = ("days from the project's date to the earliest actual vendor "
                  "ship date across its legs; EST dates and cancelled or "
                  "unshipped legs do not count")
-        legs = self.legs_by_pno.get(_key(p.get("project_no")), [])
+        legs = self.legs_by_key.get((_key(p.get("project_no")),
+                                     _hk(p.get("company_id"))), [])
         if not legs:
             return _shape(None, "days", 0, {"no_shipment": 1}, basis)
         shipped = []
@@ -1339,7 +1369,7 @@ class _MetricsCtx:
         return round(total), counted, _tally(exc)
 
     def company_metrics(self, c):
-        cid = c.get("company_id")
+        cid = _hk(c.get("company_id"))
         projects = self.proj_by_cid.get(cid, [])
         invoices = self.inv_by_cid.get(cid, [])
         total, counted, exc = self.won_revenue(projects)
@@ -1388,7 +1418,7 @@ class _MetricsCtx:
         customers = [c for c in self.companies
                      if not c.get("archived") and c.get("role") == "customer"]
         for c in customers:
-            projects = self.proj_by_cid.get(c.get("company_id"), [])
+            projects = self.proj_by_cid.get(_hk(c.get("company_id")), [])
             if year is not None:
                 projects = [p for p in projects if _key(p.get("year")) == _key(year)]
             total, counted, _x = self.won_revenue(projects)
@@ -1458,7 +1488,7 @@ class _MetricsCtx:
         per_vendor_exc = {}  # vendor_id -> [reason, ...]
         exc = []
         for s in self.shipments:
-            vid = s.get("vendor_id")
+            vid = _hk(s.get("vendor_id"))
             if s.get("stage") == "Cancelled":
                 why = "cancelled"
             elif not vid or isinstance(vid, bool):
@@ -1634,7 +1664,10 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
     out = STORE.load("projects")
     if not include_archived:
         arch = _archived_ids()
-        out = [p for p in out if p.get("company_id") not in arch and not p.get("archived")]
+        # _hk: a list-typed company_id on one record used to raise here and
+        # take the whole list down as a raw exception (pre-0.1.36; found by
+        # the metrics suite's malformed-record checks)
+        out = [p for p in out if _hk(p.get("company_id")) not in arch and not p.get("archived")]
     if status:
         out = [p for p in out if p.get("status") == status]
     if owner:
@@ -1664,7 +1697,7 @@ def list_shipments(stage: str = None, company: str = None, vendor_po: str = None
     if not include_archived:
         arch = _archived_ids()
         arch_pnos = _archived_project_nos()
-        out = [s for s in out if s.get("company_id") not in arch
+        out = [s for s in out if _hk(s.get("company_id")) not in arch
                and not _shipment_hidden(s, arch_pnos)]
     if stage:
         out = [s for s in out if s.get("stage") == stage]
@@ -1717,7 +1750,7 @@ def list_invoices(payment_status: str = None, company: str = None,
     if not include_archived:
         arch = _archived_ids()
         arch_pnos = _archived_project_nos()
-        out = [i for i in out if i.get("company_id") not in arch
+        out = [i for i in out if _hk(i.get("company_id")) not in arch
                and _key(i.get("project_no")) not in arch_pnos]
     if payment_status:
         out = [i for i in out
@@ -1750,7 +1783,7 @@ def find_contacts(company: str = None, query: str = None,
     out = STORE.load("contacts")
     if not include_archived:
         arch = _archived_ids()
-        out = [x for x in out if x.get("company_id") not in arch]
+        out = [x for x in out if _hk(x.get("company_id")) not in arch]
     if company:
         c = _company_by_ref(STORE.load("companies"), company)
         if not c:

@@ -142,8 +142,15 @@ def read_store(d):
 
 
 def kpi_totals(projects, year):
-    """The three figures EXACTLY as build_view.kpis() computes them, so this
-    reconciles what is on the screen rather than an idealised version of it."""
+    """Won and pending EXACTLY as build_view.kpis() computes them, so this
+    reconciles what is on the screen rather than an idealised version of it.
+
+    `receivables` here is the pre-0.1.36 tile: projects with a collection
+    status filled in. Since 0.1.36 the tile reads the server's exposure shape
+    (open invoices priced from their linked project, with its denominator
+    beside it -- see crm_metrics / company.metrics in interface-v0.1.md); this
+    figure is kept because it is the one the SHEET can be compared against,
+    and the caveat printed beside it still applies."""
     cur = [p for p in projects if st(p.get("year")) == str(year)]
     def rev(p):
         try:

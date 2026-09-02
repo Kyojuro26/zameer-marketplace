@@ -14,7 +14,9 @@ Invariants, asserted on every shape in every response here:
   * value is None  <=>  counted == 0        (the zero-population rule)
   * every exclusion reason is in the closed vocabulary
   * basis is non-empty; anything profit-shaped says "quoted"
-  * as_of is present exactly on the metrics that depend on today
+  * as_of is present exactly on the metrics that depend on today (the
+    walker knows which: oldest_overdue_days and everything under
+    receivables_ageing)
 
 The clock is frozen at 2026-09-01. Expected numbers below are hand-derived
 from the fixture and would drift with the wall clock otherwise.
@@ -205,6 +207,11 @@ def check_invariants(r, label, response):
             r.check(f"{label} {path}: a profit figure says it is quoted, in name and basis",
                     "quoted" in leaf and "quoted" in sh["basis"].lower(),
                     f"name={leaf} basis={sh['basis']!r}")
+        dated = leaf == "oldest_overdue_days" or ".receivables_ageing" in path
+        r.check(f"{label} {path}: as_of {'present' if dated else 'absent'}",
+                ("as_of" in sh) == dated
+                and (not dated or sh["as_of"] == TODAY.isoformat()),
+                f"as_of={sh.get('as_of')!r} -- only metrics that depend on today carry it")
         if sh["value"] is not None:
             r.check(f"{label} {path}: value is numeric",
                     isinstance(sh["value"], (int, float))
@@ -318,6 +325,34 @@ def run(server, crm_dir=None):
             "the ship date: legs exist but none has shipped",
             zsh.get("value") is None and zsh.get("excluded") == {"no_shipped_leg": 1},
             str(zsh)[:200])
+    # Two customers can share a project number. A leg belongs to ONE of them.
+    zc.reset(companies=[company(), company("beta", "Beta Ltd")],
+             projects=[project("900", "beta", date="2026-01-01"),
+                       project("900", "acme", date="2026-06-01")],
+             shipments=[shipment("900-L1", "900", "beta", stage="Shipped",
+                                 ship_date="2026-01-15 00:00:00")])
+    zl = {p.get("company_id"): _m(p, "metrics", "cycle_time_days")
+          for p in (_m(zc.call("list_projects"), "projects") or [])}
+    r.check("a leg on beta's 900 is not lent to acme's 900",
+            _m(zl, "beta", "value") == 14
+            and _m(zl, "acme", "excluded") == {"no_shipment": 1},
+            str(zl)[:240])
+    # EST spellings, and an ETA in ISO-T form
+    zc.reset(companies=[company()],
+             projects=[project("1", date="2026-01-01")],
+             shipments=[shipment("1-L1", "1", stage="Shipped", vendor_id="v",
+                                 eta="2026-04-01T00:00:00", ship_date="Est. 4/01/26"),
+                        shipment("1-L2", "1", stage="Shipped", vendor_id="v",
+                                 eta="2026-04-01T00:00:00", ship_date="EST4/02/26"),
+                        shipment("1-L3", "1", stage="Shipped", vendor_id="v",
+                                 eta="2026-04-01T00:00:00", ship_date="EST"),
+                        shipment("1-L4", "1", stage="Shipped", vendor_id="v",
+                                 eta="2026-04-01T00:00:00", ship_date="2026-04-01T00:00:00")])
+    zv = _m(zc.call("crm_metrics", report="vendor_on_time"), "reports", "vendor_on_time") or {}
+    r.check("'Est. d' and 'ESTd' are estimates; a bare 'EST' is an unreadable date; "
+            "an ISO-T ETA and ship date parse",
+            zv.get("excluded") == {"ship_date_is_estimate": 2, "unparseable_date": 1}
+            and zv.get("counted") == 1 and zv.get("value") == 1.0, str(zv)[:240])
     s.rebind()          # a scratch Store rebinds the server; point it back
 
     # ---- per-record: company money --------------------------------------------
@@ -567,6 +602,63 @@ def run(server, crm_dir=None):
                "INVOICE_FIELDS", "VENDOR_FIELDS", "CONTACT_FIELDS"):
         r.check(f"'metrics' is not in {fs}",
                 "metrics" not in (getattr(srv, fs, None) or set()))
+
+    # ---- one malformed record must not take every read tool down ------------
+    r.section("a malformed record yields {ok:false} or a valid answer, never a raw exception")
+    bad = Store(srv)
+    cases = {
+        "invoice company_id is a list": dict(invoices=[invoice("1", ["acme"], project_no="4521")]),
+        "shipment company_id is a dict": dict(shipments=[shipment("4521-L1", "4521", {"x": 1})]),
+        "project company_id is a list": dict(projects=[project("4521"), project("2", ["acme"])]),
+        "vendor company_id is a list": dict(vendors=[{"company_id": ["v1"], "display_name": "V"}]),
+        "shipment vendor_id is a list": dict(shipments=[shipment("4521-L1", "4521", vendor_id=["v1"],
+                                                                stage="Shipped", eta="2026-01-01",
+                                                                ship_date="2026-01-02")]),
+        "company company_id is a list": dict(companies=[company(), company(["x"], "Listy")]),
+        "revenue is Infinity": dict(projects=[project("4521", revenue=float("inf"), total_cost=1)],
+                                    invoices=[invoice("1", project_no="4521")]),
+        "due_on override is a list": dict(invoices=[invoice("1", project_no="4521", due_on=["x"])]),
+        "all_project_nos is an int": dict(shipments=[shipment("4521-L1", "4521", all_project_nos=4521)]),
+    }
+    for label, files in cases.items():
+        base = dict(companies=[company()], projects=[project("4521", revenue=1000, date="2026-01-01")])
+        base.update(files)
+        bad.reset(**base)
+        for tool, args in (("get_project", {"project_no": "4521"}), ("list_projects", {}),
+                           ("get_company", {"ref": "acme"}), ("list_companies", {}),
+                           ("crm_metrics", {})):
+            res = bad.call(tool, **args)
+            r.check(f"{label}: {tool} does not raise",
+                    "_raised" not in res, str(res.get("_raised"))[:120])
+    s.rebind()
+
+    # ---- a view BUILD reads the store and never writes it ---------------------
+    r.section("embedding shapes at build time writes nothing into the store")
+    import subprocess, tempfile, os as _os
+    bdir = Path(tempfile.mkdtemp(prefix="crmbuild-"))
+    (bdir / "companies.json").write_text(json.dumps([company()]))
+    (bdir / "projects.json").write_text(json.dumps([project("1", revenue=100)]))
+    # deliberately NO invoices.json / shipments.json / vendors.json: the case
+    # where a OneDrive file has not synced down yet
+    before_files = sorted(_os.listdir(bdir))
+    out_html = bdir.parent / (bdir.name + ".html")
+    pr = subprocess.run([sys.executable, str(crm / "view" / "build_view.py"),
+                         "--store", str(bdir), "--out", str(out_html)],
+                        capture_output=True, text=True)
+    after_files = sorted(_os.listdir(bdir))
+    r.check("the build succeeds on a store with files missing", pr.returncode == 0,
+            (pr.stderr or "")[-200:])
+    r.check("and creates NO file in the store directory -- no entity file, no manifest",
+            before_files == after_files,
+            f"new files: {sorted(set(after_files) - set(before_files))} -- an empty "
+            f"invoices.json written here replicates over the real one on OneDrive")
+    r.check("yet the page carries the server's shapes",
+            out_html.exists() and '"exposure_open_receivable_usd"' in out_html.read_text(),
+            "shapes must come from the server's builder without constructing its Store")
+    import shutil as _sh
+    _sh.rmtree(bdir, ignore_errors=True)
+    if out_html.exists():
+        out_html.unlink()
 
     # ---- parity: the four twins reject a metrics write identically ----------
     r.section("parity: metrics is refused by every create and update, alike")

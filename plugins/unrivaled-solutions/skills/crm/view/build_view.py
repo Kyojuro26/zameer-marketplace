@@ -1647,6 +1647,33 @@ function ledgerExposure(){
   if(!out.counted) out.value = null;          // nothing counted is not $0
   return out;
 }
+/* After any successful WRITE the shapes on DATA.companies are stale: the
+   server computed them before the edit, and the edit was applied to DATA
+   locally. Re-read them from list_companies, copying ONLY `metrics` onto the
+   matching company so a local optimistic edit is not overwritten, then
+   repaint the tile (and the Receivables header if it is showing). A refresh
+   that fails drops the shapes, so the tile says "needs the server" rather than
+   showing a figure the server no longer stands behind. One in flight at a
+   time; callers do not await it. */
+let metricsRefresh = null;
+function refreshMetrics(){
+  if(metricsRefresh) return metricsRefresh;
+  metricsRefresh = Promise.resolve()
+    .then(() => CRM.call('list_companies', {}))
+    .then(r => {
+      if(!(r && r.ok)) throw new Error((r && r.error) || 'list_companies failed');
+      if(!Array.isArray(r.companies)) return;          // an answer with no list: leave as is
+      const byId = {};
+      r.companies.forEach(c => { if(c && c.company_id != null) byId[String(c.company_id)] = c; });
+      DATA.companies.forEach(c => {
+        const fresh = byId[String(c.company_id)];
+        if(fresh && fresh.metrics) c.metrics = fresh.metrics; else delete c.metrics;
+      });
+    })
+    .catch(() => { DATA.companies.forEach(c => { delete c.metrics; }); })
+    .then(() => { metricsRefresh = null; kpis(); if(filter === 'receivable') renderMain(); });
+  return metricsRefresh;
+}
 /* "3 of 5 invoices priced \u00b7 1 no project link \u00b7 1 no revenue on project" */
 function shapeCaveat(sh){
   const parts = [`${sh.counted} of ${sh.population} invoice${sh.population===1?'':'s'} priced`];
@@ -1689,10 +1716,15 @@ function daysLate(v, today){
    unlinked invoice is a real thing in this store (one is 116 days late) and
    silently counting it as $0 would hide it from the total. */
 function invoiceAmount(v){
-  const pno = st(v.project_no); if(!pno) return null;
-  const p = DATA.projects.find(x => String(x.project_no) === String(pno)
+  // trim(): the server compares keys through _key(), which strips whitespace,
+  // and a stored " 4521 " is a documented real case. Without this the header
+  // (server) priced an invoice the row (view) called "no amount on file".
+  const pno = st(v.project_no).trim(); if(!pno) return null;
+  const p = DATA.projects.find(x => st(x.project_no).trim() === pno
                                  && st(x.company_id) === st(v.company_id));
-  if(!p || p.revenue == null || isNaN(Number(p.revenue))) return null;
+  // "" is not a revenue: Number("") is 0, and a blank cell was rendering as
+  // $0 owed where the server says no_revenue_on_project.
+  if(!p || p.revenue == null || String(p.revenue).trim() === '' || isNaN(Number(p.revenue))) return null;
   return Number(p.revenue);
 }
 
@@ -2162,6 +2194,7 @@ async function deleteProject(pno){
     DATA.invoices=DATA.invoices.filter(x=>String(x.project_no)!==String(pno));
     reindex(); kpis(); renderList(); closeDrawer();
     if(selected) renderMain();
+    refreshMetrics();
   } else {
     alert('Delete failed: '+((r&&r.error)||'unknown error'));
   }
@@ -2651,6 +2684,7 @@ async function deleteCompany(cid){
     DATA.vendors=(DATA.vendors||[]).filter(x=>x.company_id!==cid);
     if(selected===cid){ selected=null; document.getElementById('main').innerHTML='<div class="empty">Deleted. Select a company to continue.</div>'; }
     reindex(); kpis(); renderList();
+    refreshMetrics();
   } else {
     alert('Delete failed: '+((r&&r.error)||'unknown error'));
   }
@@ -2786,6 +2820,7 @@ async function doSave(tool, args, applyLocal){
       drawerDirty = false;
       msg.textContent='✓ Saved'; msg.className='saved show okc';
       kpis(); renderMain();
+      refreshMetrics();     // the server's shapes predate this write
       return true;
     }
     lastSaveError = (r && r.error) || 'save failed';
@@ -3113,7 +3148,16 @@ def _attach_metrics(data, store_dir):
     prev = getattr(_srv, "STORE", None)
     try:
         if prev is None or _P(prev.root).resolve() != _P(store_dir).resolve():
-            _srv.STORE = _srv.Store(_P(store_dir))
+            # Store.__new__ + root, NOT Store(...): the constructor auto-creates
+            # missing entity files, writes a manifest and sweeps temp files. A
+            # view BUILD must read the store and never write it -- render_html
+            # deliberately degrades per missing file so a not-yet-synced
+            # OneDrive file does not kill the build, and creating that file
+            # empty here would replicate over the real one. normalize.py's
+            # _store_write_lock does exactly this for the same reason.
+            st = _srv.Store.__new__(_srv.Store)
+            st.root = _P(store_dir)
+            _srv.STORE = st
         ctx = _srv._MetricsCtx()
         data["companies"] = [dict(c, metrics=ctx.company_metrics(c))
                              for c in data["companies"]]
@@ -3121,8 +3165,7 @@ def _attach_metrics(data, store_dir):
         print(f"WARNING: metrics not embedded ({type(ex).__name__}: {ex}) -- "
               f"the receivables tile will say it needs the server", file=sys.stderr)
     finally:
-        if prev is not None:
-            _srv.STORE = prev
+        _srv.STORE = prev
 
 
 def render_html(store_dir, token=""):

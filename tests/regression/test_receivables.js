@@ -62,7 +62,7 @@ function seedStore(dir) {
   return dir;
 }
 
-function run(crmDir) {
+async function run(crmDir) {
   const r = makeResult('receivables');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmrecv-'));
   const store = seedStore(path.join(tmp, 'store'));
@@ -273,6 +273,76 @@ function run(crmDir) {
   r.check('a ledger with nothing priced shows a dash, not $0',
     !/\$0\b/.test(nul) && /0 of 4 invoices priced/.test(nul),
     nul.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').slice(0,200));
+
+  // ---- the shapes are refreshed after a write, not carried stale --------------
+  //
+  // Every doSave applies the edit to DATA locally; the server's shapes were
+  // computed BEFORE it. Without a refresh the tile kept the old figure, and a
+  // company edit (whose response carries no metrics) dropped that company
+  // from the total with no caveat. The refresh copies metrics ONLY, so a local
+  // optimistic edit is not overwritten by the read.
+  {
+    const store2 = seedStore(path.join(tmp, 'store2'));
+    const served = {};          // what list_companies will answer after the "save"
+    const app2 = launch({ crmDir, storeDir: store2, outDir: tmp, mode: 'http',
+      onCall: (tool) => {
+        if (tool === 'list_companies') return served.answer || { ok: true };
+        if (tool === 'update_company') return { ok: true, company: { company_id: 'acme',
+          display_name: 'Ace Renamed', role: 'customer', domains: [], locations: [], archived: false } };
+        return { ok: true };
+      } });
+    const ev2 = (code) => app2.eval(code);
+    const tile2 = () => (app2.doc.getElementById('kpis').innerHTML.split('class="kpi go"')[1] || '')
+      .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    ev2("kpis();");
+    r.check('before any edit the tile carries the build-time shapes', /172,600/.test(tile2()), tile2());
+    served.answer = { ok: true, companies: [
+      { company_id: 'acme', display_name: 'Ace Manufacturing', metrics: { exposure_open_receivable_usd:
+        { value: 0, unit: 'usd', counted: 2, population: 2, excluded: {}, basis: 'b' } } },
+      { company_id: 'mer', display_name: 'Meridian Corp', metrics: { exposure_open_receivable_usd:
+        { value: 83000, unit: 'usd', counted: 1, population: 3, excluded: { no_project_link: 1, no_revenue_on_project: 1 }, basis: 'b' } } },
+    ] };
+    // a company edit through the real doSave path
+    ev2("select('acme'); openEditCompany && openEditCompany('acme');");
+    ev2("document.getElementById('e_co_name') && (document.getElementById('e_co_name').value='Ace Renamed');");
+    app2.resetCalls();
+    await ev2("saveEditCompany('acme')");
+    // settle the refresh the SAVE started -- never start one from here, or a
+    // save that stopped refreshing would pass this check
+    await ev2("metricsRefresh || Promise.resolve()");
+    const tools = app2.calls().map(c => c.tool);
+    r.check('a successful save is followed by a list_companies read for fresh shapes',
+      tools.includes('update_company') && tools.indexOf('list_companies') > tools.indexOf('update_company'),
+      `calls: ${tools.join(',')}`);
+    r.check('the tile shows the refreshed figure, not the build-time one',
+      /83,000/.test(tile2()) && /3 of 5 invoices priced/.test(tile2()), tile2());
+    const acme2 = JSON.parse(ev2("JSON.stringify(DATA.companies.find(c=>c.company_id==='acme'))"));
+    r.check('the local optimistic edit survives the refresh (metrics copied, record kept)',
+      acme2.display_name === 'Ace Renamed' && acme2.metrics && acme2.metrics.exposure_open_receivable_usd.counted === 2,
+      JSON.stringify(acme2).slice(0, 200));
+    // a refresh the server refuses drops the shapes rather than keeping stale ones
+    served.answer = { ok: false, error: 'store locked' };
+    await ev2("refreshMetrics()");
+    r.check('when the refresh fails the tile says it needs the server, not a stale figure',
+      /needs the server/.test(tile2()) && !/83,000/.test(tile2()) && !/172,600/.test(tile2()), tile2());
+  }
+
+  // ---- the row and the header price the same invoice the same way -------------
+  //
+  // The header is the server's; each row is the view's own outstanding(). Two
+  // rules the server applies that the view did not: keys are compared
+  // trimmed (_key), and "" is not a revenue. Both produced a header that
+  // priced an invoice whose row read "no amount on file" or "$0".
+  r.check('a project key with stray whitespace still prices its invoice (as the server does)',
+    ev("(()=>{ DATA.projects.push({company_id:'acme',project_no:' 4777 ',status:'won',year:2026,revenue:5000,archived:false});"
+       + " const v={company_id:'acme',invoice_no:'x',project_no:'4777',payment_status:'open'};"
+       + " const a=outstanding(v); DATA.projects.pop(); return String(a); })()") === '5000',
+    'the server compares keys through _key(), which strips whitespace');
+  r.check('an empty-string revenue is "no amount on file", not $0 (as the server does)',
+    ev("(()=>{ DATA.projects.push({company_id:'acme',project_no:'4778',status:'won',year:2026,revenue:'',archived:false});"
+       + " const v={company_id:'acme',invoice_no:'y',project_no:'4778',payment_status:'open'};"
+       + " const a=outstanding(v); DATA.projects.pop(); return String(a); })()") === 'null',
+    'Number("") is 0, and a blank revenue cell was rendering as $0 owed');
 
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;

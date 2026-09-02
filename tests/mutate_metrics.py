@@ -60,7 +60,7 @@ M = [
   '        if not pno:\n'
   '            return 0, None'),
  ("the amount ignores which company the project belongs to",
-  '        p = self.proj_by_key.get((pno, inv.get("company_id")))',
+  '        p = self.proj_by_key.get((pno, _hk(inv.get("company_id"))))',
   '        p = next((q for (k, _c), q in self.proj_by_key.items() if k == pno), None)'),
  ("part-payment percentage read as UNPAID rather than received",
   "        return (round(amt * (1 - pct)) if pct is not None else round(amt)), None",
@@ -177,18 +177,35 @@ M = [
  ("archived projects are in every population",
   '        self.projects = [p for p in STORE.load("projects")\n'
   '                         if not p.get("archived")\n'
-  '                         and p.get("company_id") not in self.arch_cids]',
+  '                         and _hk(p.get("company_id")) not in self.arch_cids]',
   '        self.projects = list(STORE.load("projects"))'),
  ("invoices of archived companies are in the population",
   '        self.invoices = [i for i in STORE.load("invoices")\n'
-  '                         if i.get("company_id") not in self.arch_cids\n'
+  '                         if _hk(i.get("company_id")) not in self.arch_cids\n'
   '                         and _key(i.get("project_no")) not in self.arch_pnos]',
   '        self.invoices = list(STORE.load("invoices"))'),
  ("legs of archived projects are in the population",
   '        self.shipments = [s for s in STORE.load("shipments")\n'
-  '                          if s.get("company_id") not in self.arch_cids\n'
+  '                          if _hk(s.get("company_id")) not in self.arch_cids\n'
   '                          and not _shipment_hidden(s, self.arch_pnos)]',
   '        self.shipments = list(STORE.load("shipments"))'),
+
+ # ---- malformed records and shared numbers (second review round) -----------------
+ ("an unhashable identifier raises instead of matching nothing",
+  "    try:\n        hash(v)\n    except TypeError:\n        return None\n    return v",
+  "    return v"),
+ ("Infinity is treated as a revenue",
+  '    return f if f == f and f not in (float("inf"), float("-inf")) else None',
+  '    return f if f == f else None'),
+ ("legs are keyed by project number alone, across customers",
+  '                self.legs_by_key.setdefault((n, _hk(s.get("company_id"))), []).append(s)',
+  '                self.legs_by_key.setdefault((n, None), []).append(s)\n'
+  '        self.legs_by_key = {k: v for k, v in self.legs_by_key.items()}\n'
+  '        _lk = self.legs_by_key\n'
+  '        self.legs_by_key = type("L", (), {"get": lambda _s, k, d=None: _lk.get((k[0], None), d)})()'),
+ ("an estimate needs a space after EST to be recognised",
+  '    m = re.match(r"^\\s*est(?:imated)?\\.?\\s*(?=\\d)", t, re.I)',
+  '    m = re.match(r"^\\s*est\\.?\\s+(?=\\d)", t, re.I)'),
 
  # ---- persistence ---------------------------------------------------------------
  ("metrics are written to disk on read",
@@ -207,5 +224,21 @@ M = [
   '        report = None\n'),
 ]
 
+# The view builder embeds the shapes by importing server.py. Its one rule: a
+# BUILD reads the store and never writes it.
+V = [
+ ("the build constructs Store(), which writes into the store directory",
+  "            st = _srv.Store.__new__(_srv.Store)\n"
+  "            st.root = _P(store_dir)\n"
+  "            _srv.STORE = st",
+  "            _srv.STORE = _srv.Store(_P(store_dir))"),
+ ("the build stops embedding shapes at all",
+  "    _attach_metrics(data, store_dir)\n", ""),
+]
+
+worst = 0
 print(f"=== METRICS -- mcp/server.py  ({len(M)} mutants) ===")
-sys.exit(mutate(SRC, TEST, F, M))
+worst = max(worst, mutate(SRC, TEST, F, M))
+print(f"\n=== BUILD -- view/build_view.py  ({len(V)} mutants) ===")
+worst = max(worst, mutate(SRC, TEST, "view/build_view.py", V))
+sys.exit(worst)
