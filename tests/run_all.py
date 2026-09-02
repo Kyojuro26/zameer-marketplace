@@ -44,6 +44,7 @@ PY_MODULES = [
     ("regression.test_importer", "regression/test_importer.py"),
     ("regression.test_readiness", "regression/test_readiness.py"),
     ("regression.test_livetracker", "regression/test_livetracker.py"),
+    ("regression.test_metrics", "regression/test_metrics.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
