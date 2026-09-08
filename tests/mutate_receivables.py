@@ -124,6 +124,37 @@ M = [
   "  if(!p || p.revenue == null || String(p.revenue).trim() === '' || isNaN(Number(p.revenue))) return null;",
   "  if(!p || p.revenue == null || isNaN(Number(p.revenue))) return null;"),
 
+ # ---- the company headline and the sidebar read the shape --------------
+ ("the company headline goes back to the view's own sum",
+  "  const m = c.metrics, sh = m && m.exposure_open_receivable_usd, od = m && m.oldest_overdue_days;",
+  "  const m = c.metrics, od = m && m.oldest_overdue_days;\n"
+  "  const sh = (()=>{ const invs=(invoicesByCo[c.company_id]||[]).filter(v=>!st(v.payment_status).startsWith('paid'));"
+  " const known=invs.map(outstanding).filter(x=>x!=null);"
+  " return {value: known.reduce((a,b)=>a+b,0), counted: invs.length, population: invs.length, excluded: {}}; })();"),
+ ("nothing priced falls through to a dash figure instead of saying so",
+  "  if(!sh.counted){\n    // Nothing priced is not $0.",
+  "  if(false){\n    // Nothing priced is not $0."),
+ ("the headline drops its denominator",
+  "    <span class=\"muted\">· ${esc(shapeCaveat(sh))}</span>\n    ${late} ${see}\n  </p>`;",
+  "    ${late} ${see}\n  </p>`;"),
+ ("a company with no shape is shown as having nothing to say",
+  "    return `<p class=\"co-sum\"><span class=\"muted\">needs the server · what this customer owes is a server figure, and this page has none for it</span> ${see}</p>`;",
+  "    return '';"),
+ ("the sidebar goes back to its own sum",
+  "    const cm=c.metrics, csh=cm&&cm.exposure_open_receivable_usd, cod=cm&&cm.oldest_overdue_days;",
+  "    const cm=c.metrics, cod=cm&&cm.oldest_overdue_days;\n"
+  "    const csh=(()=>{ const invs=(invoicesByCo[c.company_id]||[]).filter(v=>!st(v.payment_status).startsWith('paid'));"
+  " const known=invs.map(outstanding).filter(x=>x!=null);"
+  " return {value: known.reduce((a,b)=>a+b,0), counted: invs.length, population: invs.length}; })();"),
+ ("the sidebar hides how late an unpriced customer is",
+  "    const late=cod&&cod.value>0?cod.value:0;",
+  "    const late=csh&&csh.counted&&cod&&cod.value>0?cod.value:0;"),
+ ("the refresh repaints the tile and nothing else",
+  "    .then(() => { metricsRefresh = null; kpis(); renderList();\n"
+  "      // the company headline and the Receivables header read the shapes too\n"
+  "      if(filter === 'receivable' || (selected && filter !== 'live' && filter !== 'project')) renderMain(); });",
+  "    .then(() => { metricsRefresh = null; kpis(); if(filter === 'receivable') renderMain(); });"),
+
  # ---- wiring -------------------------------------------------------------
  ("the receivables KPI stops navigating",
   "    [recvL, recvN, 'receivable'],",

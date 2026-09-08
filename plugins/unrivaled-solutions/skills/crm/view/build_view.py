@@ -1492,23 +1492,28 @@ function renderList(){
   if(filter === 'live'){ renderLiveList(); return; }
   if(filter === 'receivable'){ renderReceivablesList(); return; }
   if(filter === 'project'){ renderProjectsList(); return; }
-  const today = todayISO(), soon = soonISO();
   const items = DATA.companies.filter(companyMatches)
     .sort((a,b)=>st(a.display_name).localeCompare(st(b.display_name)));
   document.getElementById('clist').innerHTML = items.slice(0,400).map(c=>{
     const np=(projectsByCo[c.company_id]||[]).length, ns=(shipsByCo[c.company_id]||[]).length;
     // What they owe, in the list. "customer · 2 projects · 2 shipments" is true
-    // and answers nothing he opens this app to ask.
-    const invs=(invoicesByCo[c.company_id]||[]).filter(v=>invoiceBucket(v,today,soon)!=='Paid');
-    const owed=invs.map(outstanding).filter(x=>x!=null).reduce((a,b)=>a+b,0);
-    const lates=invs.map(v=>daysLate(v,today)).filter(x=>x!=null&&x>0);
-    const late=lates.length?Math.max.apply(null,lates):0;
+    // and answers nothing he opens this app to ask. Same shapes and the same
+    // rule as companySummary, in short form: the amount is the server's, the
+    // denominator sits beside it, and nothing-priced is never $0.
+    const cm=c.metrics, csh=cm&&cm.exposure_open_receivable_usd, cod=cm&&cm.oldest_overdue_days;
+    const hasInv=(invoicesByCo[c.company_id]||[]).length>0;
+    const needsServer=!csh&&hasInv, moneyShown=!!(csh&&csh.population);
+    const owedLine = needsServer ? '<span class="muted">needs the server</span>'
+      : !moneyShown ? `<span>${esc(c.role)}</span>`
+      : !csh.counted ? `<span class="owed">nothing priced · ${csh.population} open</span>`
+      : `<span class="owed">${money(csh.value)} owed · ${csh.counted} of ${csh.population} priced</span>`;
+    const late=cod&&cod.value>0?cod.value:0;
     return `<div class="citem ${c.company_id===selected?'sel':''}" onclick="select('${jesc(c.company_id)}')">
       <div class="cn">${esc(c.display_name||c.company_id)}</div>
-      <div class="cm">${owed?`<span class="owed">${money(owed)} owed</span>`:`<span>${esc(c.role)}</span>`}${
-        late?`<span class="owed">· ${late}d late</span>`:''}${
-        !owed&&np?`<span>· ${np} project${np>1?'s':''}</span>`:''}${
-        !owed&&ns?`<span>· ${ns} shipment${ns>1?'s':''}</span>`:''}</div>
+      <div class="cm">${owedLine}${
+        late?`<span class="owed">· ${esc(st(late))}d late</span>`:''}${
+        !moneyShown&&!needsServer&&np?`<span>· ${np} project${np>1?'s':''}</span>`:''}${
+        !moneyShown&&!needsServer&&ns?`<span>· ${ns} shipment${ns>1?'s':''}</span>`:''}</div>
     </div>`;
   }).join('') || '<div class="muted" style="padding:14px">No matches.</div>';
 }
@@ -1653,8 +1658,9 @@ function ledgerExposure(){
    matching company so a local optimistic edit is not overwritten, then
    repaint the tile (and the Receivables header if it is showing). A refresh
    that fails drops the shapes, so the tile says "needs the server" rather than
-   showing a figure the server no longer stands behind. One in flight at a
-   time; callers do not await it. */
+   showing a figure the server no longer stands behind. Then repaint everything
+   that reads them: the tile, the sidebar, and the company page or Receivables
+   header if one is showing. One in flight at a time; callers do not await it. */
 let metricsRefresh = null;
 function refreshMetrics(){
   if(metricsRefresh) return metricsRefresh;
@@ -1671,14 +1677,17 @@ function refreshMetrics(){
       });
     })
     .catch(() => { DATA.companies.forEach(c => { delete c.metrics; }); })
-    .then(() => { metricsRefresh = null; kpis(); if(filter === 'receivable') renderMain(); });
+    .then(() => { metricsRefresh = null; kpis(); renderList();
+      // the company headline and the Receivables header read the shapes too
+      if(filter === 'receivable' || (selected && filter !== 'live' && filter !== 'project')) renderMain(); });
   return metricsRefresh;
 }
 /* "3 of 5 invoices priced \u00b7 1 no project link \u00b7 1 no revenue on project" */
 function shapeCaveat(sh){
   const parts = [`${sh.counted} of ${sh.population} invoice${sh.population===1?'':'s'} priced`];
-  Object.keys(sh.excluded).sort((a,b)=>sh.excluded[b]-sh.excluded[a])
-    .forEach(k => parts.push(`${sh.excluded[k]} ${String(k).replace(/_/g,' ')}`));
+  const exc = sh.excluded || {};
+  Object.keys(exc).sort((a,b)=>exc[b]-exc[a])
+    .forEach(k => parts.push(`${exc[k]} ${String(k).replace(/_/g,' ')}`));
   return parts.join(' \u00b7 ');
 }
 
@@ -1923,25 +1932,46 @@ function renderMain(){
 }
 
 /* One line under the customer's name: what they owe and how late it is.
-   Uses the same outstanding()/invoiceBucket() the Receivables screen does, so
-   the two cannot disagree about the same customer. */
+   Reads the SERVER's shapes -- company.metrics.exposure_open_receivable_usd
+   and oldest_overdue_days, embedded at build and refreshed after every write
+   -- and shows the denominator beside the figure. It used to sum the view's
+   own outstanding(): when no open invoice could be priced that sum was 0 and
+   the line read "$0 outstanding · oldest 433 days late" in red, so a real zero
+   and nothing-counted looked identical -- on 66 of 67 customers with open
+   invoices on the fresh-import store. The invoice TABLE further down still
+   prices each row with outstanding() (a known, documented duplication); only
+   this line and the sidebar read the shape. */
 function companySummary(c){
-  const invs = invoicesByCo[c.company_id]||[];
-  if(!invs.length) return '';
-  const today = todayISO(), soon = soonISO();
-  const open = invs.filter(v=>invoiceBucket(v,today,soon)!=='Paid');
-  if(!open.length) return `<p class="co-sum"><span class="ok">All settled</span>
-    <span class="muted">· nothing outstanding</span></p>`;
-  const known = open.map(outstanding).filter(x=>x!=null);
-  const owed = known.reduce((a,b)=>a+b,0);
-  const lates = open.map(v=>daysLate(v,today)).filter(x=>x!=null && x>0);
-  const oldest = lates.length ? Math.max.apply(null, lates) : 0;
-  const missing = open.length - known.length;
+  const m = c.metrics, sh = m && m.exposure_open_receivable_usd, od = m && m.oldest_overdue_days;
+  const see = `<a href="#" class="muted" onclick="setFilter('receivable');return false">see all receivables</a>`;
+  if(!sh){
+    // No shape: an older server, a build without one, or a refresh that
+    // failed. Say so. Never fall back to a sum of the view's own.
+    if(!(invoicesByCo[c.company_id]||[]).length) return '';
+    return `<p class="co-sum"><span class="muted">needs the server · what this customer owes is a server figure, and this page has none for it</span> ${see}</p>`;
+  }
+  if(!sh.population) return '';
+  const odExc = (od && od.excluded) || {};
+  // counted == 0 on the lateness shape means every unpaid invoice lacked a
+  // usable due date, or there is no unpaid invoice at all -- a paid one is
+  // excluded as "paid". Only the first of those is worth a word.
+  const late = !od ? ''
+             : od.value > 0 ? `<span class="late">· oldest ${esc(st(od.value))} days late</span>`
+             : (!od.counted && Object.keys(odExc).some(k => k !== 'paid')) ? '<span class="muted">· no due dates on file</span>'
+             : '<span class="muted">· none overdue</span>';
+  if(!sh.counted){
+    // Nothing priced is not $0. Every invoice here is unpaid -- a paid one
+    // always counts, as 0 -- so the population IS the open-invoice count.
+    const exc = Object.keys(sh.excluded||{}).sort((a,b)=>sh.excluded[b]-sh.excluded[a])
+      .map(k => `${sh.excluded[k]} ${String(k).replace(/_/g,' ')}`).join(' \u00b7 ');
+    return `<p class="co-sum"><b class="${od && od.value > 0 ? 'late' : ''}">nothing priced</b>
+      <span class="muted">· ${sh.population} open invoice${sh.population===1?'':'s'}${exc ? ' \u00b7 ' + esc(exc) : ''}</span>
+      ${late} ${see}</p>`;
+  }
   return `<p class="co-sum">
-    <b class="${oldest?'late':''}">${money(owed)} outstanding</b>
-    ${oldest?`<span class="late">· oldest ${oldest} days late</span>`:'<span class="muted">· none overdue</span>'}
-    ${missing?`<span class="muted">· ${missing} with no amount on file</span>`:''}
-    <a href="#" class="muted" onclick="setFilter('receivable');return false">see all receivables</a>
+    <b class="${od && od.value > 0 ? 'late' : ''}">${money(sh.value)} outstanding</b>
+    <span class="muted">· ${esc(shapeCaveat(sh))}</span>
+    ${late} ${see}
   </p>`;
 }
 

@@ -304,6 +304,12 @@ async function run(crmDir) {
     ] };
     // a company edit through the real doSave path
     ev2("select('acme'); openEditCompany && openEditCompany('acme');");
+    const head2 = () => ((app2.doc.getElementById('main').innerHTML.match(/<p class="co-sum">[\s\S]*?<\/p>/) || [''])[0])
+      .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    const side2 = () => (app2.doc.getElementById('clist').innerHTML.split('class="citem').find(x => /Ace/.test(x)) || '')
+      .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    r.check('before any edit the company headline carries the build-time shape',
+      /89,600 outstanding/.test(head2()) && /2 of 2 invoices priced/.test(head2()), head2());
     ev2("document.getElementById('e_co_name') && (document.getElementById('e_co_name').value='Ace Renamed');");
     app2.resetCalls();
     await ev2("saveEditCompany('acme')");
@@ -320,11 +326,89 @@ async function run(crmDir) {
     r.check('the local optimistic edit survives the refresh (metrics copied, record kept)',
       acme2.display_name === 'Ace Renamed' && acme2.metrics && acme2.metrics.exposure_open_receivable_usd.counted === 2,
       JSON.stringify(acme2).slice(0, 200));
+    // The tile was the only surface the refresh repainted. The company page
+    // and the sidebar read the same shapes and kept the pre-edit figure.
+    r.check('the company headline shows the refreshed shape, not the build-time one',
+      /\$0 outstanding/.test(head2()) && /2 of 2 invoices priced/.test(head2()) && !/89,600/.test(head2()), head2());
+    r.check('and so does the sidebar line for that customer',
+      /\$0 owed · 2 of 2 priced/.test(side2()) && !/89,600/.test(side2()), side2());
     // a refresh the server refuses drops the shapes rather than keeping stale ones
     served.answer = { ok: false, error: 'store locked' };
     await ev2("refreshMetrics()");
     r.check('when the refresh fails the tile says it needs the server, not a stale figure',
       /needs the server/.test(tile2()) && !/83,000/.test(tile2()) && !/172,600/.test(tile2()), tile2());
+    r.check('and the company headline says so too, rather than keeping the figure',
+      /needs the server/.test(head2()) && !/\$/.test(head2()), head2());
+  }
+
+  // ---- the company headline and the sidebar read the shape too --------------
+  //
+  // companySummary() summed the view's own outstanding(). When no open invoice
+  // could be priced that sum was 0 and the line read "$0 outstanding · oldest
+  // 433 days late" in red: a real zero and nothing-counted were the same
+  // pixels, on 66 of 67 customers with open invoices on the fresh-import
+  // store. The sidebar had the same gap behind `owed ? ... : role`. Both now
+  // read company.metrics -- the shapes the tile reads -- and say the
+  // denominator. The invoice TABLE rows keep outstanding(); that duplication is
+  // known and documented at the function.
+  {
+    const dir3 = path.join(tmp, 'store3');
+    fs.mkdirSync(dir3, { recursive: true });
+    const w3 = (n, v) => fs.writeFileSync(path.join(dir3, n + '.json'), JSON.stringify(v, null, 2));
+    w3('companies', [
+      { company_id: 'unl', display_name: 'Unlinked Ltd', role: 'customer', domains: [], locations: [], archived: false },
+      { company_id: 'pd', display_name: 'Paid Co', role: 'customer', domains: [], locations: [], archived: false }]);
+    w3('projects', [
+      { company_id: 'pd', project_no: '8001', status: 'won', year: 2026, revenue: 12000, archived: false },
+      { company_id: 'pd', project_no: '8002', status: 'won', year: 2026, revenue: 3000, archived: false }]);
+    // thirteen open invoices, none linked to a project: the real store's shape
+    const unl = Array.from({ length: 13 }, (_, i) => ({ company_id: 'unl', invoice_no: String(6001 + i),
+      project_no: null, payment_status: 'open', invoice_date: i === 0 ? '2025-01-10' : '2026-06-01' }));
+    w3('invoices', unl.concat([
+      { company_id: 'pd', invoice_no: '7101', project_no: '8001', payment_status: 'paid', invoice_date: '2026-05-01' },
+      { company_id: 'pd', invoice_no: '7102', project_no: '8002', payment_status: 'paid', invoice_date: '2026-05-02' }]));
+    w3('contacts', []); w3('shipments', []); w3('vendors', []); w3('needs_review', []);
+    const app3 = launch({ crmDir, storeDir: dir3, outDir: tmp, mode: 'http' });
+    const ev3 = (code) => app3.eval(code);
+    const headline = () => ((app3.doc.getElementById('main').innerHTML.match(/<p class="co-sum">[\s\S]*?<\/p>/) || [''])[0])
+      .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const sideItem = (name) => (app3.doc.getElementById('clist').innerHTML.split('class="citem').find(x => x.includes(name)) || '')
+      .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+
+    ev3("setFilter('all'); select('unl');");
+    let h = headline();
+    r.check('a customer whose open invoices cannot be priced never reads $0',
+      !/\$0\b/.test(h), `headline: ${h}`);
+    r.check('it says nothing was priced, how many are open, and why',
+      /nothing priced/.test(h) && /13 open invoices/.test(h) && /13 no project link/.test(h), `headline: ${h}`);
+    r.check('and still says how late the oldest one is -- lateness needs no price',
+      /oldest \d+ days late/.test(h), `headline: ${h}`);
+    r.check('the headline is not a view sum (SOURCE CHECK)',
+      !/function companySummary[\s\S]{0,2600}(outstanding|invoiceAmount|daysLate)\(/.test(js),
+      'a second pricing rule under the customer\'s name is how the headline and the tile come to disagree');
+
+    ev3("select('pd');");
+    h = headline();
+    r.check('a paid-only ledger is a real $0, with its count beside it',
+      /\$0 outstanding/.test(h) && /2 of 2 invoices priced/.test(h), `headline: ${h}`);
+    r.check('and is not called overdue', /none overdue/.test(h) && !/days late/.test(h), `headline: ${h}`);
+
+    // the sidebar: same rule, short form
+    let unlSide = sideItem('Unlinked Ltd');
+    const pdSide = sideItem('Paid Co');
+    r.check('the sidebar never shows $0 for a customer nothing could be priced for',
+      !/\$0\b/.test(unlSide) && /nothing priced · 13 open/.test(unlSide), `item: ${unlSide}`);
+    r.check('and shows the real $0 with its denominator for the paid-only one',
+      /\$0 owed · 2 of 2 priced/.test(pdSide), `item: ${pdSide}`);
+    r.check('the sidebar carries the lateness of the unpriced customer',
+      /\d+d late/.test(unlSide), `item: ${unlSide}`);
+
+    // no shape at all: say so, on both surfaces, and show no figure
+    ev3("DATA.companies.forEach(c => { delete c.metrics; }); select('unl'); renderList();");
+    h = headline(); unlSide = sideItem('Unlinked Ltd');
+    r.check('with no shape the headline says it needs the server and shows no figure',
+      /needs the server/.test(h) && !/\$/.test(h), `headline: ${h}`);
+    r.check('and so does the sidebar', /needs the server/.test(unlSide) && !/\$/.test(unlSide), `item: ${unlSide}`);
   }
 
   // ---- the row and the header price the same invoice the same way -------------
