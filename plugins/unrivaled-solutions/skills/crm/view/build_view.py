@@ -621,6 +621,15 @@ function numv(v){ const n = Number(v); return isNaN(n) ? 0 : n; }
 // type, and a string there makes .join/.some throw inside renderMain -- which
 // doSave re-runs after every save, so one such record blanks the whole pane.
 function arr(v){ return Array.isArray(v) ? v : (v===null||v===undefined||v==='' ? [] : [v]); }
+/* A project with no number cannot be opened from the app: openProject() finds
+   it by number and update_project keys on it. 16 of 261 rows on the real store
+   rendered clickable anyway -- click, and nothing happened. Such a row is
+   rendered inert and says why: the fix is a number, given in chat. */
+const NO_NUMBER_NOTE = 'no number \u2014 give it one in chat to edit here';
+function hasProjectNo(p){ return st(p && p.project_no).trim() !== ''; }
+function projRowClick(p){ return hasProjectNo(p) ? `class="click" onclick="openProject('${jesc(st(p.project_no))}')"` : ''; }
+function projItemClick(p){ return hasProjectNo(p) ? `onclick="openProject('${jesc(st(p.project_no))}')"` : ''; }
+function projNoCell(p){ return hasProjectNo(p) ? `<b>${esc(st(p.project_no))}</b>` : `<span class="muted">${esc(NO_NUMBER_NOTE)}</span>`; }
 // Options for a <select>, ALWAYS including whatever is actually stored.
 // A stored value absent from the preset list selects nothing, so the browser
 // reports the FIRST option and the save handler sends it unconditionally:
@@ -782,8 +791,8 @@ function renderProjectsMain(){
     ${th('status','Status')}${th('owner','Owner')}${th('year','Year')}
     ${th('revenue','Revenue','num')}${th('margin','Margin','num')}
     ${th('collection_status','Collection')}</tr></thead><tbody>` +
-    rows.map(p=>`<tr class="click" onclick="openProject('${jesc(st(p.project_no))}')">
-      <td><b>${esc(st(p.project_no)||'—')}</b></td>
+    rows.map(p=>`<tr ${projRowClick(p)}>
+      <td>${projNoCell(p)}</td>
       <td>${p.company_id?`<a href="#" onclick="event.stopPropagation();select('${jesc(p.company_id)}');return false">${esc(projCompanyName(p))}</a>`:'<span class="muted">—</span>'}</td>
       <td>${esc(p.description||'')}</td>
       <td>${statusBadge(p.status)}</td>
@@ -1160,7 +1169,9 @@ function liveCard(r){
       ${p.invoice_no?`<span class="muted nw">inv ${esc(st(p.invoice_no))}</span>`:''}
       <span class="muted nw">${esc(fmtDate(p.date||p.start_date)||st(p.date||p.start_date)||'no start date')}</span>
       ${r.flags.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}
-      <span style="margin-left:auto"><button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}')">Edit</button></span>
+      <span style="margin-left:auto">${hasProjectNo(p)
+        ? `<button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}')">Edit</button>`
+        : `<span class="muted nw">${esc(NO_NUMBER_NOTE)}</span>`}</span>
     </div>
     <div class="lt-note">${esc(st(p.open_orders_notes)||'')||'<span class="muted">no note</span>'}</div>
     <div class="lt-legs">${legs}</div>
@@ -1472,8 +1483,8 @@ function renderLiveList(){
   const rows = liveRows();
   document.getElementById('clist').innerHTML = rows.slice(0,400).map(r=>{
     const co = companyById[r.p.company_id];
-    return `<div class="citem" onclick="openProject('${jesc(st(r.p.project_no))}')">
-      <div class="cn">${esc(st(r.p.project_no)||'—')} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
+    return `<div class="citem" ${projItemClick(r.p)}>
+      <div class="cn">${hasProjectNo(r.p)?esc(st(r.p.project_no)):'<span class="muted">no number</span>'} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
       <div class="cm">${r.flags.length?`<span class="owed">${r.flags.length} flag${r.flags.length>1?'s':''}</span>`:`<span>${esc(st(_liveListLabel(r.p.tracker_status)).slice(0,28))}</span>`}</div>
     </div>`;
   }).join('') || '<div class="muted" style="padding:14px">No live projects.</div>';
@@ -1482,8 +1493,8 @@ function renderLiveList(){
 function renderProjectsList(){
   const rows = filteredProjects();
   document.getElementById('clist').innerHTML = rows.slice(0,400).map(p=>`
-    <div class="citem" onclick="openProject('${jesc(st(p.project_no))}')">
-      <div class="cn">${esc(st(p.project_no)||'—')} ${esc(st(p.description).slice(0,40))}</div>
+    <div class="citem" ${projItemClick(p)}>
+      <div class="cn">${hasProjectNo(p)?esc(st(p.project_no)):'<span class="muted">no number</span>'} ${esc(st(p.description).slice(0,40))}</div>
       <div class="cm"><span>${esc(projCompanyName(p))}</span>${p.status?`<span>· ${esc(p.status)}</span>`:''}</div>
     </div>`).join('') || '<div class="muted" style="padding:14px">No matches.</div>';
 }
@@ -1870,8 +1881,8 @@ function renderMain(){
   h+=`<div class="section"><h2>Projects (${prs.length})</h2>`;
   h+= prs.length?`<table><thead><tr><th>Project #</th><th>Description</th><th>Status</th><th>Owner</th>
       <th class="num">Revenue</th><th class="num">Margin</th><th>Collection</th></tr></thead><tbody>`+
-    prs.map(p=>`<tr class="click" onclick="openProject('${jesc(p.project_no||'')}')">
-      <td><b>${esc(p.project_no||'—')}</b></td><td>${esc(p.description||'')}</td>
+    prs.map(p=>`<tr ${projRowClick(p)}>
+      <td>${projNoCell(p)}</td><td>${esc(p.description||'')}</td>
       <td>${statusBadge(p.status)}</td><td>${esc(arr(p.owner).join(', '))||'—'}</td>
       <td class="num">${money(p.revenue)}</td><td class="num">${pct(p.margin)}</td>
       <td>${statusPill(p.collection_status)}</td></tr>`).join('')+
@@ -2004,7 +2015,11 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeMore(); });
 
 /* ------------------------------------------------------- project drawer -- */
 function openProject(pno){
-  const p=DATA.projects.find(x=>String(x.project_no)===String(pno)); if(!p) return;
+  // String(null) is 'null', so a bare String comparison let openProject('null')
+  // open a numberless project -- a drawer whose save would key on a number
+  // the record does not have. A project with no number is never opened here.
+  if(!st(pno).trim()) return;
+  const p=DATA.projects.find(x=>hasProjectNo(x) && st(x.project_no)===st(pno)); if(!p) return;
   document.getElementById('dtitle').textContent='Project '+(pno||'');
   // revenue/total_cost/gross_profit/margin are independent stored values
   // (each read from its own tracker column, never computed from the

@@ -32,7 +32,7 @@ not evidence. Re-run it after any change to the harness, and bump
 | `regression/test_identifiers.py` | `_key`/`_canon`/`_resolve`; mint vs lookup |
 | `regression/test_visibility.py` | what archiving hides, and must never hide |
 | `regression/test_integrity.py` | links, cascades, identity, the store layer |
-| `regression/test_view.js` | render robustness, date preservation, saves |
+| `regression/test_view.js` | render robustness, date preservation, saves, and what the app offers as clickable. Mutated by `mutate_view.py` (its own decisions) and `mutate_failure.py` (the failure class) |
 | `regression/test_livetracker.py` | the fill-colour decode, the legend boundary, unlinked rows, re-import |
 | `regression/test_livetracker.js` | the Live screen: lateness flags, adoption, the note |
 | `regression/test_metrics.py` | every derived number's shape: `counted + Σexcluded == population`, `null` iff nothing counted, a closed exclusion vocabulary, "quoted" on anything profit-shaped, never persisted. Clock frozen at 2026-09-01; every expected figure hand-derived. Mutated by `mutate_metrics.py` |
@@ -188,7 +188,7 @@ Green on its own is still not the claim. What makes it mean something:
 
 ```bash
 python3 tests/run_all.py --positive-control   # must FAIL against BASELINE_REF
-python3 tests/mutate_drawer.py                # and the other five
+python3 tests/mutate_drawer.py                # and the other six
 ```
 
 `--positive-control` writes `.positive-control-ran`; until it exists,

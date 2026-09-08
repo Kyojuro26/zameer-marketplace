@@ -39,7 +39,15 @@ function seedStore(dir) {
     last_action: 45731 }]);
   w('projects', [{ company_id: 'acme', project_no: '4521', status: null,
     year: 2026, revenue: 100000, owner: 'D', annotations: 'note one',
-    description: 12345, collection_status: 'partial:30%', archived: false }]);
+    description: 12345, collection_status: 'partial:30%', archived: false },
+    // NO NUMBER. The deal log yields these (16 of 261 on the real store); the
+    // app cannot open or edit one. year 2024 keeps it out of the KPI checks.
+    { company_id: 'acme', project_no: null, status: 'won', year: 2024,
+      revenue: 500, description: 'numberless deal', archived: false },
+    // and one on the Live screen, which renders its own card and list item
+    { company_id: 'acme', project_no: null, status: 'won', year: 2024,
+      revenue: 700, description: 'numberless live', archived: false,
+      tracker_status: 'action_admin', open_orders_notes: 'numberless live job' }]);
   w('shipments', [
     { shipment_id: '4521-L1', company_id: 'acme', project_no: '4521',
       all_project_nos: '4521', stage: null, ship_date: 45731 },
@@ -157,6 +165,52 @@ async function run(crmDir) {
   r.check('a project with no stored status does not send an empty status',
     proj && proj.args.fields.status !== '',
     proj && JSON.stringify(proj.args.fields.status));
+
+  // ---- a row that cannot be opened is not offered as one --------------------
+  //
+  // openProject(pno) finds the project by String(project_no); for a null
+  // number that is 'null', which matches nothing, and it returns silently. The
+  // Projects tab, the company page and both sidebars still rendered such rows
+  // with class="click" and an onclick -- click, and nothing happened, with no
+  // word about why. update_project keys on the number too, so the app cannot
+  // edit one at all: the fix is a number, given in chat, and the row says so.
+  const rowOf = (html, marker, tag) => (String(html).split('<' + tag).find(x => x.includes(marker)) || '');
+  safe('setFilter', 'project');
+  let row = rowOf((app.el('main') || EMPTY).innerHTML, 'numberless deal', 'tr');
+  r.check('the Projects tab renders a numberless project',
+    row !== '', 'the row is missing altogether, which hides the deal');
+  // the company-name link in the same row has its own onclick, so the test is
+  // for the ROW's affordance: no class="click", no openProject
+  r.check('a numberless row on the Projects tab is not clickable',
+    row && !/openProject\(/.test(row) && !/class="click"/.test(row), row.slice(0, 200));
+  r.check('and says why it cannot be opened',
+    /give it one in chat to edit here/.test(row), row.slice(0, 200));
+  // split on the ITEM, not on <div: the marker sits in the inner name div,
+  // and a chunk cut there can never see the onclick on the item around it
+  let side = (app.el('clist') || EMPTY).innerHTML.split('class="citem"').find(x => x.includes('numberless deal')) || '';
+  r.check('the projects sidebar item for it is inert too',
+    side && !/onclick=/.test(side), side.slice(0, 200));
+  const numbered = rowOf((app.el('main') || EMPTY).innerHTML, '12345', 'tr');
+  r.check('a numbered row is still clickable',
+    /onclick="openProject\('4521'\)"/.test(numbered), numbered.slice(0, 200));
+  safe('setFilter', 'all'); safe('select', 'acme');
+  row = rowOf((app.el('main') || EMPTY).innerHTML, 'numberless deal', 'tr');
+  r.check('the company page renders the same row inert, with the note',
+    row && !/openProject\(/.test(row) && !/class="click"/.test(row)
+        && /give it one in chat to edit here/.test(row), row.slice(0, 200));
+  safe('setFilter', 'live');
+  const card = rowOf((app.el('main') || EMPTY).innerHTML, 'numberless live job', 'div class="lt-card"');
+  r.check('the Live card for a numberless job has no Edit button, and says why',
+    card && !/openProject\(/.test(card) && /give it one in chat to edit here/.test(card), card.slice(0, 300));
+  side = (app.el('clist') || EMPTY).innerHTML;
+  r.check('the Live sidebar item for it carries no click',
+    /citem/.test(side) && !/onclick="openProject\('(null|)'\)"/.test(side), side.slice(0, 200));
+  // and the entry point itself: a click that does slip through opens nothing
+  safe('closeDrawer');
+  safe('openProject', ''); safe('openProject', 'null');
+  r.check('openProject with no number opens no drawer',
+    !((app.el('drawer') || EMPTY).classList || { contains: () => false }).contains('open'));
+  safe('setFilter', 'all'); safe('select', 'acme');
 
   // ---- KPI arithmetic ----------------------------------------------------
   // nothing validates the TYPE of year or revenue, and `a + (p.revenue||0)` on
