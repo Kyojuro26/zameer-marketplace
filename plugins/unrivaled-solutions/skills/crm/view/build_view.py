@@ -991,6 +991,27 @@ function liveFlags(p, legs){
   return [...new Set(out)];
 }
 
+/* The card said "inv 1208" as inert text: no status, no lateness, no way in.
+   Whose court the job is in was answered; who owes me was not. The invoice is
+   looked up by (company_id, invoice_no) -- numbers repeat across customers, and
+   the wrong customer's invoice would put the wrong status on this job -- and
+   rendered with the statusPill() and daysLate() the company page uses. That is
+   classification, not a new figure: no amount appears on the card. The button
+   opens the invoice drawer for exactly that (company, invoice). A number with
+   no record behind it says so rather than vanishing. */
+function liveInvoice(p){
+  const no = st(p.invoice_no).trim();
+  if(!no) return '';
+  const v = (invoicesByCo[p.company_id]||[]).find(x => st(x.invoice_no).trim() === no);
+  if(!v) return `<span class="muted nw">inv ${esc(no)} \u00b7 no invoice record</span>`;
+  // lateness only for an invoice the shared bucket rule calls Overdue: a paid
+  // invoice with an old due date is not late, and the company page agrees
+  const late = invoiceBucket(v) === 'Overdue' ? daysLate(v) : 0;
+  return `<button class="pill-btn" onclick="openEditInvoice('${jesc(st(p.company_id))}','${jesc(st(v.invoice_no))}')">inv ${esc(no)}</button>`
+       + ` ${statusPill(v.payment_status)}`
+       + (late > 0 ? ` <span class="lt-bad nw">${esc(st(late))}d late</span>` : '');
+}
+
 /* The search box is the most prominent control on the screen the app now opens
    on, and it did nothing here -- it filtered the company list, so typing on the
    landing tab changed nothing and then silently filtered a list he had not
@@ -1166,7 +1187,7 @@ function liveCard(r){
     <div class="lt-top">
       <b class="nw">${esc(st(p.project_no)||'—')}</b>
       <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(p.company_id)}')">${esc(co?(co.display_name||p.company_id):st(p.company_id))}</a>
-      ${p.invoice_no?`<span class="muted nw">inv ${esc(st(p.invoice_no))}</span>`:''}
+      ${liveInvoice(p)}
       <span class="muted nw">${esc(fmtDate(p.date||p.start_date)||st(p.date||p.start_date)||'no start date')}</span>
       ${r.flags.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}
       <span style="margin-left:auto">${hasProjectNo(p)

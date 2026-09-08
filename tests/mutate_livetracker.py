@@ -630,6 +630,25 @@ VIEW = [
  ("an unrecognised bucket is no longer explained in the form",
   "      ${knownBucket(p.tracker_status) ? '' : (st(p.tracker_status)",
   "      ${true ? '' : (st(p.tracker_status)"),
+ # ---- the card's invoice: who owes me, not only whose court -----------------
+ ("the invoice is looked up by number alone, so another customer's can answer",
+  "  const v = (invoicesByCo[p.company_id]||[]).find(x => st(x.invoice_no).trim() === no);",
+  "  const v = (DATA.invoices||[]).find(x => st(x.invoice_no).trim() === no);"),
+ ("the invoice number is compared untrimmed",
+  ".find(x => st(x.invoice_no).trim() === no);",
+  ".find(x => st(x.invoice_no) === no);"),
+ ("a number with no record behind it vanishes from the card",
+  "  if(!v) return `<span class=\"muted nw\">inv ${esc(no)} \\u00b7 no invoice record</span>`;",
+  "  if(!v) return '';"),
+ ("a paid invoice with an old due date is shown as late",
+  "  const late = invoiceBucket(v) === 'Overdue' ? daysLate(v) : 0;",
+  "  const late = daysLate(v);"),
+ ("the number goes back to inert text",
+  "  return `<button class=\"pill-btn\" onclick=\"openEditInvoice('${jesc(st(p.company_id))}','${jesc(st(v.invoice_no))}')\">inv ${esc(no)}</button>`",
+  "  return `<span class=\"muted nw\">inv ${esc(no)}</span>`"),
+ ("the link carries the trimmed number, which the drawer cannot find",
+  "'${jesc(st(v.invoice_no))}')\">inv ${esc(no)}</button>`",
+  "'${jesc(no)}')\">inv ${esc(no)}</button>`"),
 ]
 
 

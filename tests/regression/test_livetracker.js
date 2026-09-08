@@ -69,7 +69,7 @@ function seedStore(dir) {
     // three late legs of three different kinds, plus the long note
     { company_id: 'acme', project_no: '4501', status: 'won', year: 2026,
       archived: false, tracker_status: 'action_admin', tracker_row: 2,
-      date: '2026-07-01', open_orders_notes: LONG_NOTE },
+      date: '2026-07-01', open_orders_notes: LONG_NOTE, invoice_no: '7001' },
     // no late leg, but a start date nobody has committed to
     { company_id: 'acme', project_no: '4502', status: 'won', year: 2026,
       archived: false, tracker_status: 'action_owner', tracker_row: 3,
@@ -77,7 +77,7 @@ function seedStore(dir) {
     // clean: an unparseable but non-empty ship date is not lateness
     { company_id: 'mer', project_no: '4503', status: 'won', year: 2026,
       archived: false, tracker_status: 'awaiting_materials', tracker_row: 4,
-      date: '2026-07-15', open_orders_notes: '' },
+      date: '2026-07-15', open_orders_notes: '', invoice_no: '7003' },
     // NOT on the tracker at all -- must not appear on this screen
     { company_id: 'mer', project_no: '4504', status: 'won', year: 2026,
       archived: false, open_orders_notes: 'Not a tracker row.' },
@@ -88,7 +88,7 @@ function seedStore(dir) {
     // the note came off a spreadsheet cell somebody else can type into
     { company_id: 'mer', project_no: '4506', status: 'won', year: 2026,
       archived: false, tracker_status: 'action_admin', date: '2026-07-20',
-      open_orders_notes: XSS_NOTE },
+      open_orders_notes: XSS_NOTE, invoice_no: '7006' },
     // a status no bucket knows about. It was counted in the header and
     // rendered in no section at all, so a live job left the daily board.
     { company_id: 'acme', project_no: '4507', status: 'won', year: 2026,
@@ -100,7 +100,7 @@ function seedStore(dir) {
     // card and the flags read the SAME expression; asserted directly below too.
     { company_id: 'acme', project_no: '4508', status: 'won', year: 2026,
       archived: false, tracker_status: 'action_owner', start_date: 'TBD',
-      open_orders_notes: 'Start date lives on the other field.' },
+      open_orders_notes: 'Start date lives on the other field.', invoice_no: '7009' },
     // every leg already delivered: nothing here needs a person today
     { company_id: 'mer', project_no: '4509', status: 'won', year: 2026,
       archived: false, tracker_status: 'awaiting_materials',
@@ -188,7 +188,20 @@ function seedStore(dir) {
       client_po: 'PO-1010', start_date: '2026-07-08', location: 'Toledo OH',
       open_orders_notes: 'Freight job, no number.',
       tracker_status: 'action_owner', legs: [] }]);
-  w('contacts', []); w('invoices', []); w('vendors', []); w('needs_review', []);
+  w('invoices', [
+    // ACME's 7003 FIRST, deliberately: invoice numbers repeat across customers,
+    // and a lookup by number alone would answer 4503 (Meridian) with this one
+    { company_id: 'acme', invoice_no: '7003', payment_status: 'open', invoice_date: '2025-01-01' },
+    // 4501's invoice: open, Net 30 from 1 Jun -> due 1 Jul -> 39 days late on TODAY
+    { company_id: 'acme', invoice_no: '7001', payment_status: 'open', invoice_date: '2026-06-01' },
+    // 4503's invoice: paid, with a due date long past -- paid is never late
+    { company_id: 'mer', invoice_no: '7003', payment_status: 'paid', invoice_date: '2026-01-01' },
+    // 4508's invoice, stored with stray whitespace round the number; not yet due
+    // on TODAY. (Not on 4509: that card is asserted free of the red leg class
+    // in a snapshot taken before the clock is frozen.)
+    { company_id: 'acme', invoice_no: ' 7009 ', payment_status: 'open', invoice_date: '2026-08-01' }]);
+  // 4506 carries invoice_no 7006 and there is NO record for it
+  w('contacts', []); w('vendors', []); w('needs_review', []);
   return dir;
 }
 
@@ -425,6 +438,58 @@ async function run(crmDir) {
     `got ${(app.doc.getElementById('clist').innerHTML.match(/<span>Waiting[^<]*/) || ['none'])[0]}`
     + ' -- esc() inflates one character into five or six, so slicing after it '
     + 'cuts a different string and can sever an entity');
+
+  // ---- the card says who owes me, not only whose court it is in --------------
+  //
+  // "inv 1208" was inert text: no status, no lateness, no way in. It now reads
+  // the invoice by (company_id, invoice_no) and renders the same statusPill()
+  // and daysLate() the company page uses -- classification, not a new figure,
+  // so no amount appears -- and the number opens the invoice drawer. Rendered
+  // AFTER the clock was frozen: the page painted itself at load, before it.
+  ev("renderMain();");
+  const mainInv = app.doc.getElementById('main').innerHTML;
+  const cardOf = (marker) => (mainInv.split('<div class="lt-card">').find(c => c.includes(marker)) || '');
+  const c4501 = cardOf('Two of the four frames short-shipped');
+  r.check('an open, overdue invoice shows its status and how late it is',
+    /Open<\/span>/.test(c4501) && /39d late/.test(c4501),
+    c4501.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 200));
+  r.check('and the number is a way in, not inert text',
+    /onclick="openEditInvoice\('acme','7001'\)"/.test(c4501), c4501.slice(0, 400));
+  r.check('no amount appears on the card', !/\$/.test(c4501),
+    'the card classifies; the money lives on the company page and the Receivables tab');
+  const c4503 = cardOf('>4503<');
+  r.check('a paid invoice reads Paid and is not late, whatever its due date',
+    /Paid<\/span>/.test(c4503) && !/d late/.test(c4503),
+    c4503.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 200));
+  r.check("the invoice shown is THIS customer's, not another customer's of the same number",
+    /openEditInvoice\('mer','7003'\)/.test(c4503) && !/Open<\/span>/.test(c4503),
+    "acme also has a 7003, open and a year late; matching by number alone puts acme's debt on Meridian's job");
+  const c4506 = cardOf('>4506<');
+  r.check('a number with no invoice record behind it says so',
+    /inv 7006 · no invoice record/.test(c4506) && !/openEditInvoice/.test(c4506),
+    c4506.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 200));
+  const c4509inv = cardOf('Start date lives on the other field');
+  r.check('a stored number with stray whitespace still finds its invoice',
+    /Open<\/span>/.test(c4509inv) && !/no invoice record/.test(c4509inv) && !/d late/.test(c4509inv),
+    c4509inv.slice(0, 400));
+  // and the link carries the number AS STORED, or the drawer cannot find it.
+  // jesc() encodes the spaces, so the onclick is run rather than pattern-matched.
+  const link4509 = /onclick="(openEditInvoice\([^"]*\))"/.exec(c4509inv);
+  ev("closeDrawer();");
+  if (link4509) ev(link4509[1]);
+  // read through the document: app.el() is undefined for a control that was
+  // never rendered, and a TypeError here is a crash the runner scores as
+  // NOT-A-KILL rather than a red check
+  r.check('and that link opens the drawer on the whitespace-numbered invoice',
+    !!link4509 && /7009/.test(ev("document.getElementById('dtitle').textContent"))
+      && ev("document.getElementById('e_iv_status').value") === 'open',
+    `link=${link4509 && link4509[1]} title=${ev("document.getElementById('dtitle').textContent")}`);
+  ev("closeDrawer(); openEditInvoice('mer','7003');");
+  r.check("the link opens the invoice drawer for that customer's invoice",
+    /Edit invoice/.test(ev("document.getElementById('dtitle').textContent"))
+      && ev("document.getElementById('e_iv_status').value") === 'paid',
+    `title=${ev("document.getElementById('dtitle').textContent")} status=${ev("document.getElementById('e_iv_status').value")}`);
+  ev("closeDrawer();");
 
   // ---- the note -------------------------------------------------------------
   // SOURCE CHECK: a CSS claim, and this shim does no layout.
