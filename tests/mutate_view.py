@@ -36,8 +36,8 @@ M = [
   "        : `<span class=\"muted nw\">${esc(NO_NUMBER_NOTE)}</span>`}</span>",
   "      <span style=\"margin-left:auto\"><button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}')\">Edit</button></span>"),
  ("the Live sidebar item keeps its onclick",
-  "    return `<div class=\"citem\" ${projItemClick(r.p)}>",
-  "    return `<div class=\"citem\" onclick=\"openProject('${jesc(st(r.p.project_no))}')\">"),
+  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.project_no))}')\"`:''}>",
+  "      h += `<div class=\"citem\" onclick=\"liveJump('${jesc(st(r.p.project_no))}')\">"),
  ("the row goes inert but stops saying why",
   "const NO_NUMBER_NOTE = 'no number \\u2014 give it one in chat to edit here';",
   "const NO_NUMBER_NOTE = '';"),
@@ -48,6 +48,21 @@ M = [
   "  if(!st(pno).trim()) return;\n"
   "  const p=DATA.projects.find(x=>hasProjectNo(x) && st(x.project_no)===st(pno)); if(!p) return;",
   "  const p=DATA.projects.find(x=>String(x.project_no)===String(pno)); if(!p) return;"),
+ # ---- the deal date follows the date rule; two labels ---------------------
+ ("the deal date is sent on every save again",
+  "  dateIfChanged('f_date', fields, 'date');     // never send a date he did not touch",
+  "  fields.date = document.getElementById('f_date').value.trim() || null;"),
+ ("the deal date goes back to a plain text box",
+  "      <div class=\"field\"><label>Deal date</label>${dateInput('f_date', p.date)}</div>",
+  "      <div class=\"field\"><label>Deal date</label><input id=\"f_date\" value=\"${esc(p.date||'')}\"/></div>"),
+ ("the deal date is never snapshotted, so a change is never sent",
+  "  snapDates(['f_date']);\n", ""),
+ ("the invoice table header says Invoiced again",
+  "<th class=\"num\">Invoice date</th><th class=\"num\">Outstanding</th>",
+  "<th class=\"num\">Invoiced</th><th class=\"num\">Outstanding</th>"),
+ ("the Live card's date loses its label",
+  "  return d ? 'started ' + esc(d) : 'no start date';",
+  "  return d ? esc(d) : 'no start date';"),
 ]
 
 sys.exit(mutate(SRC, "./tests/regression/test_view.js", F, M))

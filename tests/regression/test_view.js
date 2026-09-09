@@ -39,14 +39,16 @@ function seedStore(dir) {
     last_action: 45731 }]);
   w('projects', [{ company_id: 'acme', project_no: '4521', status: null,
     year: 2026, revenue: 100000, owner: 'D', annotations: 'note one',
-    description: 12345, collection_status: 'partial:30%', archived: false },
+    description: 12345, collection_status: 'partial:30%', archived: false,
+    // a deal date no <input type="date"> will hold: 2026 is not a leap year
+    date: '2026-02-29' },
     // NO NUMBER. The deal log yields these (16 of 261 on the real store); the
     // app cannot open or edit one. year 2024 keeps it out of the KPI checks.
     { company_id: 'acme', project_no: null, status: 'won', year: 2024,
       revenue: 500, description: 'numberless deal', archived: false },
     // and one on the Live screen, which renders its own card and list item
     { company_id: 'acme', project_no: null, status: 'won', year: 2024,
-      revenue: 700, description: 'numberless live', archived: false,
+      revenue: 700, description: 'numberless live', archived: false, date: '2026-05-05',
       tracker_status: 'action_admin', open_orders_notes: 'numberless live job' }]);
   w('shipments', [
     { shipment_id: '4521-L1', company_id: 'acme', project_no: '4521',
@@ -159,12 +161,40 @@ async function run(crmDir) {
     ((app.el('dbody') || EMPTY).innerHTML || '').includes('partial:30%'),
     'a stored partial payment must not be written off as "open"');
   safe('openProject', '4521');
+  // ---- the deal date follows the date-preservation rule ----------------------
+  // It was a plain text box showing "2026-06-17 00:00:00", sent on every save.
+  r.check('an unparseable deal date falls back to a text box holding it verbatim',
+    (app.el('f_date') || EMPTY).value === '2026-02-29'
+      && /Kept exactly as it came from the tracker/.test((app.el('dbody') || EMPTY).innerHTML || ''),
+    `f_date=${(app.el('f_date') || EMPTY).value}`);
   app.resetCalls();
   safe('saveProject', '4521');
   const proj = app.calls().find(c => c.tool === 'update_project');
   r.check('a project with no stored status does not send an empty status',
     proj && proj.args.fields.status !== '',
     proj && JSON.stringify(proj.args.fields.status));
+  r.check('an untouched deal date is not sent, so it cannot be rewritten',
+    proj && !('date' in proj.args.fields), proj && JSON.stringify(Object.keys(proj.args.fields)));
+  safe('openProject', '4521');
+  if (app.el('f_date')) app.el('f_date').value = '2026-03-01';
+  app.resetCalls();
+  safe('saveProject', '4521');
+  const proj2 = app.calls().find(c => c.tool === 'update_project');
+  r.check('a deal date he did change is sent',
+    proj2 && proj2.args.fields.date === '2026-03-01', proj2 && JSON.stringify(proj2.args.fields.date));
+  safe('closeDrawer');
+  // ---- two labels ----------------------------------------------------------------
+  safe('setFilter', 'all'); safe('select', 'acme');
+  const mainHdr = (app.el('main') || EMPTY).innerHTML || '';
+  r.check('the invoice table names the date column for what it holds',
+    /<th class="num">Invoice date<\/th>/.test(mainHdr) && !/>Invoiced</.test(mainHdr),
+    '"Invoiced" beside an "Outstanding" amount read as a second amount');
+  safe('setFilter', 'live');
+  const liveCardDate = ((app.el('main') || EMPTY).innerHTML || '').split('<div class="lt-card"')
+    .find(x => x.includes('numberless live job')) || '';
+  r.check('the Live card labels its date',
+    /started 5 May 2026/.test(liveCardDate), liveCardDate.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160));
+  safe('setFilter', 'all'); safe('select', 'acme');
 
   // ---- a row that cannot be opened is not offered as one --------------------
   //
@@ -203,8 +233,9 @@ async function run(crmDir) {
   r.check('the Live card for a numberless job has no Edit button, and says why',
     card && !/openProject\(/.test(card) && /give it one in chat to edit here/.test(card), card.slice(0, 300));
   side = (app.el('clist') || EMPTY).innerHTML;
+  // any handler at all with an empty or 'null' argument is a dead click
   r.check('the Live sidebar item for it carries no click',
-    /citem/.test(side) && !/onclick="openProject\('(null|)'\)"/.test(side), side.slice(0, 200));
+    /citem/.test(side) && !/onclick="\w+\('(null|)'\)"/.test(side), side.slice(0, 200));
   // and the entry point itself: a click that does slip through opens nothing
   safe('closeDrawer');
   safe('openProject', ''); safe('openProject', 'null');

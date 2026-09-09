@@ -983,6 +983,11 @@ function legSettled(l){ return LEG_DONE.has(sv(l && l.stage).trim()); }
    with no date yet: worth a look, not yet late. They used to be one list, and
    "leg with no date" fires on every unshipped leg -- 8 of 9 cards on the real
    store -- so "9 need a look" and the flag-count sort told him nothing. */
+/* The card's date was unlabelled beside the invoice and the flags. */
+function liveStart(p){
+  const d = fmtDate(p.date||p.start_date)||st(p.date||p.start_date);
+  return d ? 'started ' + esc(d) : 'no start date';
+}
 function liveFlags(p, legs){
   const red = [], amber = [];
   const start = st(p.date || p.start_date).trim();
@@ -1197,7 +1202,7 @@ function liveCard(r){
       <b class="nw">${esc(st(p.project_no)||'—')}</b>
       <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(p.company_id)}')">${esc(co?(co.display_name||p.company_id):st(p.company_id))}</a>
       ${liveInvoice(p)}
-      <span class="muted nw">${esc(fmtDate(p.date||p.start_date)||st(p.date||p.start_date)||'no start date')}</span>
+      <span class="muted nw">${liveStart(p)}</span>
       ${r.flags.red.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}${r.flags.amber.map(f=>`<span class="badge b-pending">${esc(f)}</span>`).join('')}
       <span style="margin-left:auto">${hasProjectNo(p)
         ? `<button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}')">Edit</button>`
@@ -1982,7 +1987,7 @@ function renderMain(){
         <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('');
     });
     h+=`<div class="section"><h2>Invoices / customer orders (${invs.length})</h2>
-      <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th class="num">Invoiced</th><th class="num">Outstanding</th><th>Status</th><th class="num">Due on</th><th>Notes</th><th></th></tr></thead><tbody>`+
+      <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th class="num">Invoice date</th><th class="num">Outstanding</th><th>Status</th><th class="num">Due on</th><th>Notes</th><th></th></tr></thead><tbody>`+
       invRows+
       `</tbody></table></div>`;
   }
@@ -2098,7 +2103,7 @@ function openProject(pno){
     <div class="field"><label>Description</label><input id="f_desc" value="${esc(p.description||'')}"/></div>
     <div class="row2">
       <div class="field"><label>Location</label><input id="f_loc" value="${esc(p.location||'')}"/></div>
-      <div class="field"><label>Deal date</label><input id="f_date" value="${esc(p.date||'')}"/></div>
+      <div class="field"><label>Deal date</label>${dateInput('f_date', p.date)}</div>
     </div>
     <div class="row2">
       <div class="field"><label>Client PO #</label><input id="f_cpo" value="${esc(p.client_po_no||'')}"/></div>
@@ -2155,6 +2160,10 @@ function openProject(pno){
   // liveRows' truthiness test and left the Live screen entirely.
   const _trk = document.getElementById('f_tracker');
   if(_trk) _trk.setAttribute('data-orig', _trk.value);
+  // The deal date was a plain text box showing "2026-06-17 00:00:00" and was
+  // sent on every save. Same rule as every other date field now: baseline
+  // from the control, sent only if he touched it.
+  snapDates(['f_date']);
   document.getElementById('drawerNote').textContent = CRM.mode==='embedded'
     ? 'Demo mode: this save lasts only for this browser session.'
     : 'Saves persist to your CRM records through the validated write interface.';
@@ -2185,7 +2194,6 @@ async function saveProject(pnoArg){
   const fields = {
     description: document.getElementById('f_desc').value.trim() || null,
     location: document.getElementById('f_loc').value.trim() || null,
-    date: document.getElementById('f_date').value.trim() || null,
     client_po_no: document.getElementById('f_cpo').value.trim() || null,
     invoice_no: document.getElementById('f_inv').value.trim() || null,
     po_flag: document.getElementById('f_poflag').checked,
@@ -2209,6 +2217,7 @@ async function saveProject(pnoArg){
     gross_profit: numOrNull('f_gp'),
     margin: marginRaw==null ? null : marginRaw/100,
   };
+  dateIfChanged('f_date', fields, 'date');     // never send a date he did not touch
   // Sent ONLY when he actually changed it. Every other field here is sent
   // unconditionally, which is fine for fields the form always shows correctly
   // -- but this one can hold a value the server now refuses, and resending

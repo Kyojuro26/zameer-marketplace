@@ -551,8 +551,8 @@ VIEW = [
   "  const legs = (u.legs||[]).map(l=>{\n"
   "    const d = legDate(l.ship_date), paid = legPaid(l.vendor_po_raw);"),
  ("the card reads only p.date, disagreeing with its own TBD flag",
-  "${esc(fmtDate(p.date||p.start_date)||st(p.date||p.start_date)||'no start date')}",
-  "${esc(fmtDate(p.date)||st(p.date)||'no start date')}"),
+  "  const d = fmtDate(p.date||p.start_date)||st(p.date||p.start_date);",
+  "  const d = fmtDate(p.date)||st(p.date);"),
  ("a live refresh stops repainting the cards on the landing screen",
   "    else if (filter === 'live') renderMain();\n", ""),
  ("a tracker file of the wrong shape kills the app at load again",
