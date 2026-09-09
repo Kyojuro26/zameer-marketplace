@@ -428,6 +428,52 @@ async function run(crmDir) {
        + " const a=outstanding(v); DATA.projects.pop(); return String(a); })()") === 'null',
     'Number("") is 0, and a blank revenue cell was rendering as $0 owed');
 
+  // ---- the build hides what the server hides --------------------------------
+  //
+  // Review finding: archive_project hides a project and every invoice and leg
+  // linked to it from every read tool, but the build shipped them. The
+  // customer's headline -- the server's shape -- said nothing for such an
+  // invoice while the table beneath showed it $7,777 overdue; the first live
+  // refresh made it vanish.
+  {
+    const dirA = path.join(tmp, 'store-arch');
+    fs.mkdirSync(dirA, { recursive: true });
+    const wA = (n, v) => fs.writeFileSync(path.join(dirA, n + '.json'), JSON.stringify(v, null, 2));
+    wA('companies', [{ company_id: 'archlink', display_name: 'Archived Link Co', role: 'customer', domains: [], locations: [], archived: false }]);
+    wA('projects', [
+      { company_id: 'archlink', project_no: 'A1', status: 'won', year: 2026, revenue: 7777, archived: true },
+      { company_id: 'archlink', project_no: 'A2', status: 'won', year: 2026, revenue: 100, archived: false }]);
+    wA('invoices', [
+      { company_id: 'archlink', invoice_no: 'ARCH-7', project_no: 'A1', payment_status: 'open', invoice_date: '2025-01-01' },
+      { company_id: 'archlink', invoice_no: 'LIVE-8', project_no: 'A2', payment_status: 'open', invoice_date: '2026-06-01' }]);
+    wA('shipments', [
+      { shipment_id: 'A1-L1', company_id: 'archlink', project_no: 'A1', all_project_nos: ['A1'], stage: 'Ordered', vendor_po_raw: 'VPO-ARCH' },
+      { shipment_id: 'A2-L1', company_id: 'archlink', project_no: 'A2', all_project_nos: ['A2'], stage: 'Ordered', vendor_po_raw: 'VPO-LIVE' }]);
+    wA('contacts', []); wA('vendors', []); wA('needs_review', []);
+    const appA = launch({ crmDir, storeDir: dirA, outDir: tmp, mode: 'http' });
+    appA.eval("setFilter('all'); select('archlink');");
+    const mainA = appA.doc.getElementById('main').innerHTML;
+    r.check('an invoice on an archived project is not on the page, as it is not in any read tool',
+      !/ARCH-7/.test(mainA) && /LIVE-8/.test(mainA), 'the server hides it; the page must not show money the server does not list');
+    r.check('nor is the archived project, nor its leg',
+      !/>A1</.test(mainA) && !/VPO-ARCH/.test(mainA) && /VPO-LIVE/.test(mainA));
+    const headA = ((mainA.match(/<p class="co-sum">[\s\S]*?<\/p>/) || [''])[0]).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    r.check('so the headline and the table describe the same invoices',
+      /\$100 outstanding/.test(headA) && /1 of 1 invoice priced/.test(headA), headA);
+    appA.eval("setFilter('receivable');");
+    r.check('and the Receivables list does not count it either',
+      !/ARCH-7/.test(appA.doc.getElementById('main').innerHTML));
+  }
+  // If a build and a store ever do disagree -- the server lists no invoice for
+  // a customer whose page still shows some -- the headline must say so rather
+  // than fall silent above a table of money.
+  ev("DATA.companies.find(c=>c.company_id==='acme').metrics.exposure_open_receivable_usd = "
+     + "{value:null, unit:'usd', counted:0, population:0, excluded:{}, basis:'b'}; setFilter('all'); select('acme');");
+  const silent = ((app.doc.getElementById('main').innerHTML.match(/<p class="co-sum">[\s\S]*?<\/p>/) || [''])[0])
+    .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  r.check('a shape with no population over a page that shows invoices says it needs the server, not nothing',
+    /needs the server/.test(silent) && /lists no invoice/.test(silent), `headline: ${JSON.stringify(silent)}`);
+
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;
 }

@@ -36,8 +36,14 @@ M = [
   "        : `<span class=\"muted nw\">${esc(NO_NUMBER_NOTE)}</span>`}</span>",
   "      <span style=\"margin-left:auto\"><button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}')\">Edit</button></span>"),
  ("the Live sidebar item keeps its onclick",
-  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.project_no))}')\"`:''}>",
-  "      h += `<div class=\"citem\" onclick=\"liveJump('${jesc(st(r.p.project_no))}')\">"),
+  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\"`:''}>",
+  "      h += `<div class=\"citem\" onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\">"),
+ ("a save no longer re-baselines the drawer's snapshotted controls",
+  "      if(body.querySelectorAll){\n"
+  "        body.querySelectorAll('input,select,textarea').forEach(el=>{\n"
+  "          if(el.getAttribute && el.getAttribute('data-orig') !== null) el.setAttribute('data-orig', el.value || '');\n"
+  "        });\n"
+  "      }\n", ""),
  ("the row goes inert but stops saying why",
   "const NO_NUMBER_NOTE = 'no number \\u2014 give it one in chat to edit here';",
   "const NO_NUMBER_NOTE = '';"),

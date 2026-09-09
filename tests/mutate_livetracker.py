@@ -646,8 +646,13 @@ VIEW = [
  ("openProject no longer snapshots the bucket baseline from the control",
   "  const _trk = document.getElementById('f_tracker');\n"
   "  if(_trk) _trk.setAttribute('data-orig', _trk.value);\n", ""),
- ("a saved bucket is not re-baselined, so changing it back sends nothing",
-  "    if(trk) trk.setAttribute('data-orig', trk.value);\n", ""),
+ # RETIRED, deliberately: saveProject's own re-baseline of the bucket
+ #   ("a saved bucket is not re-baselined, so changing it back sends nothing",
+ #    "    if(trk) trk.setAttribute('data-orig', trk.value);\n" -> "")
+ # is gone, because doSave now re-baselines EVERY control carrying data-orig on
+ # its success path. The behaviour is carried by tests/mutate_view.py's
+ # "a save no longer re-baselines the drawer's snapshotted controls", killed by
+ # test_view.js's change-save-change-back check on the deal date.
  ("an unrecognised bucket is no longer explained in the form",
   "      ${knownBucket(p.tracker_status) ? '' : (st(p.tracker_status)",
   "      ${true ? '' : (st(p.tracker_status)"),
@@ -674,19 +679,31 @@ VIEW = [
  ("the sidebar goes back to one flat flag-sorted list",
   "  const groups = trackerBuckets().map(b=>({label: bucketLabel(b.key),\n"
   "    rows: rows.filter(r=>st(r.p.tracker_status)===b.key)}));\n"
-  "  groups.push({label: 'Status not recognised', rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});",
+  "  groups.push({label: 'Status not recognised', cap: false,\n"
+  "    rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});",
   "  const groups = [{label: '', rows: rows}];"),
  ("the unrecognised statuses fall out of the sidebar",
-  "  groups.push({label: 'Status not recognised', rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});\n", ""),
+  "  groups.push({label: 'Status not recognised', cap: false,\n"
+  "    rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});\n", ""),
+ ("the sidebar shows every row of a bucket, uncapped",
+  "    const shown = g.cap === false ? g.rows : g.rows.slice(0, LIVE_CAP);",
+  "    const shown = g.rows;"),
+ ("the sidebar stops saying it capped",
+  "    if(g.rows.length > shown.length){\n"
+  "      h += `<div class=\"muted\" style=\"padding:2px 12px 8px;font-size:12px\">Showing the first ${shown.length} of ${g.rows.length}</div>`;\n"
+  "    }\n", ""),
+ ("card ids drop the customer, so two customers' jobs collide",
+  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.company_id))}::${esc(st(p.project_no))}\"` : ''}>",
+  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.project_no))}\"` : ''}>"),
  ("the bucket headings are dropped",
   "    h += `<div class=\"due-group\" style=\"padding:8px 12px 2px\">${esc(g.label)}</div>`;\n", ""),
  ("a sidebar click opens the edit drawer again",
-  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.project_no))}')\"`:''}>",
+  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\"`:''}>",
   "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"openProject('${jesc(st(r.p.project_no))}')\"`:''}>"),
  ("the jump no longer marks the card it reached",
   "  el.classList.add('lt-hit');\n", ""),
  ("cards lose their ids, so the jump has nothing to reach",
-  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.project_no))}\"` : ''}>",
+  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.company_id))}::${esc(st(p.project_no))}\"` : ''}>",
   "  return `<div class=\"lt-card\">"),
 ]
 

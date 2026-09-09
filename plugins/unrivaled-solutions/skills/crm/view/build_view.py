@@ -1197,7 +1197,7 @@ function liveCard(r){
     </div>`;
   }).join('') || '<div class="muted" style="font-size:12px">No vendor legs.</div>';
 
-  return `<div class="lt-card"${hasProjectNo(p) ? ` id="lt-${esc(st(p.project_no))}"` : ''}>
+  return `<div class="lt-card"${hasProjectNo(p) ? ` id="lt-${esc(st(p.company_id))}::${esc(st(p.project_no))}"` : ''}>
     <div class="lt-top">
       <b class="nw">${esc(st(p.project_no)||'—')}</b>
       <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(p.company_id)}')">${esc(co?(co.display_name||p.company_id):st(p.company_id))}</a>
@@ -1517,8 +1517,10 @@ function _liveListLabel(key){
 /* A sidebar click used to open the EDIT drawer, skipping the card -- and the
    note on it, which is the substance of the screen. It now scrolls the card
    into view and marks it for a moment. Edit stays on the card. */
-function liveJump(pno){
-  const el = document.getElementById('lt-' + st(pno));
+function liveJump(cid, pno){
+  // keyed by customer AND number: two customers can hold one project number,
+  // and a number-only id sent the click to whichever card came first
+  const el = document.getElementById('lt-' + st(cid) + '::' + st(pno));
   if(!el) return;
   if(el.scrollIntoView) el.scrollIntoView({block:'start', behavior:'smooth'});
   el.classList.add('lt-hit');
@@ -1541,19 +1543,27 @@ function renderLiveList(){
   const known = new Set(trackerBuckets().map(b=>b.key));
   const groups = trackerBuckets().map(b=>({label: bucketLabel(b.key),
     rows: rows.filter(r=>st(r.p.tracker_status)===b.key)}));
-  groups.push({label: 'Status not recognised', rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});
-  let n = 0, h = '';
+  groups.push({label: 'Status not recognised', cap: false,
+    rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});
+  let h = '';
   groups.forEach(g=>{
     if(!g.rows.length) return;
     h += `<div class="due-group" style="padding:8px 12px 2px">${esc(g.label)}</div>`;
-    g.rows.forEach(r=>{
-      if(n++ >= 400) return;                 // the same cap every sibling list has
+    // Capped PER BUCKET at LIVE_CAP, exactly as the main pane caps its
+    // sections, so the two lists hold the same jobs in the same order. One
+    // global cap left a heading with nothing under it and dropped a job the
+    // main pane still showed.
+    const shown = g.cap === false ? g.rows : g.rows.slice(0, LIVE_CAP);
+    shown.forEach(r=>{
       const co = companyById[r.p.company_id];
-      h += `<div class="citem" ${hasProjectNo(r.p)?`onclick="liveJump('${jesc(st(r.p.project_no))}')"`:''}>
+      h += `<div class="citem" ${hasProjectNo(r.p)?`onclick="liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')"`:''}>
       <div class="cn">${hasProjectNo(r.p)?esc(st(r.p.project_no)):'<span class="muted">no number</span>'} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
       <div class="cm">${liveFlagLine(r)}</div>
     </div>`;
     });
+    if(g.rows.length > shown.length){
+      h += `<div class="muted" style="padding:2px 12px 8px;font-size:12px">Showing the first ${shown.length} of ${g.rows.length}</div>`;
+    }
   });
   document.getElementById('clist').innerHTML = h || '<div class="muted" style="padding:14px">No live projects.</div>';
 }
@@ -2029,7 +2039,12 @@ function companySummary(c){
     if(!(invoicesByCo[c.company_id]||[]).length) return '';
     return `<p class="co-sum"><span class="muted">needs the server · what this customer owes is a server figure, and this page has none for it</span> ${see}</p>`;
   }
-  if(!sh.population) return '';
+  // The server lists no invoice for this customer. If the page still shows
+  // some (a build and a store that disagree), the line must not go quiet
+  // above a table of money: say the figure is the server's and it gave none.
+  if(!sh.population) return (invoicesByCo[c.company_id]||[]).length
+    ? `<p class="co-sum"><span class="muted">needs the server · the server lists no invoice for this customer, so it has no figure for the ones shown below</span> ${see}</p>`
+    : '';
   const odExc = (od && od.excluded) || {};
   // counted == 0 on the lateness shape means every unpaid invoice lacked a
   // usable due date, or there is no unpaid invoice at all -- a paid one is
@@ -2274,13 +2289,10 @@ async function saveProject(pnoArg){
   const ok = await doSave('update_project', {project_no: pno, fields}, (r)=>{
     const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
     Object.assign(p, r.project || fields);
-    // Re-baseline. doSave never re-renders #dbody, so without this the control
-    // still measures against the value it had when the drawer opened: change
-    // the bucket, save, change it BACK in the same session, and the second
-    // save matches the stale baseline, sends nothing, and flashes "Saved" over
-    // a store that kept the first change. The rename path already does this
-    // for f_pno.
-    if(trk) trk.setAttribute('data-orig', trk.value);
+    // The bucket's baseline used to be re-taken HERE, alone. doSave now
+    // re-baselines every control carrying data-orig on its success path --
+    // one rule for the bucket, the deal date and every other snapshotted
+    // control -- so a change-save-change-back sequence sends the second change.
   });
   // A rename changes the project_no baked into this drawer's own button
   // handlers (Delete, + Add shipment) -- reopen so they point at the new
@@ -2926,6 +2938,18 @@ async function doSave(tool, args, applyLocal){
     const r = await CRM.call(tool, args);
     if (r && r.ok){
       applyLocal(r);
+      // Re-baseline every snapshotted control against what is now on disk. A
+      // date changed, saved, changed BACK and saved again sent nothing on the
+      // second save: dateIfChanged compared against the baseline taken when
+      // the drawer opened, so the store kept the first change under a green
+      // "Saved". saveProject did this for the tracker bucket alone; it is one
+      // rule for every control that carries data-orig, in the one place every
+      // save passes through.
+      if(body.querySelectorAll){
+        body.querySelectorAll('input,select,textarea').forEach(el=>{
+          if(el.getAttribute && el.getAttribute('data-orig') !== null) el.setAttribute('data-orig', el.value || '');
+        });
+      }
       // The work is on disk, so the drawer is no longer dirty. The form was
       // locked for the whole round trip, so there is nothing newer to lose.
       // Not every save path closes -- saveProject deliberately stays open so
@@ -3285,6 +3309,37 @@ def _attach_metrics(data, store_dir):
         _srv.STORE = prev
 
 
+def _drop_archived_project_records(data):
+    """Hide what the server hides. archive_project hides the project and every
+    shipment and invoice linked to it from every read tool, but the build
+    shipped them: the page opened with an invoice the server does not list,
+    so the customer's headline (the server's shape) said nothing for it while
+    the table beneath showed it $7,777 overdue -- and the first live refresh
+    made it vanish. Same rule, from the server's own functions, so there is
+    one definition. If the server module cannot be imported the records are
+    left in, as the shapes are, and the page says it needs the server."""
+    mcp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mcp")
+    if mcp_dir not in sys.path:
+        sys.path.insert(0, mcp_dir)
+    try:
+        import server as _srv
+    except Exception as ex:                                       # noqa: BLE001
+        print(f"WARNING: archived-project filter not applied ({type(ex).__name__}: {ex})",
+              file=sys.stderr)
+        return
+    # falsy keys dropped, as _archived_project_nos does: "" would hide every
+    # unlinked invoice in the store
+    arch = {k for p in data["projects"] if p.get("archived")
+            and (k := _srv._key(p.get("project_no")))}
+    data["projects"] = [p for p in data["projects"] if not p.get("archived")]
+    if not arch:
+        return
+    data["invoices"] = [i for i in data["invoices"]
+                        if _srv._key(i.get("project_no")) not in arch]
+    data["shipments"] = [x for x in data["shipments"]
+                         if not _srv._shipment_hidden(x, arch)]
+
+
 def render_html(store_dir, token=""):
     """Build the self-contained HTML app for the given store, embedding
     `token` as the bridge auth secret (empty string if none -- the app will
@@ -3335,6 +3390,7 @@ def render_html(store_dir, token=""):
     for k in ["contacts", "projects", "shipments", "invoices"]:
         data[k] = [x for x in data[k] if x.get("company_id") not in arch]
     data["vendors"] = [v for v in data["vendors"] if not v.get("archived")]
+    _drop_archived_project_records(data)
     _attach_metrics(data, store_dir)
     # The `dismissed` flag on a row is stamped by an IMPORT. A dismissal made
     # through dismiss_tracker_row lands only in

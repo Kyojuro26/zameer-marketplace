@@ -457,8 +457,15 @@ async function run(crmDir) {
   const live = JSON.parse(ev("JSON.stringify(liveRows().map(x=>String(x.p.project_no)))"));
   r.check('a project with no tracker status is not live work',
     !live.includes('4504'), `got ${JSON.stringify(live)}`);
+  // Injected at run time: the build now drops archived projects before the
+  // page exists, so the fixture's own 4505 never reaches DATA and a check on
+  // it would pass whatever liveRows did. The view's filter still matters for
+  // anything that arrives through a refresh.
+  const withArch = JSON.parse(ev("(function(){ DATA.projects.push({company_id:'acme', project_no:'4505', status:'won',"
+    + " archived:true, tracker_status:'action_admin', open_orders_notes:'Archived.'});"
+    + " const l = liveRows().map(x=>String(x.p.project_no)); DATA.projects.pop(); return JSON.stringify(l); })()"));
   r.check('an archived project is not live work either',
-    !live.includes('4505'), `got ${JSON.stringify(live)}`);
+    !withArch.includes('4505') && withArch.length === live.length, `got ${JSON.stringify(withArch)}`);
   const legs4501 = JSON.parse(ev(
     "JSON.stringify(liveRows().find(x=>String(x.p.project_no)==='4501')"
     + ".legs.map(l=>l.vendor_po_raw))"));
@@ -568,7 +575,7 @@ async function run(crmDir) {
   const mainNow = app.doc.getElementById('main').innerHTML;
   const sideNow = app.doc.getElementById('clist').innerHTML;
   const mainOrder = [...mainNow.matchAll(/<div class="lt-card" id="lt-([^"]*)">/g)].map(m => m[1]);
-  const sideOrder = [...sideNow.matchAll(/onclick="liveJump\('([^']*)'\)"/g)].map(m => m[1]);
+  const sideOrder = [...sideNow.matchAll(/onclick="liveJump\('([^']*)','([^']*)'\)"/g)].map(m => `${m[1]}::${m[2]}`);
   r.check('every card on the page carries an id the sidebar can reach',
     mainOrder.length >= 6 && mainOrder.length === (mainNow.match(/class="lt-card" id=/g) || []).length,
     `ids: ${JSON.stringify(mainOrder)}`);
@@ -576,7 +583,7 @@ async function run(crmDir) {
     mainOrder.length >= 6 && JSON.stringify(sideOrder) === JSON.stringify(mainOrder),
     `main=${JSON.stringify(mainOrder)} side=${JSON.stringify(sideOrder)}`);
   r.check('within a bucket the flagged job still comes first',
-    mainOrder.indexOf('4501') > -1 && mainOrder.indexOf('4501') < mainOrder.indexOf('4506'),
+    mainOrder.indexOf('acme::4501') > -1 && mainOrder.indexOf('acme::4501') < mainOrder.indexOf('mer::4506'),
     `main=${JSON.stringify(mainOrder)}`);
   r.check("the sidebar carries the bucket headings, in the legend's words",
     /class="due-group[^>]*>Waiting on the office/.test(sideNow) && /class="due-group[^>]*>With the rep/.test(sideNow),
@@ -585,14 +592,34 @@ async function run(crmDir) {
     /class="due-group[^>]*>Status not recognised/.test(sideNow)
       && sideNow.indexOf('Status not recognised') > sideNow.indexOf('With the rep'),
     'the main pane puts them last; the sidebar must agree');
-  ev("liveJump('4503');");
+  ev("liveJump('mer','4503');");
   r.check('a sidebar click shows the card rather than opening the edit drawer',
     !ev("document.getElementById('drawer').classList.contains('open')")
-      && ev("document.getElementById('lt-4503').classList.contains('lt-hit')"),
+      && ev("document.getElementById('lt-mer::4503').classList.contains('lt-hit')"),
     `drawer open=${ev("document.getElementById('drawer').classList.contains('open')")}`);
   r.check('the card it marks is the one on the page for that job',
-    /<div class="lt-card" id="lt-4503">/.test(mainNow) && /openProject\('4503'\)/.test(mainNow),
+    /<div class="lt-card" id="lt-mer::4503">/.test(mainNow) && /openProject\('4503'\)/.test(mainNow),
     'Edit stays on the card');
+
+  // ---- two customers, one project number -------------------------------------
+  //
+  // Review finding: ids were keyed on the number alone, so two customers
+  // holding one number rendered two cards with one id, and the sidebar click
+  // for the second went to whichever card came first in the page.
+  ev("DATA.projects.push({company_id:'mer', project_no:'4501', status:'won', archived:false,"
+     + " tracker_status:'action_owner', open_orders_notes:'same number, other customer'}); renderMain(); renderList();");
+  const dupMain = app.doc.getElementById('main').innerHTML;
+  const dupIds = [...dupMain.matchAll(/<div class="lt-card" id="lt-([^"]*)">/g)].map(m => m[1]);
+  r.check('two customers sharing a number get two distinct card ids',
+    dupIds.includes('acme::4501') && dupIds.includes('mer::4501') && new Set(dupIds).size === dupIds.length,
+    `ids: ${JSON.stringify(dupIds)}`);
+  r.check("the sidebar entry for the second customer's job targets that customer's card",
+    /onclick="liveJump\('mer','4501'\)"/.test(app.doc.getElementById('clist').innerHTML));
+  ev("liveJump('mer','4501');");
+  r.check('and the jump marks that card, not the other customer\'s',
+    ev("document.getElementById('lt-mer::4501').classList.contains('lt-hit')")
+      && !ev("document.getElementById('lt-acme::4501').classList.contains('lt-hit')"));
+  ev("DATA.projects.pop(); renderMain(); renderList();");
 
   // ---- the note -------------------------------------------------------------
   // SOURCE CHECK: a CSS claim, and this shim does no layout.
@@ -1402,13 +1429,18 @@ async function run(crmDir) {
       year: 2026, archived: false, tracker_status: 'action_admin',
       date: '2026-07-01', open_orders_notes: 'bulk row ' + i });
   }
+  // one job in a SECOND bucket, sorting after the 430: a global sidebar cap
+  // dropped it while the main pane, capped per section, still showed it
+  many.push({ company_id: 'acme', project_no: 'Z1', status: 'won', year: 2026,
+    archived: false, tracker_status: 'action_owner', date: '2026-07-01',
+    open_orders_notes: 'the one owner row' });
   fs.writeFileSync(path.join(bigDir, 'projects.json'), JSON.stringify(many));
   fs.writeFileSync(path.join(bigDir, 'shipments.json'), '[]');
   fs.writeFileSync(path.join(bigDir, 'tracker_unlinked.json'), '[]');
   const bigApp = launch({ crmDir, storeDir: bigDir, outDir: tmp, mode: 'http' });
   const bigMain = bigApp.doc.getElementById('main').innerHTML;
-  r.check('the main pane stops at the same 400 its siblings use',
-    (bigMain.match(/class="lt-card"/g) || []).length === 400,
+  r.check('the main pane stops at the same 400 its siblings use, per section',
+    (bigMain.match(/class="lt-card"/g) || []).length === 401,
     `got ${(bigMain.match(/class="lt-card"/g) || []).length} cards -- this is `
     + 'the operator\'s own sheet, and a week where he colours the whole table '
     + 'renders every card with every leg');
@@ -1416,8 +1448,23 @@ async function run(crmDir) {
     /Showing\s+the first 400 of 430/.test(bigMain),
     'a silent truncation on the daily screen reads as "that is everything"');
   r.check('the header still counts them all',
-    /430 active/.test(bigMain),
+    /431 active/.test(bigMain),
     'the count is what tells him the list is longer than the page');
+  // Review finding: the sidebar capped the whole list at 400, so it dropped the
+  // owner row the main pane showed and left its heading standing over nothing,
+  // and said nowhere that it had capped.
+  bigApp.eval("renderList();");
+  const bigSide = bigApp.doc.getElementById('clist').innerHTML;
+  const bigMainIds = [...bigMain.matchAll(/<div class="lt-card" id="lt-([^"]*)">/g)].map(m => m[1]);
+  const bigSideIds = [...bigSide.matchAll(/onclick="liveJump\('([^']*)','([^']*)'\)"/g)].map(m => `${m[1]}::${m[2]}`);
+  r.check('the sidebar caps per bucket like the main pane, so both hold the same 401 jobs in the same order',
+    bigSideIds.length === 401 && JSON.stringify(bigSideIds) === JSON.stringify(bigMainIds),
+    `sidebar ${bigSideIds.length} items, main ${bigMainIds.length} cards; last sidebar=${bigSideIds.slice(-1)} main=${bigMainIds.slice(-1)}`);
+  r.check('the owner row sits under its own heading, and no heading stands over nothing',
+    /class="due-group[^>]*>With the rep<\/div>\s*<div class="citem"/.test(bigSide)
+      && (bigSide.match(/class="due-group/g) || []).length === 2);
+  r.check('and the sidebar says it capped, like the main pane does',
+    /Showing the first 400 of 430/.test(bigSide));
 
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;

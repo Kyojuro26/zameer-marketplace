@@ -155,6 +155,14 @@ M = [
   "      if(filter === 'receivable' || (selected && filter !== 'live' && filter !== 'project')) renderMain(); });",
   "    .then(() => { metricsRefresh = null; kpis(); if(filter === 'receivable') renderMain(); });"),
 
+ ("the build ships the invoices and legs of archived projects",
+  "    _drop_archived_project_records(data)\n", ""),
+ ("a customer the server lists no invoice for reads as settled",
+  "  if(!sh.population) return (invoicesByCo[c.company_id]||[]).length\n"
+  "    ? `<p class=\"co-sum\"><span class=\"muted\">needs the server · the server lists no invoice for this customer, so it has no figure for the ones shown below</span> ${see}</p>`\n"
+  "    : '';",
+  "  if(!sh.population) return '';"),
+
  # ---- wiring -------------------------------------------------------------
  ("the receivables KPI stops navigating",
   "    [recvL, recvN, 'receivable'],",

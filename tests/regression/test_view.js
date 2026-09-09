@@ -178,10 +178,23 @@ async function run(crmDir) {
   safe('openProject', '4521');
   if (app.el('f_date')) app.el('f_date').value = '2026-03-01';
   app.resetCalls();
-  safe('saveProject', '4521');
+  // awaited: the re-baseline happens on the save's success path, and the real
+  // form is locked until then -- an un-awaited second save here would race a
+  // window the operator cannot reach
+  await app.fn('saveProject')('4521');
   const proj2 = app.calls().find(c => c.tool === 'update_project');
   r.check('a deal date he did change is sent',
     proj2 && proj2.args.fields.date === '2026-03-01', proj2 && JSON.stringify(proj2.args.fields.date));
+  // Review finding: change it BACK and save again. The baseline was taken when
+  // the drawer opened, so the second save saw "no change" and sent nothing --
+  // the store kept the first change under a green "Saved".
+  if (app.el('f_date')) app.el('f_date').value = '2026-02-29';
+  app.resetCalls();
+  await app.fn('saveProject')('4521');
+  const proj3 = app.calls().find(c => c.tool === 'update_project');
+  r.check('a date changed back after a save is sent again, not read as unchanged',
+    proj3 && proj3.args.fields.date === '2026-02-29',
+    proj3 && `sent: ${JSON.stringify(proj3.args.fields.date)} (key present: ${'date' in proj3.args.fields})`);
   safe('closeDrawer');
   // ---- two labels ----------------------------------------------------------------
   safe('setFilter', 'all'); safe('select', 'acme');
@@ -233,9 +246,9 @@ async function run(crmDir) {
   r.check('the Live card for a numberless job has no Edit button, and says why',
     card && !/openProject\(/.test(card) && /give it one in chat to edit here/.test(card), card.slice(0, 300));
   side = (app.el('clist') || EMPTY).innerHTML;
-  // any handler at all with an empty or 'null' argument is a dead click
+  // any handler at all whose LAST argument is empty or 'null' is a dead click
   r.check('the Live sidebar item for it carries no click',
-    /citem/.test(side) && !/onclick="\w+\('(null|)'\)"/.test(side), side.slice(0, 200));
+    /citem/.test(side) && !/onclick="\w+\([^)]*'(null|)'\)"/.test(side), side.slice(0, 200));
   // and the entry point itself: a click that does slip through opens nothing
   safe('closeDrawer');
   safe('openProject', ''); safe('openProject', 'null');
