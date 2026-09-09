@@ -693,8 +693,13 @@ VIEW = [
   "      h += `<div class=\"muted\" style=\"padding:2px 12px 8px;font-size:12px\">Showing the first ${shown.length} of ${g.rows.length}</div>`;\n"
   "    }\n", ""),
  ("card ids drop the customer, so two customers' jobs collide",
-  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.company_id))}::${esc(st(p.project_no))}\"` : ''}>",
+  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(encodeURIComponent(st(p.company_id)))}::${esc(encodeURIComponent(st(p.project_no)))}\"` : ''}>",
   "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.project_no))}\"` : ''}>"),
+ ("the id parts are joined raw, so a company id containing the separator collides",
+  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(encodeURIComponent(st(p.company_id)))}::${esc(encodeURIComponent(st(p.project_no)))}\"` : ''}>\n"
+  "    <div class=\"lt-top\">",
+  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.company_id))}::${esc(st(p.project_no))}\"` : ''}>\n"
+  "    <div class=\"lt-top\">"),
  ("the bucket headings are dropped",
   "    h += `<div class=\"due-group\" style=\"padding:8px 12px 2px\">${esc(g.label)}</div>`;\n", ""),
  ("a sidebar click opens the edit drawer again",
@@ -703,7 +708,7 @@ VIEW = [
  ("the jump no longer marks the card it reached",
   "  el.classList.add('lt-hit');\n", ""),
  ("cards lose their ids, so the jump has nothing to reach",
-  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.company_id))}::${esc(st(p.project_no))}\"` : ''}>",
+  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(encodeURIComponent(st(p.company_id)))}::${esc(encodeURIComponent(st(p.project_no)))}\"` : ''}>",
   "  return `<div class=\"lt-card\">"),
 ]
 

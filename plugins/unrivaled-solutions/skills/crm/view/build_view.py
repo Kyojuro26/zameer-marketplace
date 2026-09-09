@@ -1197,7 +1197,7 @@ function liveCard(r){
     </div>`;
   }).join('') || '<div class="muted" style="font-size:12px">No vendor legs.</div>';
 
-  return `<div class="lt-card"${hasProjectNo(p) ? ` id="lt-${esc(st(p.company_id))}::${esc(st(p.project_no))}"` : ''}>
+  return `<div class="lt-card"${hasProjectNo(p) ? ` id="lt-${esc(encodeURIComponent(st(p.company_id)))}::${esc(encodeURIComponent(st(p.project_no)))}"` : ''}>
     <div class="lt-top">
       <b class="nw">${esc(st(p.project_no)||'—')}</b>
       <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(p.company_id)}')">${esc(co?(co.display_name||p.company_id):st(p.company_id))}</a>
@@ -1519,8 +1519,10 @@ function _liveListLabel(key){
    into view and marks it for a moment. Edit stays on the card. */
 function liveJump(cid, pno){
   // keyed by customer AND number: two customers can hold one project number,
-  // and a number-only id sent the click to whichever card came first
-  const el = document.getElementById('lt-' + st(cid) + '::' + st(pno));
+  // and a number-only id sent the click to whichever card came first. Both
+  // parts URI-encoded, so a company id containing "::" cannot collide with
+  // another pair that reads the same once joined.
+  const el = document.getElementById('lt-' + encodeURIComponent(st(cid)) + '::' + encodeURIComponent(st(pno)));
   if(!el) return;
   if(el.scrollIntoView) el.scrollIntoView({block:'start', behavior:'smooth'});
   el.classList.add('lt-hit');
@@ -1591,7 +1593,9 @@ function renderList(){
     // denominator sits beside it, and nothing-priced is never $0.
     const cm=c.metrics, csh=cm&&cm.exposure_open_receivable_usd, cod=cm&&cm.oldest_overdue_days;
     const hasInv=(invoicesByCo[c.company_id]||[]).length>0;
-    const needsServer=!csh&&hasInv, moneyShown=!!(csh&&csh.population);
+    // no shape, or a shape that lists no invoice while the page shows some:
+    // the headline says "needs the server" in both cases, and so does this
+    const needsServer=hasInv&&(!csh||!csh.population), moneyShown=!!(csh&&csh.population);
     const owedLine = needsServer ? '<span class="muted">needs the server</span>'
       : !moneyShown ? `<span>${esc(c.role)}</span>`
       : !csh.counted ? `<span class="owed">nothing priced · ${csh.population} open</span>`
@@ -3384,13 +3388,18 @@ def render_html(store_dir, token=""):
             + "\n".join(problems))
     for p in problems:
         print(f"WARNING: {p}", file=sys.stderr)
+    # FIRST, while data["projects"] still holds every company's projects: the
+    # server's archived-number set is store-wide, so an archived project under
+    # an ARCHIVED customer still hides a live customer's invoice of that number
+    # from every read tool. Computed after the company scrub below, that number
+    # was missing from the set and the build shipped what a refresh then hid.
+    _drop_archived_project_records(data)
     # archived companies never ship into the demo bootstrap
     arch = {c["company_id"] for c in data["companies"] if c.get("archived")}
     data["companies"] = [c for c in data["companies"] if not c.get("archived")]
     for k in ["contacts", "projects", "shipments", "invoices"]:
         data[k] = [x for x in data[k] if x.get("company_id") not in arch]
     data["vendors"] = [v for v in data["vendors"] if not v.get("archived")]
-    _drop_archived_project_records(data)
     _attach_metrics(data, store_dir)
     # The `dismissed` flag on a row is stamped by an IMPORT. A dismissal made
     # through dismiss_tracker_row lands only in

@@ -157,6 +157,24 @@ M = [
 
  ("the build ships the invoices and legs of archived projects",
   "    _drop_archived_project_records(data)\n", ""),
+ ("the archived-project filter runs after the company scrub, missing an archived customer's numbers",
+  "    _drop_archived_project_records(data)\n"
+  "    # archived companies never ship into the demo bootstrap\n"
+  "    arch = {c[\"company_id\"] for c in data[\"companies\"] if c.get(\"archived\")}\n"
+  "    data[\"companies\"] = [c for c in data[\"companies\"] if not c.get(\"archived\")]\n"
+  "    for k in [\"contacts\", \"projects\", \"shipments\", \"invoices\"]:\n"
+  "        data[k] = [x for x in data[k] if x.get(\"company_id\") not in arch]\n"
+  "    data[\"vendors\"] = [v for v in data[\"vendors\"] if not v.get(\"archived\")]\n",
+  "    # archived companies never ship into the demo bootstrap\n"
+  "    arch = {c[\"company_id\"] for c in data[\"companies\"] if c.get(\"archived\")}\n"
+  "    data[\"companies\"] = [c for c in data[\"companies\"] if not c.get(\"archived\")]\n"
+  "    for k in [\"contacts\", \"projects\", \"shipments\", \"invoices\"]:\n"
+  "        data[k] = [x for x in data[k] if x.get(\"company_id\") not in arch]\n"
+  "    data[\"vendors\"] = [v for v in data[\"vendors\"] if not v.get(\"archived\")]\n"
+  "    _drop_archived_project_records(data)\n"),
+ ("the sidebar goes quiet where the headline says it needs the server",
+  "    const needsServer=hasInv&&(!csh||!csh.population), moneyShown=!!(csh&&csh.population);",
+  "    const needsServer=!csh&&hasInv, moneyShown=!!(csh&&csh.population);"),
  ("a customer the server lists no invoice for reads as settled",
   "  if(!sh.population) return (invoicesByCo[c.company_id]||[]).length\n"
   "    ? `<p class=\"co-sum\"><span class=\"muted\">needs the server · the server lists no invoice for this customer, so it has no figure for the ones shown below</span> ${see}</p>`\n"

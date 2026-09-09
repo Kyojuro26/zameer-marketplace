@@ -620,6 +620,21 @@ async function run(crmDir) {
     ev("document.getElementById('lt-mer::4501').classList.contains('lt-hit')")
       && !ev("document.getElementById('lt-acme::4501').classList.contains('lt-hit')"));
   ev("DATA.projects.pop(); renderMain(); renderList();");
+  // a company id containing the separator itself must not collide with a
+  // different (company, number) pair that reads the same once joined
+  ev("DATA.companies.push({company_id:'a::b', display_name:'AB Co', role:'customer', archived:false},"
+     + " {company_id:'a', display_name:'A Co', role:'customer', archived:false}); reindex();"
+     + " DATA.projects.push({company_id:'a::b', project_no:'c', status:'won', archived:false, tracker_status:'action_admin'},"
+     + " {company_id:'a', project_no:'b::c', status:'won', archived:false, tracker_status:'action_admin'}); renderMain(); renderList();");
+  const sepIds = [...app.doc.getElementById('main').innerHTML.matchAll(/<div class="lt-card" id="lt-([^"]*)">/g)].map(m => m[1]);
+  r.check('a company id containing "::" and a number containing "::" do not share a card id',
+    sepIds.length >= 2 && new Set(sepIds).size === sepIds.length, `ids: ${JSON.stringify(sepIds)}`);
+  ev("liveJump('a','b::c');");
+  const hitIds = JSON.parse(ev("JSON.stringify(Object.keys(document._els).filter(k=>k.startsWith('lt-')&&document._els[k].classList.contains('lt-hit')))"));
+  r.check('and the jump for one of them marks exactly one card',
+    hitIds.filter(k => /b%3A%3Ac|b::c/.test(k)).length === 1 && !hitIds.some(k => /^lt-a%3A%3Ab::c$|^lt-a::b::c$/.test(k) && !/b%3A%3Ac/.test(k)),
+    `marked: ${JSON.stringify(hitIds)}`);
+  ev("DATA.projects.pop(); DATA.projects.pop(); DATA.companies.pop(); DATA.companies.pop(); reindex(); renderMain(); renderList();");
 
   // ---- the note -------------------------------------------------------------
   // SOURCE CHECK: a CSS claim, and this shim does no layout.

@@ -439,13 +439,20 @@ async function run(crmDir) {
     const dirA = path.join(tmp, 'store-arch');
     fs.mkdirSync(dirA, { recursive: true });
     const wA = (n, v) => fs.writeFileSync(path.join(dirA, n + '.json'), JSON.stringify(v, null, 2));
-    wA('companies', [{ company_id: 'archlink', display_name: 'Archived Link Co', role: 'customer', domains: [], locations: [], archived: false }]);
+    wA('companies', [
+      { company_id: 'archlink', display_name: 'Archived Link Co', role: 'customer', domains: [], locations: [], archived: false },
+      // an ARCHIVED customer whose archived project number a live customer's
+      // invoice also carries: the server's archived-number set is store-wide,
+      // and the build computed its own set after this company was scrubbed
+      { company_id: 'xco', display_name: 'Gone Co', role: 'customer', domains: [], locations: [], archived: true }]);
     wA('projects', [
       { company_id: 'archlink', project_no: 'A1', status: 'won', year: 2026, revenue: 7777, archived: true },
-      { company_id: 'archlink', project_no: 'A2', status: 'won', year: 2026, revenue: 100, archived: false }]);
+      { company_id: 'archlink', project_no: 'A2', status: 'won', year: 2026, revenue: 100, archived: false },
+      { company_id: 'xco', project_no: 'A9', status: 'won', year: 2026, revenue: 555, archived: true }]);
     wA('invoices', [
       { company_id: 'archlink', invoice_no: 'ARCH-7', project_no: 'A1', payment_status: 'open', invoice_date: '2025-01-01' },
-      { company_id: 'archlink', invoice_no: 'LIVE-8', project_no: 'A2', payment_status: 'open', invoice_date: '2026-06-01' }]);
+      { company_id: 'archlink', invoice_no: 'LIVE-8', project_no: 'A2', payment_status: 'open', invoice_date: '2026-06-01' },
+      { company_id: 'archlink', invoice_no: 'CROSS-9', project_no: 'A9', payment_status: 'open', invoice_date: '2025-02-01' }]);
     wA('shipments', [
       { shipment_id: 'A1-L1', company_id: 'archlink', project_no: 'A1', all_project_nos: ['A1'], stage: 'Ordered', vendor_po_raw: 'VPO-ARCH' },
       { shipment_id: 'A2-L1', company_id: 'archlink', project_no: 'A2', all_project_nos: ['A2'], stage: 'Ordered', vendor_po_raw: 'VPO-LIVE' }]);
@@ -455,6 +462,8 @@ async function run(crmDir) {
     const mainA = appA.doc.getElementById('main').innerHTML;
     r.check('an invoice on an archived project is not on the page, as it is not in any read tool',
       !/ARCH-7/.test(mainA) && /LIVE-8/.test(mainA), 'the server hides it; the page must not show money the server does not list');
+    r.check("nor is one keyed to an ARCHIVED customer's archived project number",
+      !/CROSS-9/.test(mainA), 'the server keys archived numbers store-wide; a set computed after the company scrub missed this one');
     r.check('nor is the archived project, nor its leg',
       !/>A1</.test(mainA) && !/VPO-ARCH/.test(mainA) && /VPO-LIVE/.test(mainA));
     const headA = ((mainA.match(/<p class="co-sum">[\s\S]*?<\/p>/) || [''])[0]).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
@@ -473,6 +482,11 @@ async function run(crmDir) {
     .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
   r.check('a shape with no population over a page that shows invoices says it needs the server, not nothing',
     /needs the server/.test(silent) && /lists no invoice/.test(silent), `headline: ${JSON.stringify(silent)}`);
+  ev("renderList();");
+  const silentSide = (app.doc.getElementById('clist').innerHTML.split('class="citem').find(x => x.includes('Ace')) || '')
+    .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  r.check('and the sidebar says the same, rather than falling back to the role line',
+    /needs the server/.test(silentSide) && !/\$/.test(silentSide), `item: ${silentSide}`);
 
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;
