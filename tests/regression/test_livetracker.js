@@ -130,6 +130,11 @@ function seedStore(dir) {
     { shipment_id: '4503-L1', company_id: 'mer', project_no: '4503',
       all_project_nos: ['4503'], vendor_po_raw: 'VPO-F',
       ship_date: 'US Pickup', stage: 'Ordered', linked_to_project: true },
+    // no date, not yet late: the only thing wrong with 4503 is AMBER
+    { shipment_id: '4503-L2', company_id: 'mer', project_no: '4503',
+      all_project_nos: ['4503'], vendor_po_raw: 'VPO-F2',
+      ship_date: null, stage: 'Ordered', linked_to_project: true },
+    // a future date: 4506 is clean, and the one flag-free job in its bucket
     { shipment_id: '4506-L1', company_id: 'mer', project_no: '4506',
       all_project_nos: ['4506'], vendor_po_raw: 'VPO-G',
       ship_date: '2026-11-01', stage: 'Ordered', linked_to_project: true },
@@ -321,39 +326,97 @@ async function run(crmDir) {
   // ---- the flags ------------------------------------------------------------
   const flags = (pno) => JSON.parse(ev(
     `JSON.stringify((liveRows().find(x=>String(x.p.project_no)==='${pno}')||{}).flags)`));
+  const NONE = JSON.stringify({ red: [], amber: [] });
   const f4501 = flags('4501');
-  r.check('a passed ship date is flagged', f4501.includes('ship date passed'));
-  r.check('a passed EST is flagged separately', f4501.includes('EST passed'));
-  r.check('a leg with no date is flagged', f4501.includes('leg with no date'),
-    'the untracked leg is the one that goes wrong quietly');
+  r.check('a passed ship date is flagged, red', f4501.red.includes('ship date passed'));
+  r.check('a passed EST is flagged separately, red', f4501.red.includes('EST passed'));
+  r.check('a leg with no date is flagged, amber', f4501.amber.includes('leg with no date')
+    && !f4501.red.includes('leg with no date'),
+    'the untracked leg is the one that goes wrong quietly -- but it is not late yet');
   r.check('two passed legs produce ONE flag, not two',
-    f4501.filter(x => x === 'ship date passed').length === 1,
+    f4501.red.filter(x => x === 'ship date passed').length === 1,
     `got ${JSON.stringify(f4501)} -- a row with five late legs would wear five `
     + 'identical badges and read as noise');
-  r.check('a TBD start date is flagged',
-    JSON.stringify(flags('4502')) === JSON.stringify(['start TBD']),
+  r.check('a TBD start date is flagged, red',
+    JSON.stringify(flags('4502')) === JSON.stringify({ red: ['start TBD'], amber: [] }),
     `got ${JSON.stringify(flags('4502'))}`);
   r.check('a clean row carries no flags',
-    JSON.stringify(flags('4503')) === '[]',
+    JSON.stringify(flags('4506')) === NONE,
+    `got ${JSON.stringify(flags('4506'))} -- a future ship date is not lateness`);
+  r.check('unparseable text is not a late date, and an undated leg is amber only',
+    JSON.stringify(flags('4503')) === JSON.stringify({ red: [], amber: ['leg with no date'] }),
     `got ${JSON.stringify(flags('4503'))} -- "US Pickup" is not a late date`);
   r.check('the most-flagged row sorts first',
     ev("String(liveRows()[0].p.project_no)") === '4501',
     'the screen exists to answer what needs a person today');
 
+  // ---- two severities: late now, and worth a look ---------------------------
+  //
+  // "leg with no date" fires on every unshipped leg -- 8 of 9 cards on the
+  // real store -- so "9 need a look" and the flag-count sort told him nothing,
+  // and a leg that was merely undated read bold red beside one that was late.
+  // Red is late now; amber is a leg with no date yet. Only red is counted.
+  ev("renderMain(); renderList();");
+  const mainSev = app.doc.getElementById('main').innerHTML;
+  const cardSev = (marker) => (mainSev.split(/<div class="lt-card"[^>]*>/).find(c => c.includes(marker)) || '');
+  const redRows = JSON.parse(ev("String(liveRows().filter(r=>r.flags.red.length).length)"));
+  const amberOnly = JSON.parse(ev("JSON.stringify(liveRows().filter(r=>!r.flags.red.length&&r.flags.amber.length).map(r=>String(r.p.project_no)))"));
+  r.check('the fixture has an amber-only job, so the count below can be wrong',
+    JSON.stringify(amberOnly) === '["4503"]', `amber-only: ${JSON.stringify(amberOnly)}`);
+  const need = (/(\d+) need a look/.exec(mainSev) || [])[1];
+  r.check('"need a look" counts the jobs that are late now, and not the amber ones',
+    need === String(redRows) && redRows === 3, `header says ${need}, red rows ${redRows}`);
+  const c4503sev = cardSev('>4503<');
+  r.check('an amber-only job wears an amber badge, not a red one',
+    /badge b-pending">leg with no date/.test(c4503sev) && !/b-lost/.test(c4503sev),
+    c4503sev.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160));
+  const c4501sev = cardSev('Two of the four frames short-shipped');
+  r.check('a late job wears red for the passed dates and amber for the undated leg',
+    /badge b-lost">ship date passed/.test(c4501sev) && /badge b-pending">leg with no date/.test(c4501sev));
+  const legLine = (card, po) => (card.split('<div class="lt-leg">').find(l => l.includes(po)) || '');
+  r.check('an undated leg is amber on the row; a passed one stays red',
+    /lt-warn/.test(legLine(c4501sev, 'VPO-D')) && !/lt-bad/.test(legLine(c4501sev, 'VPO-D'))
+      && /lt-bad/.test(legLine(c4501sev, 'VPO-A')),
+    `VPO-D: ${legLine(c4501sev, 'VPO-D').slice(0, 120)}`);
+  const order = JSON.parse(ev("JSON.stringify(liveRows().map(r=>String(r.p.project_no)))"));
+  r.check('red rows sort before amber-only rows, which sort before clean ones',
+    order.indexOf('4503') > order.indexOf('4508') && order.indexOf('4503') > order.indexOf('4502')
+      && order.indexOf('4503') < order.indexOf('4506'),
+    `order: ${JSON.stringify(order)}`);
+  // The fixture's amber-only job also has the lowest number among the rows it
+  // ties with on red, so the number tiebreak alone would put it first and the
+  // check above cannot see the amber tiebreak. A clean job with a LOWER number
+  // is pushed in for one call: amber-only must still sort ahead of it.
+  const withClean = JSON.parse(ev("(function(){ DATA.projects.push({company_id:'mer', project_no:'4500', status:'won',"
+    + " tracker_status:'awaiting_materials', archived:false});"
+    + " const o = liveRows().map(r=>String(r.p.project_no)); DATA.projects.pop(); return JSON.stringify(o); })()"));
+  r.check('an amber-only job sorts ahead of a clean one even when its number is higher',
+    withClean.indexOf('4503') > -1 && withClean.indexOf('4503') < withClean.indexOf('4500'),
+    `order: ${JSON.stringify(withClean)}`);
+  const sideSev = app.doc.getElementById('clist').innerHTML;
+  const itemSev = (pno) => (sideSev.split('class="citem"').find(x => x.includes(`>${pno} <`)) || '')
+    .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  r.check('the sidebar says "2 flags · 1 to check" for the late job',
+    /2 flags · 1 to check/.test(itemSev('4501')), `item: ${itemSev('4501')}`);
+  r.check('and "1 to check" alone -- not a flag -- for the amber-only one',
+    /1 to check/.test(itemSev('4503')) && !/flag/.test(itemSev('4503')), `item: ${itemSev('4503')}`);
+  r.check('the caption says what red and amber mean',
+    /Red on a row means/.test(mainSev) && /Amber means/.test(mainSev));
+
   // ---- a leg that has already arrived is not late ---------------------------
   r.check('a delivered leg past its date is not flagged',
-    JSON.stringify(flags('4509')) === '[]',
+    JSON.stringify(flags('4509')) === NONE,
     `got ${JSON.stringify(flags('4509'))} -- list_shipments(overdue=True) has `
     + 'always excluded Delivered/Installed/Cancelled, so a badge here means '
     + 'chat and the screen disagree about the same leg');
   r.check('and a cancelled leg with no date is not flagged either',
-    !flags('4509').includes('leg with no date'),
+    !flags('4509').amber.includes('leg with no date'),
     'it was cancelled; nobody is waiting on a date for it');
   const card4509 = (main.split(/<div class="lt-card"[^>]*>/)
     .find(c => c.includes('Shipped and signed for.')) || '');
   r.check("4509's card is on the page", !!card4509);
-  r.check('a settled leg is not rendered as late either',
-    !!card4509 && !card4509.includes('lt-bad'),
+  r.check('a settled leg is not rendered as late either, nor as amber',
+    !!card4509 && !card4509.includes('lt-bad') && !card4509.includes('lt-warn'),
     'dropping the row badge while leaving the leg bold red says the same '
     + 'wrong thing in a quieter voice, and the leg is the line he reads');
   r.check('and it is still shown, not hidden',
@@ -366,7 +429,7 @@ async function run(crmDir) {
 
   // ---- the start date is read from one place, not two -----------------------
   r.check('a start date stored as start_date still flags TBD',
-    flags('4508').includes('start TBD'));
+    flags('4508').red.includes('start TBD'));
   // Scoped to 4508's own card: the page has other cards that legitimately say
   // "no start date", so a page-wide regex passes whatever this one renders.
   const card4508 = (main.split(/<div class="lt-card"[^>]*>/)

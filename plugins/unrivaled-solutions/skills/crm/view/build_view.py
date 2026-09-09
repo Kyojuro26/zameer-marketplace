@@ -978,18 +978,23 @@ function legPaid(po){
    project pinned to the top of the screen permanently. */
 const LEG_DONE = new Set(['delivered', 'installed', 'cancelled']);
 function legSettled(l){ return LEG_DONE.has(sv(l && l.stage).trim()); }
+/* Two severities. RED is a date that has come and gone -- a ship date, an
+   estimate -- or a start date still TBD: something is late now. AMBER is a leg
+   with no date yet: worth a look, not yet late. They used to be one list, and
+   "leg with no date" fires on every unshipped leg -- 8 of 9 cards on the real
+   store -- so "9 need a look" and the flag-count sort told him nothing. */
 function liveFlags(p, legs){
-  const out = [];
+  const red = [], amber = [];
   const start = st(p.date || p.start_date).trim();
-  if(/^tbd$/i.test(start)) out.push('start TBD');
+  if(/^tbd$/i.test(start)) red.push('start TBD');
   legs.forEach(l=>{
     if(legSettled(l)) return;
     const d = legDate(l.ship_date);
-    if(d.kind==='passed') out.push('ship date passed');
-    else if(d.kind==='est-passed') out.push('EST passed');
-    else if(d.kind==='none') out.push('leg with no date');
+    if(d.kind==='passed') red.push('ship date passed');
+    else if(d.kind==='est-passed') red.push('EST passed');
+    else if(d.kind==='none') amber.push('leg with no date');
   });
-  return [...new Set(out)];
+  return {red: [...new Set(red)], amber: [...new Set(amber)]};
 }
 
 /* The card said "inv 1208" as inert text: no status, no lateness, no way in.
@@ -1042,7 +1047,8 @@ function liveRows(){
       return {p, legs, flags: liveFlags(p, legs)};
     });
   rows.sort((a,b)=>{
-    if(a.flags.length !== b.flags.length) return b.flags.length - a.flags.length;
+    if(a.flags.red.length !== b.flags.red.length) return b.flags.red.length - a.flags.red.length;
+    if(a.flags.amber.length !== b.flags.amber.length) return b.flags.amber.length - a.flags.amber.length;
     return st(a.p.project_no).localeCompare(st(b.p.project_no));
   });
   return rows;
@@ -1076,14 +1082,16 @@ function renderLiveMain(){
   // to clear" while 14 were.
   const leftToClear = arr(DATA.tracker_unlinked)
     .filter(u=>u && typeof u === 'object' && !u.dismissed).length;
-  const flagged = rows.filter(r=>r.flags.length).length;
+  const flagged = rows.filter(r=>r.flags.red.length).length;   // red only: late NOW
 
   let h = `<div class="co-head"><h1>Live projects</h1>
     <span class="muted">${rows.length} active</span>
     ${flagged?`<span class="badge b-lost">${flagged} need a look</span>`:''}</div>`;
   h += `<p class="muted" style="margin:2px 0 16px;font-size:12px">
-    Grouped by the status colours from your tracker. Anything late, estimated
-    and passed, or missing a date is called out on the row.</p>`;
+    Grouped by the status colours from your tracker. Red on a row means
+    something is late now: a ship date or estimate that has passed, or a start
+    date still TBD. Amber means a vendor leg has no date yet \u2014 worth a look,
+    not yet late.</p>`;
 
   // Every row must land in exactly one section. A status no bucket knows about
   // -- set through chat, or a bucket key that drifted from the importer's --
@@ -1175,8 +1183,8 @@ function liveCard(r){
     // while leaving the leg itself bold red says the same wrong thing in a
     // quieter voice, and this is the line he actually reads.
     const cls = legSettled(l) ? 'muted'
-              : (d.kind==='passed'||d.kind==='none') ? 'lt-bad'
-              : (d.kind==='est-passed' ? 'lt-warn' : 'muted');
+              : d.kind==='passed' ? 'lt-bad'
+              : (d.kind==='none'||d.kind==='est-passed') ? 'lt-warn' : 'muted';
     return `<div class="lt-leg">
       <span class="lt-po">${esc(st(l.vendor_po_raw)||'—')}</span>
       <span class="${cls} nw">${esc(d.text)}${d.est&&d.kind!=='est-passed'?' (est)':''}</span>
@@ -1190,7 +1198,7 @@ function liveCard(r){
       <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(p.company_id)}')">${esc(co?(co.display_name||p.company_id):st(p.company_id))}</a>
       ${liveInvoice(p)}
       <span class="muted nw">${esc(fmtDate(p.date||p.start_date)||st(p.date||p.start_date)||'no start date')}</span>
-      ${r.flags.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}
+      ${r.flags.red.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}${r.flags.amber.map(f=>`<span class="badge b-pending">${esc(f)}</span>`).join('')}
       <span style="margin-left:auto">${hasProjectNo(p)
         ? `<button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}')">Edit</button>`
         : `<span class="muted nw">${esc(NO_NUMBER_NOTE)}</span>`}</span>
@@ -1511,6 +1519,14 @@ function liveJump(pno){
   el.classList.add('lt-hit');
   setTimeout(()=>{ el.classList.remove('lt-hit'); }, 1600);
 }
+/* "2 flags · 1 to check": red counted as flags, amber as things to check, and
+   the bucket label when there is neither. */
+function liveFlagLine(r){
+  const nr = r.flags.red.length, na = r.flags.amber.length;
+  if(!nr && !na) return `<span>${esc(st(_liveListLabel(r.p.tracker_status)).slice(0,28))}</span>`;
+  return (nr ? `<span class="owed">${nr} flag${nr>1?'s':''}</span>` : '')
+       + (na ? `<span>${nr ? '\u00b7 ' : ''}${na} to check</span>` : '');
+}
 function renderLiveList(){
   const rows = liveRows();
   // The main pane groups by bucket; this list sorted by flag count, so the same
@@ -1530,7 +1546,7 @@ function renderLiveList(){
       const co = companyById[r.p.company_id];
       h += `<div class="citem" ${hasProjectNo(r.p)?`onclick="liveJump('${jesc(st(r.p.project_no))}')"`:''}>
       <div class="cn">${hasProjectNo(r.p)?esc(st(r.p.project_no)):'<span class="muted">no number</span>'} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
-      <div class="cm">${r.flags.length?`<span class="owed">${r.flags.length} flag${r.flags.length>1?'s':''}</span>`:`<span>${esc(st(_liveListLabel(r.p.tracker_status)).slice(0,28))}</span>`}</div>
+      <div class="cm">${liveFlagLine(r)}</div>
     </div>`;
     });
   });

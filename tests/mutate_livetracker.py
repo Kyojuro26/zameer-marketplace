@@ -409,11 +409,32 @@ VIEW = [
   "  if(!t) return {kind:'none', text:'no date'};",
   "  if(!t) return {kind:'text', text:''};"),
  ("a leg with no date stops being flagged",
-  "    else if(d.kind==='none') out.push('leg with no date');\n", ""),
+  "    else if(d.kind==='none') amber.push('leg with no date');\n", ""),
  ("a TBD start date stops being flagged",
-  "  if(/^tbd$/i.test(start)) out.push('start TBD');\n", ""),
+  "  if(/^tbd$/i.test(start)) red.push('start TBD');\n", ""),
  ("the flags are no longer de-duplicated",
-  "  return [...new Set(out)];", "  return out;"),
+  "  return {red: [...new Set(red)], amber: [...new Set(amber)]};", "  return {red, amber};"),
+ # ---- two severities ---------------------------------------------------------
+ ("a leg with no date is promoted to red",
+  "    else if(d.kind==='none') amber.push('leg with no date');",
+  "    else if(d.kind==='none') red.push('leg with no date');"),
+ ("undated legs count towards \"need a look\"",
+  "  const flagged = rows.filter(r=>r.flags.red.length).length;   // red only: late NOW",
+  "  const flagged = rows.filter(r=>r.flags.red.length||r.flags.amber.length).length;"),
+ ("an amber badge wears red",
+  "${r.flags.amber.map(f=>`<span class=\"badge b-pending\">${esc(f)}</span>`).join('')}",
+  "${r.flags.amber.map(f=>`<span class=\"badge b-lost\">${esc(f)}</span>`).join('')}"),
+ ("an undated leg is bold red on the row again",
+  "              : d.kind==='passed' ? 'lt-bad'\n"
+  "              : (d.kind==='none'||d.kind==='est-passed') ? 'lt-warn' : 'muted';",
+  "              : (d.kind==='passed'||d.kind==='none') ? 'lt-bad'\n"
+  "              : (d.kind==='est-passed' ? 'lt-warn' : 'muted');"),
+ ("amber-only rows sort among the clean ones",
+  "    if(a.flags.amber.length !== b.flags.amber.length) return b.flags.amber.length - a.flags.amber.length;\n", ""),
+ ("the sidebar counts amber as flags",
+  "  return (nr ? `<span class=\"owed\">${nr} flag${nr>1?'s':''}</span>` : '')\n"
+  "       + (na ? `<span>${nr ? '\\u00b7 ' : ''}${na} to check</span>` : '');",
+  "  return `<span class=\"owed\">${nr+na} flag${nr+na>1?'s':''}</span>`;"),
 
  # ---- who is on the screen ---------------------------------------------------
  ("archived projects come back onto the live screen",
@@ -429,8 +450,8 @@ VIEW = [
   "      const legs = (DATA.shipments||[]).filter(s=>\n"
   "        _shipmentProjectNos(s).has(st(p.project_no)));"),
  ("the busiest row sorts last instead of first",
-  "    if(a.flags.length !== b.flags.length) return b.flags.length - a.flags.length;",
-  "    if(a.flags.length !== b.flags.length) return a.flags.length - b.flags.length;"),
+  "    if(a.flags.red.length !== b.flags.red.length) return b.flags.red.length - a.flags.red.length;",
+  "    if(a.flags.red.length !== b.flags.red.length) return a.flags.red.length - b.flags.red.length;"),
 
  # ---- the note ---------------------------------------------------------------
  ("the note is truncated to a preview",
@@ -489,8 +510,8 @@ VIEW = [
   "  return bucketLabel(key);"),
  ("a settled leg is rendered red even though its badge is gone",
   "    const cls = legSettled(l) ? 'muted'\n"
-  "              : (d.kind==='passed'||d.kind==='none') ? 'lt-bad'",
-  "    const cls = (d.kind==='passed'||d.kind==='none') ? 'lt-bad'"),
+  "              : d.kind==='passed' ? 'lt-bad'",
+  "    const cls = d.kind==='passed' ? 'lt-bad'"),
  ("the drawer tells him a numberless row's legs are already in the CRM",
   "      arr(u.legs).length === 0 ? 'No vendor legs on this row.'\n"
   "      : st(u.raw_key)",
