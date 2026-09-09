@@ -649,6 +649,24 @@ VIEW = [
  ("the link carries the trimmed number, which the drawer cannot find",
   "'${jesc(st(v.invoice_no))}')\">inv ${esc(no)}</button>`",
   "'${jesc(no)}')\">inv ${esc(no)}</button>`"),
+ # ---- the sidebar in the main pane's order --------------------------------
+ ("the sidebar goes back to one flat flag-sorted list",
+  "  const groups = trackerBuckets().map(b=>({label: bucketLabel(b.key),\n"
+  "    rows: rows.filter(r=>st(r.p.tracker_status)===b.key)}));\n"
+  "  groups.push({label: 'Status not recognised', rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});",
+  "  const groups = [{label: '', rows: rows}];"),
+ ("the unrecognised statuses fall out of the sidebar",
+  "  groups.push({label: 'Status not recognised', rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});\n", ""),
+ ("the bucket headings are dropped",
+  "    h += `<div class=\"due-group\" style=\"padding:8px 12px 2px\">${esc(g.label)}</div>`;\n", ""),
+ ("a sidebar click opens the edit drawer again",
+  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.project_no))}')\"`:''}>",
+  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"openProject('${jesc(st(r.p.project_no))}')\"`:''}>"),
+ ("the jump no longer marks the card it reached",
+  "  el.classList.add('lt-hit');\n", ""),
+ ("cards lose their ids, so the jump has nothing to reach",
+  "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.project_no))}\"` : ''}>",
+  "  return `<div class=\"lt-card\">"),
 ]
 
 

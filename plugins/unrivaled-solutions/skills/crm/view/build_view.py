@@ -105,6 +105,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   .lt-card{border:1px solid var(--line);border-radius:10px;background:var(--panel);
            padding:12px 14px;margin-bottom:10px}
   .lt-card.lt-unlinked{border-style:dashed}
+  .lt-card.lt-hit{box-shadow:0 0 0 2px var(--accent);transition:box-shadow .2s}
   .lt-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13.5px}
   /* the note is the substance of this screen -- never truncated, wraps freely */
   .lt-note{margin:8px 0 0;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
@@ -1183,7 +1184,7 @@ function liveCard(r){
     </div>`;
   }).join('') || '<div class="muted" style="font-size:12px">No vendor legs.</div>';
 
-  return `<div class="lt-card">
+  return `<div class="lt-card"${hasProjectNo(p) ? ` id="lt-${esc(st(p.project_no))}"` : ''}>
     <div class="lt-top">
       <b class="nw">${esc(st(p.project_no)||'—')}</b>
       <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(p.company_id)}')">${esc(co?(co.display_name||p.company_id):st(p.company_id))}</a>
@@ -1500,15 +1501,40 @@ function _liveListLabel(key){
   const known = new Set(trackerBuckets().map(b=>b.key));
   return known.has(st(key)) ? bucketLabel(key) : 'status not recognised';
 }
+/* A sidebar click used to open the EDIT drawer, skipping the card -- and the
+   note on it, which is the substance of the screen. It now scrolls the card
+   into view and marks it for a moment. Edit stays on the card. */
+function liveJump(pno){
+  const el = document.getElementById('lt-' + st(pno));
+  if(!el) return;
+  if(el.scrollIntoView) el.scrollIntoView({block:'start', behavior:'smooth'});
+  el.classList.add('lt-hit');
+  setTimeout(()=>{ el.classList.remove('lt-hit'); }, 1600);
+}
 function renderLiveList(){
   const rows = liveRows();
-  document.getElementById('clist').innerHTML = rows.slice(0,400).map(r=>{
-    const co = companyById[r.p.company_id];
-    return `<div class="citem" ${projItemClick(r.p)}>
+  // The main pane groups by bucket; this list sorted by flag count, so the same
+  // nine jobs appeared in two orders. Now: the same buckets in the legend's
+  // order, a small heading each, liveRows' own order within a bucket, and the
+  // unrecognised statuses last -- exactly as the main pane lays them out.
+  const known = new Set(trackerBuckets().map(b=>b.key));
+  const groups = trackerBuckets().map(b=>({label: bucketLabel(b.key),
+    rows: rows.filter(r=>st(r.p.tracker_status)===b.key)}));
+  groups.push({label: 'Status not recognised', rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});
+  let n = 0, h = '';
+  groups.forEach(g=>{
+    if(!g.rows.length) return;
+    h += `<div class="due-group" style="padding:8px 12px 2px">${esc(g.label)}</div>`;
+    g.rows.forEach(r=>{
+      if(n++ >= 400) return;                 // the same cap every sibling list has
+      const co = companyById[r.p.company_id];
+      h += `<div class="citem" ${hasProjectNo(r.p)?`onclick="liveJump('${jesc(st(r.p.project_no))}')"`:''}>
       <div class="cn">${hasProjectNo(r.p)?esc(st(r.p.project_no)):'<span class="muted">no number</span>'} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
       <div class="cm">${r.flags.length?`<span class="owed">${r.flags.length} flag${r.flags.length>1?'s':''}</span>`:`<span>${esc(st(_liveListLabel(r.p.tracker_status)).slice(0,28))}</span>`}</div>
     </div>`;
-  }).join('') || '<div class="muted" style="padding:14px">No live projects.</div>';
+    });
+  });
+  document.getElementById('clist').innerHTML = h || '<div class="muted" style="padding:14px">No live projects.</div>';
 }
 
 function renderProjectsList(){

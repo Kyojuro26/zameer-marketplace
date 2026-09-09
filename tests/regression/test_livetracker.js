@@ -349,7 +349,7 @@ async function run(crmDir) {
   r.check('and a cancelled leg with no date is not flagged either',
     !flags('4509').includes('leg with no date'),
     'it was cancelled; nobody is waiting on a date for it');
-  const card4509 = (main.split('<div class="lt-card">')
+  const card4509 = (main.split(/<div class="lt-card"[^>]*>/)
     .find(c => c.includes('Shipped and signed for.')) || '');
   r.check("4509's card is on the page", !!card4509);
   r.check('a settled leg is not rendered as late either',
@@ -369,7 +369,7 @@ async function run(crmDir) {
     flags('4508').includes('start TBD'));
   // Scoped to 4508's own card: the page has other cards that legitimately say
   // "no start date", so a page-wide regex passes whatever this one renders.
-  const card4508 = (main.split('<div class="lt-card">')
+  const card4508 = (main.split(/<div class="lt-card"[^>]*>/)
     .find(c => c.includes('Start date lives on the other field')) || '');
   r.check("4508's card is actually on the page", !!card4508,
     'the check below is vacuous without it');
@@ -432,9 +432,12 @@ async function run(crmDir) {
   // is 'Waiting on the office&#47;front '. Escaping FIRST and slicing after
   // gives 'Waiting on the office&#47;fr' -- visibly shorter, and one character
   // either way from leaving a half-written entity the browser prints raw.
+  // Matched on the ITEM's span, closing tag included. The sidebar's bucket
+  // heading now carries the full label, so a page-wide substring test passed
+  // on a wrongly sliced item -- the heading supplied the text.
   r.check('a bucket label is shortened before escaping, not after',
     app.doc.getElementById('clist').innerHTML
-      .includes('Waiting on the office&#47;front'),
+      .includes('<span>Waiting on the office&#47;front </span>'),
     `got ${(app.doc.getElementById('clist').innerHTML.match(/<span>Waiting[^<]*/) || ['none'])[0]}`
     + ' -- esc() inflates one character into five or six, so slicing after it '
     + 'cuts a different string and can sever an entity');
@@ -448,7 +451,7 @@ async function run(crmDir) {
   // AFTER the clock was frozen: the page painted itself at load, before it.
   ev("renderMain();");
   const mainInv = app.doc.getElementById('main').innerHTML;
-  const cardOf = (marker) => (mainInv.split('<div class="lt-card">').find(c => c.includes(marker)) || '');
+  const cardOf = (marker) => (mainInv.split(/<div class="lt-card"[^>]*>/).find(c => c.includes(marker)) || '');
   const c4501 = cardOf('Two of the four frames short-shipped');
   r.check('an open, overdue invoice shows its status and how late it is',
     /Open<\/span>/.test(c4501) && /39d late/.test(c4501),
@@ -490,6 +493,43 @@ async function run(crmDir) {
       && ev("document.getElementById('e_iv_status').value") === 'paid',
     `title=${ev("document.getElementById('dtitle').textContent")} status=${ev("document.getElementById('e_iv_status').value")}`);
   ev("closeDrawer();");
+
+  // ---- the sidebar in the main pane's order; a click shows the card ------------
+  //
+  // The sidebar sorted by flag count while the main pane grouped by bucket, so
+  // the same nine jobs stood in two orders. And a sidebar click opened the EDIT
+  // drawer, skipping the card and the note on it. Now the sidebar walks the
+  // buckets in the legend's order with a heading each, keeps liveRows' order
+  // within a bucket, and a click scrolls to the card and marks it.
+  ev("closeDrawer(); renderMain(); renderList();");
+  const mainNow = app.doc.getElementById('main').innerHTML;
+  const sideNow = app.doc.getElementById('clist').innerHTML;
+  const mainOrder = [...mainNow.matchAll(/<div class="lt-card" id="lt-([^"]*)">/g)].map(m => m[1]);
+  const sideOrder = [...sideNow.matchAll(/onclick="liveJump\('([^']*)'\)"/g)].map(m => m[1]);
+  r.check('every card on the page carries an id the sidebar can reach',
+    mainOrder.length >= 6 && mainOrder.length === (mainNow.match(/class="lt-card" id=/g) || []).length,
+    `ids: ${JSON.stringify(mainOrder)}`);
+  r.check('the sidebar lists the jobs in the order the main pane shows them',
+    mainOrder.length >= 6 && JSON.stringify(sideOrder) === JSON.stringify(mainOrder),
+    `main=${JSON.stringify(mainOrder)} side=${JSON.stringify(sideOrder)}`);
+  r.check('within a bucket the flagged job still comes first',
+    mainOrder.indexOf('4501') > -1 && mainOrder.indexOf('4501') < mainOrder.indexOf('4506'),
+    `main=${JSON.stringify(mainOrder)}`);
+  r.check("the sidebar carries the bucket headings, in the legend's words",
+    /class="due-group[^>]*>Waiting on the office/.test(sideNow) && /class="due-group[^>]*>With the rep/.test(sideNow),
+    sideNow.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 200));
+  r.check('and the unrecognised status is a heading too, after the real buckets',
+    /class="due-group[^>]*>Status not recognised/.test(sideNow)
+      && sideNow.indexOf('Status not recognised') > sideNow.indexOf('With the rep'),
+    'the main pane puts them last; the sidebar must agree');
+  ev("liveJump('4503');");
+  r.check('a sidebar click shows the card rather than opening the edit drawer',
+    !ev("document.getElementById('drawer').classList.contains('open')")
+      && ev("document.getElementById('lt-4503').classList.contains('lt-hit')"),
+    `drawer open=${ev("document.getElementById('drawer').classList.contains('open')")}`);
+  r.check('the card it marks is the one on the page for that job',
+    /<div class="lt-card" id="lt-4503">/.test(mainNow) && /openProject\('4503'\)/.test(mainNow),
+    'Edit stays on the card');
 
   // ---- the note -------------------------------------------------------------
   // SOURCE CHECK: a CSS claim, and this shim does no layout.
