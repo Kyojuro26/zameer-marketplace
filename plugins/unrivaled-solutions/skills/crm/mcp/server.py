@@ -902,8 +902,19 @@ def _invoice_key(invoices, company_id, wanted):
                              if i.get("company_id") == company_id})
 
 
-def _one_project(projects, key, what):
+def _one_project(projects, key, what, company_id=None):
     """The single project answering to `key`, or None. Refuses ambiguity.
+
+    `company_id`, when given, narrows the number's matches to that company
+    BEFORE the ambiguity test -- _key on both sides, exact, no name matching.
+    Two customers can hold one number (the legacy-duplicate case below; the
+    metrics layer keys projects by (project_no, company_id) for the same
+    reason), and refusing both was not the right answer when the caller knows
+    the customer. Without it every call behaves exactly as before: one match
+    returns, none is None, several raise. With it: exactly one of that
+    company's returns; none is None (the caller reports "not found", never the
+    other customer's record); several -- the same customer holding one number
+    twice, a true duplicate -- still raise.
 
     A legacy store can hold two records under one project_no. Every path that
     used to take target[0] picked an ARBITRARY one -- and rename_project then
@@ -915,6 +926,9 @@ def _one_project(projects, key, what):
     an ambiguous invoice number; this is the project-side equivalent.
     """
     matches = [p for p in projects if _key(p.get("project_no")) == key]
+    if company_id is not None:
+        cid = _key(company_id)
+        matches = [p for p in matches if _key(p.get("company_id")) == cid]
     if len(matches) > 1:
         raise StoreError(
             f"{len(matches)} projects share the number '{key}' "
@@ -926,8 +940,9 @@ def _one_project(projects, key, what):
     return matches[0] if matches else None
 
 
-def _live_project(pno):
-    """The project a link may point at, or None.
+def _live_project(pno, company_id=None):
+    """The project a link may point at, or None. `company_id` narrows as in
+    _one_project.
 
     Archived projects still sit in projects.json -- archive only flags them
     (_set_project_archived). But every default read drops invoices whose
@@ -948,7 +963,7 @@ def _live_project(pno):
     key = _resolve(pno, _project_keys(projects))
     if not key:
         return None
-    hit = _one_project(projects, key, "Linking to it")
+    hit = _one_project(projects, key, "Linking to it", company_id)
     return hit if hit and not hit.get("archived") else None
 
 
@@ -1633,17 +1648,25 @@ def list_companies(role: str = None, query: str = None,
 
 @mcp.tool()
 @_store_errors
-def get_project(project_no: str) -> dict:
-    """Project card with its shipments, company, and contacts."""
+def get_project(project_no: str, company_id: Optional[str] = None) -> dict:
+    """Project card with its shipments, company, and contacts. `company_id`
+    (optional) narrows the number to that customer's project when two
+    customers hold one number; the shipments listed are then that customer's
+    legs on the number, not every leg carrying it."""
     projects = STORE.load("projects")
     want = _resolve(project_no, _project_keys(projects))
-    _hit = _one_project(projects, want, "Opening it") if want else None
+    _hit = _one_project(projects, want, "Opening it", company_id) if want else None
     pr = [_hit] if _hit else []
     if not pr:
         return _err(f"project '{project_no}' not found")
     p = pr[0]
+    # Number-only, as always, unless the caller named the customer: a leg is
+    # keyed by company AND number on the Live screen, and one customer's leg
+    # must never surface on another's card.
+    cid = _key(p.get("company_id"))
     shipments = [s for s in STORE.load("shipments")
-                 if want in _shipment_project_nos(s)]
+                 if want in _shipment_project_nos(s)
+                 and (company_id is None or _key(s.get("company_id")) == cid)]
     companies = STORE.load("companies")
     company = next((c for c in companies if c["company_id"] == p["company_id"]), None)
     contacts = [c for c in STORE.load("contacts") if c["company_id"] == p["company_id"]]
@@ -1828,9 +1851,12 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
 
 
 @mcp.tool()
-def update_project(project_no: str, fields: dict) -> dict:
+def update_project(project_no: str, fields: dict,
+                   company_id: Optional[str] = None) -> dict:
     """Edit a project card (status, owner, revenue, collection_status, notes, ...).
-    Validated against the v0.1 schema; persists atomically."""
+    Validated against the v0.1 schema; persists atomically. `company_id`
+    (optional) names the customer whose project this is, for a number two
+    customers hold; a company_id inside `fields` still MOVES the project."""
     try:
         with STORE.write_lock():
             _validate(fields, PROJECT_FIELDS - {"project_no"}, "project")
@@ -1838,7 +1864,7 @@ def update_project(project_no: str, fields: dict) -> dict:
                 _require_company(fields["company_id"])
             projects = STORE.load("projects")
             want = _resolve(project_no, _project_keys(projects))
-            hit = _one_project(projects, want, "Editing it") if want else None
+            hit = _one_project(projects, want, "Editing it", company_id) if want else None
             target = [hit] if hit else []
             if not target:
                 return _err(f"project '{project_no}' not found")
@@ -1962,14 +1988,18 @@ def list_tracker() -> dict:
 
 
 @mcp.tool()
-def rename_project(old_project_no: str, new_project_no: str) -> dict:
+def rename_project(old_project_no: str, new_project_no: str,
+                   company_id: Optional[str] = None) -> dict:
     """Change a project's number/key. Updates every shipment and invoice that
     references the old number so nothing gets silently orphaned -- a plain
     field edit can't do this safely, since project_no is a lookup key other
     records point at, not just a display value. Fails if new_project_no is
     empty or already used by a different project. (Ingestion-time
     needs_review entries referencing the old number are left as-is -- they're
-    a historical note about the original migration, not a live pointer.)"""
+    a historical note about the original migration, not a live pointer.)
+    `company_id` (optional) names the customer whose project this is when two
+    hold the number; the cascade then carries ONLY that customer's shipments
+    and invoices. The new number must still be unused store-wide."""
     try:
         with STORE.write_lock():
             # _canon, not str: a caller sending 9999.0 would otherwise persist
@@ -1988,7 +2018,7 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
                 # shipment in the store -- across all companies -- onto the new
                 # number. rename_invoice guards this; this one did not.
                 raise StoreError("old_project_no cannot be empty")
-            hit = _one_project(projects, old_pn, "Renaming it")
+            hit = _one_project(projects, old_pn, "Renaming it", company_id)
             target = [hit] if hit else []
             if not target:
                 return _err(f"project '{old_project_no}' not found")
@@ -1999,9 +2029,15 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
             # NOT saved yet -- collected and committed as one unit below, so a
             # lock on shipments.json cannot leave the project renamed while its
             # invoices still point at the old number.
+            # Scoped to the named customer's records when one was named. On
+            # the number-only path the cascade keys on the number alone, as it
+            # always has.
+            scope = _key(target[0].get("company_id")) if company_id is not None else None
             shipments = STORE.load("shipments")
             touched_shipments = 0
             for s in shipments:
+                if scope is not None and _key(s.get("company_id")) != scope:
+                    continue
                 changed = False
                 if _key(s.get("project_no")) == old_pn:
                     s["project_no"] = new_pn
@@ -2015,6 +2051,8 @@ def rename_project(old_project_no: str, new_project_no: str) -> dict:
             invoices = STORE.load("invoices")
             touched_invoices = 0
             for i in invoices:
+                if scope is not None and _key(i.get("company_id")) != scope:
+                    continue
                 if _key(i.get("project_no")) == old_pn:
                     i["project_no"] = new_pn
                     touched_invoices += 1
@@ -2296,14 +2334,16 @@ def create_project(fields: dict) -> dict:
 
 
 @mcp.tool()
-def create_shipment(project_no: str, fields: dict) -> dict:
+def create_shipment(project_no: str, fields: dict,
+                    company_id: Optional[str] = None) -> dict:
     """Add a shipment leg to an existing project. shipment_id is derived
-    (<project_no>-L<n>) unless supplied."""
+    (<project_no>-L<n>) unless supplied. `company_id` (optional) names the
+    customer whose project this is when two hold the number."""
     try:
         with STORE.write_lock():
             _validate(fields, SHIPMENT_FIELDS, "shipment")
             projects = STORE.load("projects")
-            pr = _live_project(project_no)
+            pr = _live_project(project_no, company_id)
             if not pr:
                 raise StoreError(f"project '{project_no}' not found, or has "
                                  f"been deleted -- a shipment linked to it "
@@ -2817,7 +2857,8 @@ def convert_lead(company_id: str) -> dict:
         return _err(e)
 
 
-def _set_project_archived(project_no: str, archived: bool) -> dict:
+def _set_project_archived(project_no: str, archived: bool,
+                          company_id: Optional[str] = None) -> dict:
     """Soft-delete/restore a single project. Nothing is destroyed: the project
     record is flagged and hidden from default reads, and so are its shipments
     and invoices (matched by their own project_no/all_project_nos fields) --
@@ -2827,7 +2868,7 @@ def _set_project_archived(project_no: str, archived: bool) -> dict:
         with STORE.write_lock():
             projects = STORE.load("projects")
             want = _resolve(project_no, _project_keys(projects))
-            hit = (_one_project(projects, want, "Archiving or restoring it")
+            hit = (_one_project(projects, want, "Archiving or restoring it", company_id)
                    if want else None)
             target = [hit] if hit else []
             if not target:
@@ -2844,20 +2885,22 @@ def _set_project_archived(project_no: str, archived: bool) -> dict:
 
 
 @mcp.tool()
-def archive_project(project_no: str) -> dict:
+def archive_project(project_no: str, company_id: Optional[str] = None) -> dict:
     """Soft-delete a single project within a customer record: it, its
     shipments, and its invoices disappear from the CRM but nothing is
     destroyed -- restore with restore_project. Use this for deleting a
     project (as opposed to archive_company, which deletes the whole
-    customer/vendor)."""
-    return _set_project_archived(project_no, True)
+    customer/vendor). `company_id` (optional) names the customer whose
+    project this is when two hold the number."""
+    return _set_project_archived(project_no, True, company_id)
 
 
 @mcp.tool()
-def restore_project(project_no: str) -> dict:
+def restore_project(project_no: str, company_id: Optional[str] = None) -> dict:
     """Un-archive a previously deleted project, bringing it and its
-    shipments/invoices back into the CRM."""
-    return _set_project_archived(project_no, False)
+    shipments/invoices back into the CRM. `company_id` (optional) names the
+    customer whose project this is when two hold the number."""
+    return _set_project_archived(project_no, False, company_id)
 
 
 @mcp.tool()

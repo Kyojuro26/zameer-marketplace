@@ -110,6 +110,12 @@ Writes are validated and logged; report failures honestly:
   `payment_status_raw` is the evidence `pipeline/audit_commission_pct.py`
   replays. The invoice's own number is changed with `rename_invoice`, not
   here.
+- **Pass `company_id` whenever the customer is known** to `get_project`,
+  `update_project`, `rename_project`, `archive_project`, `restore_project`
+  and `create_shipment`: two customers can hold one project number, and the
+  number alone is refused as ambiguous when they do. It only narrows -- a
+  customer that does not hold the number gets "not found", never the other
+  customer's record.
 - Rename a project's number → `rename_project(old_project_no,
   new_project_no)`. This is NOT a plain field edit: `project_no` is a lookup
   key that shipments and invoices point at, so a rename must atomically

@@ -35,6 +35,7 @@ not evidence. Re-run it after any change to the harness, and bump
 | `regression/test_view.js` | render robustness, date preservation, saves, and what the app offers as clickable. Mutated by `mutate_view.py` (its own decisions) and `mutate_failure.py` (the failure class) |
 | `regression/test_livetracker.py` | the fill-colour decode, the legend boundary, unlinked rows, re-import |
 | `regression/test_livetracker.js` | the Live screen: lateness flags, adoption, the note |
+| `regression/test_project_identity.py` | a project is `(project_no, company_id)`: the optional `company_id` narrows a shared number BEFORE the ambiguity test and only narrows -- number-only calls still refuse, the other customer's twin stays byte-identical, a customer without the number gets "not found", a same-customer duplicate still refuses. Mutated by `mutate_project_identity.py` |
 | `regression/test_metrics.py` | every derived number's shape: `counted + Σexcluded == population`, `null` iff nothing counted, a closed exclusion vocabulary, "quoted" on anything profit-shaped, never persisted. Clock frozen at 2026-09-01; every expected figure hand-derived. Mutated by `mutate_metrics.py` |
 | `regression/test_harness.js` | **the instrument itself** — the four ways it has been unable to fail, and refreshData's three failure states |
 | `shapes/test_shape_*.py` | the three recurring failure shapes |
@@ -188,7 +189,7 @@ Green on its own is still not the claim. What makes it mean something:
 
 ```bash
 python3 tests/run_all.py --positive-control   # must FAIL against BASELINE_REF
-python3 tests/mutate_drawer.py                # and the other six
+python3 tests/mutate_drawer.py                # and the other seven
 ```
 
 `--positive-control` writes `.positive-control-ran`; until it exists,
