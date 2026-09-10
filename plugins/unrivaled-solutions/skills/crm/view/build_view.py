@@ -179,7 +179,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   .more-menu button:hover{background:var(--bg)}
   .more-menu button.danger{color:var(--red)}
   .more-menu button.danger:hover{background:var(--red-soft)}
-  tfoot td{border-top:1px solid var(--line);border-bottom:0;font-weight:650;padding-top:10px}
+  tfoot td{border-top:1px solid var(--line);border-bottom:0;font-weight:650;padding-top:10px;background:none}
   .nw{white-space:nowrap}
   /* The stylesheet had no breakpoint at all: at 1024px table cells wrapped
      mid-value and below ~700px the sidebar and main pane fought for width. */
@@ -194,11 +194,17 @@ TEMPLATE = r"""<!DOCTYPE html>
   }
   table{width:100%;border-collapse:collapse}
   .section{overflow-x:auto}
+  /* Tables: the header row alone gets a rule; body rows are set apart by
+     padding and an alternating tint, hover a fainter one; numbers right and
+     tabular; a notes column is capped with an ellipsis -- the full text is
+     in the drawer. */
   th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);
-     padding:6px 8px;border-bottom:1px solid var(--line)}
-  td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+     padding:6px 8px 8px;border-bottom:1px solid var(--line)}
+  td{padding:9px 8px;border-bottom:0;vertical-align:top}
+  tbody tr:nth-child(even) td{background:#fafbfc}
+  tbody tr:hover td{background:#f3f6fb}
   tr.click{cursor:pointer}
-  tr.click:hover{background:var(--bg)}
+  .note-cell{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .contact a{color:var(--accent);text-decoration:none}
   .contact a:hover{text-decoration:underline}
   .num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
@@ -987,7 +993,7 @@ function renderReceivables(){
       <td class="num">${esc(fmtDate(r.due)||'—')}</td>
       <td class="num">${lateCell}</td>
       <td>${statusPill(v.payment_status)}</td>
-      <td class="muted" style="max-width:240px">${esc(st(v.payment_notes).slice(0,80))}</td>
+      <td class="muted note-cell">${esc(st(v.payment_notes).slice(0,80))}</td>
       <td><button class="pill-btn" style="padding:2px 8px;font-size:11px"
           onclick="event.stopPropagation();select('${jesc(v.company_id)}');openEditInvoice('${jesc(v.company_id)}','${jesc(st(v.invoice_no))}')">Open</button></td>
     </tr>`;
@@ -2084,7 +2090,7 @@ function renderMain(){
         <td>${statusPill(ps)}</td>
         <td class="num ${overdue?'':'muted'}" ${overdue?'style="color:var(--red);font-weight:600"':''}>${esc(fmtDate(due)||'—')}${
           overdue&&late?`<div style="font-size:11px;font-weight:400">${late} days late</div>`:''}</td>
-        <td class="muted" style="max-width:280px">${esc(st(v.payment_notes).slice(0,90))}</td>
+        <td class="muted note-cell">${esc(st(v.payment_notes).slice(0,90))}</td>
         <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('');
     });
     h+=`<div class="section"><h2>Invoices / customer orders (${invs.length})</h2>
