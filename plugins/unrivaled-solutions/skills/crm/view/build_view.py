@@ -99,11 +99,17 @@ TEMPLATE = r"""<!DOCTYPE html>
   .empty{color:var(--muted);text-align:center;margin-top:16vh}
   .co-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
   .co-head h1{font-size:22px;margin:0;font-weight:650}
-  .badge{font-size:11px;font-weight:500;padding:2px 8px;border-radius:20px;text-transform:capitalize;white-space:nowrap;display:inline-block}
-  .b-customer{background:var(--accent-soft);color:var(--accent)}
-  .b-vendor{background:#eef0f3;color:var(--slate)}
-  .b-lead{background:var(--amber-soft);color:var(--amber)}
-  .b-open{background:var(--accent-soft);color:var(--accent)}
+  /* Colour means something: red = late now, amber = worth a look, accent
+     blue = interactive. Every status pill -- won/pending/lost, a leg's stage,
+     Not linked, Paid/Open, a company's role -- is a neutral outlined pill so
+     the three colours are the only ones on the page. The Live flags are the
+     b-lost / b-pending badges in a card's top row and the page head -- the
+     same markup the tests read -- and take red and amber from that context. */
+  .badge{font-size:11px;font-weight:500;padding:1px 8px;border-radius:20px;text-transform:capitalize;
+         white-space:nowrap;display:inline-block;border:1px solid var(--line);background:#fff;color:var(--slate)}
+  .lt-top .badge.b-lost,.co-head .badge.b-lost{background:var(--red-soft);color:var(--red);border-color:transparent}
+  .lt-top .badge.b-pending{background:var(--amber-soft);color:var(--amber);border-color:transparent}
+  .b-customer,.b-vendor,.b-lead,.b-open{background:#fff;color:var(--slate)}
   /* Live Tracker. The swatches echo the sheet's own colours so the grouping
      reads the way it does in Excel, without reproducing the raw magenta. */
   .b-admin{background:#fbe4f7;color:#8a2378}
@@ -112,6 +118,12 @@ TEMPLATE = r"""<!DOCTYPE html>
   .swatch{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
   .swatch.b-admin{background:#c0389f} .swatch.b-owner{background:#e0a800}
   .swatch.b-await{background:#2296ad} .swatch.b-stage{background:var(--muted)}
+  /* the sidebar's bucket headings carry the same swatch, drawn before the
+     label so the heading's text stays first in the element */
+  .due-group[class*="sw-"]::before{content:"";width:9px;height:9px;border-radius:3px;display:inline-block;
+                                   margin-right:7px;vertical-align:-1px;background:var(--muted)}
+  .due-group.sw-b-admin::before{background:#c0389f} .due-group.sw-b-owner::before{background:#e0a800}
+  .due-group.sw-b-await::before{background:#2296ad}
   .lt-head{display:flex;align-items:center;gap:9px;margin:0 0 10px;
            border-bottom:1px solid var(--line);padding-bottom:6px}
   .lt-head h2{font-size:17px;font-weight:650;color:var(--ink);margin:0}
@@ -133,10 +145,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   .due-group{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
              padding:10px 8px 4px;border-bottom:1px solid var(--line)}
   .due-group.od{color:var(--red)}
-  .b-won{background:var(--green-soft);color:var(--green)}
-  .b-pending{background:var(--amber-soft);color:var(--amber)}
-  .b-lost{background:var(--red-soft);color:var(--red)}
-  .b-stage{background:#eef0f3;color:var(--slate)}
+  .b-won,.b-pending,.b-lost,.b-stage{background:#fff;color:var(--slate)}
   .section{margin-top:22px}
   /* was 12px uppercase muted -- SMALLER than the body text it headed, so a
      section title read as quieter than its own contents */
@@ -145,7 +154,7 @@ TEMPLATE = r"""<!DOCTYPE html>
               text-transform:none}
   .co-sum{margin:2px 0 4px;font-size:15px;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
   .co-sum .late{color:var(--red)}
-  .co-sum .ok{color:var(--green);font-weight:500}
+  .co-sum .ok{color:var(--ink);font-weight:500}
   .co-sum a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
   .empty-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 0;color:var(--muted)}
   .pill-btn.pri{background:var(--accent);color:#fff}
@@ -1613,14 +1622,14 @@ function renderLiveList(){
   // order, a small heading each, liveRows' own order within a bucket, and the
   // unrecognised statuses last -- exactly as the main pane lays them out.
   const known = new Set(trackerBuckets().map(b=>b.key));
-  const groups = trackerBuckets().map(b=>({label: bucketLabel(b.key),
+  const groups = trackerBuckets().map(b=>({label: bucketLabel(b.key), key: b.key,
     rows: rows.filter(r=>st(r.p.tracker_status)===b.key)}));
   groups.push({label: 'Status not recognised', cap: false,
     rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});
   let h = '';
   groups.forEach(g=>{
     if(!g.rows.length) return;
-    h += `<div class="due-group" style="padding:8px 12px 2px">${esc(g.label)}</div>`;
+    h += `<div class="due-group sw-${g.key?bucketClass(g.key):'b-stage'}" style="padding:8px 12px 2px">${esc(g.label)}</div>`;
     // Capped PER BUCKET at LIVE_CAP, exactly as the main pane caps its
     // sections, so the two lists hold the same jobs in the same order. One
     // global cap left a heading with nothing under it and dropped a job the
@@ -1985,7 +1994,7 @@ function renderMain(){
       ${sells?`<button class="pill-btn pri" onclick="openNewInvoice('${jesc(c.company_id)}')">+ New invoice</button>`:''}
       ${sells?`<button class="pill-btn" onclick="openNewProject('${jesc(c.company_id)}')">+ New project</button>`:''}
       <button class="pill-btn" onclick="openNewContact('${jesc(c.company_id)}')">+ Add contact</button>
-      ${c.role==='lead'?`<button class="pill-btn" style="background:var(--green-soft);color:var(--green)" onclick="convertLead('${jesc(c.company_id)}')">Convert to customer</button>`:''}
+      ${c.role==='lead'?`<button class="pill-btn" onclick="convertLead('${jesc(c.company_id)}')">Convert to customer</button>`:''}
       ${draftAll?`<button class="pill-btn" onclick="draft('${jesc(draftAll.email)}','${jesc(draftAll.name||'')}')">✉ Draft email</button>`:''}
       <span class="more">
         <button class="pill-btn ghost" aria-haspopup="true" aria-expanded="false"
