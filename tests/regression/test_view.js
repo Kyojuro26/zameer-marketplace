@@ -15,7 +15,7 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { launch, makeResult } = require('../lib/view.js');
+const { launch, makeResult, buildBundle } = require('../lib/view.js');
 
 // Composed at runtime, not written as a literal: the PII sweep rejects any
 // email shape in this PUBLIC tree except the one allowed address, and a
@@ -89,6 +89,27 @@ async function run(crmDir) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmview-'));
   const store = seedStore(path.join(tmp, 'store'));
   const app = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
+
+  // ---- the two hooks a styling pass is most likely to break ------------------
+  // SOURCE CHECKS over the generated page, as the Live suite reads its tabs:
+  // lib/dom.js registers id-bearing nodes only and its body.innerHTML is empty.
+  const { html: pageSrc } = buildBundle(crmDir, store, tmp);
+  // the mode is put back afterwards: every save below records through the
+  // http transport, and an app left in embedded mode would answer itself
+  const modeWas = app.eval('CRM.mode');
+  const pillStates = ['http', 'cowork', 'embedded'].map(m =>
+    app.eval(`CRM.mode=${JSON.stringify(m)}; setModePill(); document.getElementById('modePill').textContent`));
+  app.eval(`CRM.mode=${JSON.stringify(modeWas)}; setModePill();`);
+  r.check('the header still holds #modePill, and it still writes its three text states',
+    /<header[^>]*>[\s\S]*id="modePill"[\s\S]*<\/header>/.test(pageSrc)
+      && pillStates[0] === 'Live \u00b7 edits persist (local app)'
+      && /^Live \u00b7 edits persist \(CRM MCP/.test(pillStates[1])
+      && pillStates[2] === 'Demo \u00b7 edits last this browser session only',
+    JSON.stringify(pillStates));
+  const filters = ['live', 'all', 'customer', 'vendor', 'lead', 'project', 'receivable'];
+  r.check('every data-f filter button still exists',
+    filters.every(f => new RegExp(`<button data-f="${f}"`).test(pageSrc)),
+    filters.filter(f => !new RegExp(`<button data-f="${f}"`).test(pageSrc)).join(',') || 'all present');
 
   // ---- render robustness -------------------------------------------------
   const safe = (name, ...a) => {

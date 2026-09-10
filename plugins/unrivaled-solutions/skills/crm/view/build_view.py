@@ -45,16 +45,18 @@ TEMPLATE = r"""<!DOCTYPE html>
        background:var(--bg);color:var(--ink);font-size:15px;line-height:1.5}
   b,strong{font-weight:650}
   h1,h2,h3{font-weight:650;letter-spacing:-.01em}
-  header{background:var(--panel);border-bottom:1px solid var(--line);padding:14px 20px;
-         display:flex;align-items:center;gap:22px;position:sticky;top:0;z-index:5}
-  .brand{font-weight:700;font-size:17px;letter-spacing:.2px}
-  .brand span{color:var(--accent)}
+  /* the header wraps as a whole: the tiles hold one row, and the mode pill
+     drops to a second line at the right edge when there is no room for it */
+  header{background:var(--panel);border-bottom:1px solid var(--line);padding:12px 20px;
+         display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:5;flex-wrap:wrap}
+  .brand{font-weight:600;font-size:17px;letter-spacing:.2px;white-space:nowrap}
+  .brand span{color:var(--muted);font-weight:400}
   /* KPIs: one row of compact, neutral tiles -- label over an 18px tabular
      figure -- instead of five 26px numbers competing with the page. Only the
      receivables tile goes somewhere, so only it carries the accent and a
      hover. The label wraps rather than truncates: the denominator beside the
      receivables figure is the part that keeps it honest. */
-  .kpis{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
+  .kpis{display:flex;gap:8px;margin-left:auto;flex-wrap:nowrap;justify-content:flex-end}
   .kpi{display:flex;flex-direction:column-reverse;text-align:left;padding:6px 12px;
        border:1px solid var(--line);border-radius:8px;background:var(--bg);min-width:0}
   .kpi .n{font-weight:650;font-size:18px;letter-spacing:-.01em;line-height:1.15;
@@ -67,7 +69,16 @@ TEMPLATE = r"""<!DOCTYPE html>
   /* the stylesheet had no :focus rule at all -- a keyboard user could not
      see where they were, which matters more now the drawer holds focus */
   :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+  .citem,.lt-card,.kpi,.filters button,.pill-btn,.more-menu button,tbody tr td{
+    transition:background-color .15s ease,box-shadow .15s ease,border-color .15s ease}
+  /* the grid takes whatever height the header leaves, whatever the header's
+     height is -- it was calc(100vh - 59px), a number the tiles and the mode
+     pill no longer match, so the page overflowed the window by the difference */
   .wrap{display:grid;grid-template-columns:320px 1fr;gap:0;height:calc(100vh - 59px)}
+  @media (min-width:901px){
+    body{display:flex;flex-direction:column;height:100vh}
+    .wrap{flex:1 1 auto;min-height:0;height:auto}
+  }
   .sidebar{border-right:1px solid var(--line);background:var(--panel);overflow-y:auto}
   .search{padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
   .search input{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-size:14px;font-family:inherit}
@@ -100,7 +111,8 @@ TEMPLATE = r"""<!DOCTYPE html>
   .citem .owed{color:var(--red);font-weight:500}
   .main{overflow-y:auto;padding:22px 26px}
   .muted{color:var(--muted)}
-  .empty{color:var(--muted);text-align:center;margin-top:16vh}
+  .empty{color:var(--ink);text-align:left;margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .empty-row>.muted{color:var(--ink)}
   .co-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
   .co-head h1{font-size:22px;margin:0;font-weight:650}
   /* Colour means something: red = late now, amber = worth a look, accent
@@ -137,7 +149,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   .lt-card{border:1px solid transparent;border-radius:12px;background:var(--panel);
            box-shadow:var(--shadow);padding:16px 18px;margin-bottom:12px}
   .lt-card.lt-unlinked{border-style:dashed;border-color:#c9d0da}
-  .lt-card.lt-hit{box-shadow:0 0 0 2px var(--accent),var(--shadow);transition:box-shadow .2s}
+  .lt-card.lt-hit{box-shadow:0 0 0 2px var(--accent),var(--shadow)}
   /* the metadata row is meta: 13px, mostly muted */
   .lt-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
   .lt-top b{color:var(--ink);font-size:15px}
@@ -191,7 +203,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     .sidebar{border-right:0;border-bottom:1px solid var(--line);max-height:42vh}
     .main{height:auto}
     header{flex-wrap:wrap;gap:10px}
-    .kpis{margin-left:0;gap:8px;width:100%;justify-content:flex-start}
+    .kpis{margin-left:0;gap:8px;width:100%;justify-content:flex-start;flex-wrap:wrap}
     .kpi .n{font-size:16px}
     .co-head h1{font-size:19px}
   }
@@ -213,14 +225,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   .num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
   .drawer{position:fixed;top:0;right:0;width:440px;max-width:92vw;height:100vh;background:var(--panel);
           border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(20,30,50,.08);
-          transform:translateX(100%);transition:transform .18s ease;z-index:20;overflow-y:auto}
+          transform:translateX(100%);transition:transform .15s ease;z-index:20;overflow-y:auto}
   .drawer.open{transform:none}
   /* Sits between the page (z<19) and the drawer (z=20). Clicking it closes the
      drawer, and it also blocks clicks reaching the page underneath -- without
      it, clicking a company in the sidebar switched the main panel while the
      drawer stayed open still editing the PREVIOUS company's record. */
   .scrim{position:fixed;inset:0;background:rgba(20,30,50,.28);opacity:0;
-         pointer-events:none;transition:opacity .18s ease;z-index:19}
+         pointer-events:none;transition:opacity .15s ease;z-index:19}
   .scrim.open{opacity:1;pointer-events:auto}
   .drawer .dh{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
   .drawer .db{padding:20px}
@@ -242,15 +254,20 @@ TEMPLATE = r"""<!DOCTYPE html>
   .kv .k{color:var(--muted);min-width:110px}
   .pill-btn{background:var(--accent-soft);color:var(--accent);border:none;padding:5px 10px;border-radius:7px;
             font-size:13px;font-weight:500;cursor:pointer;font-family:inherit}
-  .mvp{position:fixed;bottom:12px;left:12px;background:#111827;color:#cbd5e1;font-size:12px;
-       padding:6px 10px;border-radius:6px;opacity:.9;z-index:30}
-  .mvp.live{background:#0c5132;color:#d3f4e2}
+  /* the mode pill sits at the header's right edge: a dot and the same text
+     setModePill has always written (tests read it), no longer a dark box
+     floating over the sidebar */
+  .mvp{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);
+       padding:4px 10px;border:1px solid var(--line);border-radius:20px;white-space:nowrap;align-self:center;margin-left:auto}
+  .mvp::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--amber);flex:none}
+  .mvp.live::before{background:var(--green)}
 </style>
 </head>
 <body>
 <header id="apphdr">
   <div class="brand">Unrivaled <span>CRM</span></div>
   <div class="kpis" id="kpis"></div>
+  <div class="mvp" id="modePill">Connecting…</div>
 </header>
 <div class="wrap" id="appwrap">
   <aside class="sidebar">
@@ -283,11 +300,10 @@ TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div class="clist" id="clist"></div>
   </aside>
-  <main class="main" id="main"><div class="empty">Select a company to begin.</div></main>
+  <main class="main" id="main"><div class="empty">Select a company to begin. <button class="pill-btn" onclick="setFilter('live')">Show Live projects</button></div></main>
 </div>
 <div class="scrim" id="scrim"></div>
 <div class="drawer" id="drawer" tabindex="-1"><div class="dh"><h3 id="dtitle"></h3><button class="x" id="drawerX" onclick="requestCloseDrawer()">&times;</button></div><div class="db" id="dbody"></div></div>
-<div class="mvp" id="modePill">Connecting…</div>
 
 <script>
 const DATA = __DATA__;
@@ -1276,7 +1292,7 @@ function renderLiveMain(){
     h += `</div>`;
   }
   if(!rows.length && !unlinked.length && !dismissed.length){
-    h += `<div class="empty">No live projects yet.</div>`;
+    h += `<div class="empty">No live projects yet. <button class="pill-btn" onclick="setFilter('all')">Browse companies</button></div>`;
   }
   return h;
 }
@@ -3334,7 +3350,7 @@ function setFilter(f){
   if(isProj || isRecv || isLive) renderMain();
   else if(selected) renderMain();
   else document.getElementById('main').innerHTML =
-    '<div class="empty">Select a company to begin.</div>';
+    '<div class="empty">Select a company to begin. <button class="pill-btn" onclick="setFilter(\'live\')">Show Live projects</button></div>';
 }
 document.querySelectorAll('#filters button').forEach(b=>
   b.addEventListener('click', ()=>setFilter(b.dataset.f)));
