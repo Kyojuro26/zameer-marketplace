@@ -71,7 +71,10 @@ TEMPLATE = r"""<!DOCTYPE html>
   .sidebar{border-right:1px solid var(--line);background:var(--panel);overflow-y:auto}
   .search{padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
   .search input{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-size:14px;font-family:inherit}
-  .filters{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+  /* The filters are the app's navigation: a vertical list under the search,
+     the active item accented, a right-aligned count where one is already in
+     memory. Same buttons, same data-f, same setFilter wiring. */
+  .filters{display:flex;flex-direction:column;gap:1px;margin-top:10px}
   .subfilters{margin-top:8px;display:none;flex-direction:column;gap:6px}
   .sfrow{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
   .sfrow .sfl{color:var(--muted);font-size:12px;min-width:64px}
@@ -80,14 +83,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   .sfrow button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:500}
   th.sortable{cursor:pointer;user-select:none}
   th.sortable:hover{color:var(--accent)}
-  /* content-sized, not flex:1 with a min-width. The old rule pinned every
-     button to 56px and let the LABEL overflow it, which is why "Projects" sat
-     alone on a full-width second row and "Receivables" ran off the edge on a
-     narrow window. */
-  .filters button{flex:0 1 auto;padding:6px 10px;border:1px solid var(--line);background:#fff;
-                  border-radius:7px;font-size:13px;cursor:pointer;color:var(--muted);
-                  white-space:nowrap;font-family:inherit}
-  .filters button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:500}
+  .filters button{display:flex;align-items:center;justify-content:space-between;width:100%;
+                  padding:5px 10px;border:0;background:none;text-align:left;border-radius:7px;
+                  font-size:14px;cursor:pointer;color:var(--ink);white-space:nowrap;font-family:inherit}
+  .filters button:hover{background:var(--bg)}
+  .filters button.on{background:var(--accent-soft);color:var(--accent);font-weight:500}
+  .fcount{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;margin-left:12px}
+  .filters button.on .fcount{color:var(--accent)}
+  .more.more-left .more-menu{left:0;right:auto}
   .clist{padding:6px}
   .citem{padding:9px 11px;border-radius:8px;cursor:pointer}
   .citem:hover{background:var(--bg)}
@@ -254,23 +257,28 @@ TEMPLATE = r"""<!DOCTYPE html>
     <div class="search">
       <input id="q" placeholder="Search companies, contacts, projects, invoice #, vendor PO…" autocomplete="off"/>
       <div class="filters" id="filters">
-        <button data-f="live" class="on">Live</button>
-          <button data-f="all">All</button>
-        <button data-f="customer">Customers</button>
-        <button data-f="vendor">Vendors</button>
-        <button data-f="lead">Leads</button>
-        <button data-f="project">Projects</button>
-          <button data-f="receivable">Receivables</button>
+        <button data-f="live" class="on">Live<span class="fcount" id="fc_live"></span></button>
+          <button data-f="all">All<span class="fcount" id="fc_all"></span></button>
+        <button data-f="customer">Customers<span class="fcount" id="fc_customer"></span></button>
+        <button data-f="vendor">Vendors<span class="fcount" id="fc_vendor"></span></button>
+        <button data-f="lead">Leads<span class="fcount" id="fc_lead"></span></button>
+        <button data-f="project">Projects<span class="fcount" id="fc_project"></span></button>
+          <button data-f="receivable">Receivables<span class="fcount" id="fc_receivable"></span></button>
       </div>
       <div class="subfilters" id="subfilters">
         <div class="sfrow" id="sf_status"><span class="sfl">Status</span></div>
         <div class="sfrow" id="sf_year"><span class="sfl">Year</span></div>
         <div class="sfrow" id="sf_coll"><span class="sfl">Collection</span></div>
       </div>
-      <div class="addrow" id="addrow" style="display:none;gap:6px;margin-top:8px">
-        <button class="pill-btn" style="flex:1" onclick="openNewCompany('customer')">+ Add customer</button>
-        <button class="pill-btn" style="flex:1" onclick="openNewCompany('vendor')">+ Add vendor</button>
-        <button class="pill-btn" style="flex:1" onclick="openNewCompany('lead')">+ Add lead</button>
+      <div class="addrow" id="addrow" style="display:none;gap:6px;margin-top:10px">
+        <span class="more more-left">
+          <button class="pill-btn" aria-haspopup="true" aria-expanded="false" onclick="toggleMore(event)">+ Add</button>
+          <span class="more-menu" role="menu">
+            <button role="menuitem" onclick="closeMore();openNewCompany('customer')">Add customer</button>
+            <button role="menuitem" onclick="closeMore();openNewCompany('vendor')">Add vendor</button>
+            <button role="menuitem" onclick="closeMore();openNewCompany('lead')">Add lead</button>
+          </span>
+        </span>
       </div>
     </div>
     <div class="clist" id="clist"></div>
@@ -908,7 +916,7 @@ function renderProjectsMain(){
    and the one worth chasing is the remainder. See the note in the summary
    line -- the header KPI still totals invoiced value and is left alone. */
 let recvBucket = 'Overdue';
-function setRecvBucket(b){ recvBucket = b; renderSubfilters(); renderMain(); }
+function setRecvBucket(b){ recvBucket = b; renderSubfilters(); renderMain(); renderFilterCounts(); }
 
 function allInvoices(){
   const today = todayISO(), soon = soonISO();
@@ -1672,7 +1680,22 @@ function renderProjectsList(){
     </div>`).join('') || '<div class="muted" style="padding:14px">No matches.</div>';
 }
 
+/* Counts on the navigation, from what is already in memory: the companies
+   by role, every project, the receivables in the current bucket and the Live
+   rows. Totals, not search matches -- the list below answers the search. */
+function renderFilterCounts(){
+  const set=(f,n)=>{ const el=document.getElementById('fc_'+f); if(el) el.textContent = n==null?'':String(n); };
+  const cos = DATA.companies||[];
+  set('all', cos.length);
+  set('customer', cos.filter(c=>c.role==='customer').length);
+  set('vendor', cos.filter(c=>c.role==='vendor').length);
+  set('lead', cos.filter(c=>c.role==='lead').length);
+  set('project', (DATA.projects||[]).length);
+  try{ set('receivable', recvRows().length); }catch(e){ set('receivable', null); }
+  try{ set('live', liveRows().length); }catch(e){ set('live', null); }
+}
 function renderList(){
+  renderFilterCounts();
   if(filter === 'live'){ renderLiveList(); return; }
   if(filter === 'receivable'){ renderReceivablesList(); return; }
   if(filter === 'project'){ renderProjectsList(); return; }
