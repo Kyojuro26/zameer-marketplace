@@ -79,8 +79,8 @@ M = [
  ("scrim inset:0 -> inset:auto (covers nothing)",
   ".scrim{position:fixed;inset:0;", ".scrim{position:fixed;inset:auto;"),
  ("scrim z-index below the sticky header",
-  "pointer-events:none;transition:opacity .18s ease;z-index:19}",
-  "pointer-events:none;transition:opacity .18s ease;z-index:1}"),
+  "pointer-events:none;transition:opacity .15s ease;z-index:19}",
+  "pointer-events:none;transition:opacity .15s ease;z-index:1}"),
 
  # ---- focus containment --------------------------------------------------
  ("page never goes inert (keyboard reaches under the scrim)", "  pageInert(true);\n", ""),
