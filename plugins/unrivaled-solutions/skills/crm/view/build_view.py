@@ -37,8 +37,13 @@ TEMPLATE = r"""<!DOCTYPE html>
     --amber:#8a5a00; --amber-soft:#fdf1dc; --red:#a3282b; --red-soft:#fbe7e7; --slate:#475569;
   }
   *{box-sizing:border-box}
-  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-       background:var(--bg);color:var(--ink);font-size:14px;line-height:1.45}
+  /* Type: a three-step scale -- 13px muted meta, 15px body, 17/22px headings
+     -- with weight contrast 400/500/650. Inter only if the machine has it;
+     the page runs offline under default-src 'none', so nothing is fetched. */
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--ink);font-size:15px;line-height:1.5}
+  b,strong{font-weight:650}
+  h1,h2,h3{font-weight:650;letter-spacing:-.01em}
   header{background:var(--panel);border-bottom:1px solid var(--line);padding:14px 20px;
          display:flex;align-items:center;gap:22px;position:sticky;top:0;z-index:5}
   .brand{font-weight:700;font-size:17px;letter-spacing:.2px}
@@ -56,14 +61,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   .wrap{display:grid;grid-template-columns:320px 1fr;gap:0;height:calc(100vh - 59px)}
   .sidebar{border-right:1px solid var(--line);background:var(--panel);overflow-y:auto}
   .search{padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
-  .search input{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-size:13px}
+  .search input{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-size:14px;font-family:inherit}
   .filters{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
   .subfilters{margin-top:8px;display:none;flex-direction:column;gap:6px}
   .sfrow{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
-  .sfrow .sfl{color:var(--muted);font-size:11px;min-width:64px}
+  .sfrow .sfl{color:var(--muted);font-size:12px;min-width:64px}
   .sfrow button{flex:0 1 auto;padding:4px 8px;border:1px solid var(--line);background:#fff;
-                border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted);white-space:nowrap}
-  .sfrow button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+                border-radius:6px;font-size:12px;cursor:pointer;color:var(--muted);white-space:nowrap;font-family:inherit}
+  .sfrow button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:500}
   th.sortable{cursor:pointer;user-select:none}
   th.sortable:hover{color:var(--accent)}
   /* content-sized, not flex:1 with a min-width. The old rule pinned every
@@ -71,22 +76,22 @@ TEMPLATE = r"""<!DOCTYPE html>
      alone on a full-width second row and "Receivables" ran off the edge on a
      narrow window. */
   .filters button{flex:0 1 auto;padding:6px 10px;border:1px solid var(--line);background:#fff;
-                  border-radius:7px;font-size:12px;cursor:pointer;color:var(--muted);
-                  white-space:nowrap}
-  .filters button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+                  border-radius:7px;font-size:13px;cursor:pointer;color:var(--muted);
+                  white-space:nowrap;font-family:inherit}
+  .filters button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:500}
   .clist{padding:6px}
   .citem{padding:9px 11px;border-radius:8px;cursor:pointer}
   .citem:hover{background:var(--bg)}
   .citem.sel{background:var(--accent-soft)}
-  .citem .cn{font-weight:600}
-  .citem .cm{color:var(--muted);font-size:12px;display:flex;gap:8px;margin-top:2px;flex-wrap:wrap}
-  .citem .owed{color:var(--red);font-weight:600}
+  .citem .cn{font-weight:500}
+  .citem .cm{color:var(--muted);font-size:13px;display:flex;gap:8px;margin-top:2px;flex-wrap:wrap}
+  .citem .owed{color:var(--red);font-weight:500}
   .main{overflow-y:auto;padding:22px 26px}
   .muted{color:var(--muted)}
   .empty{color:var(--muted);text-align:center;margin-top:16vh}
   .co-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
-  .co-head h1{font-size:22px;margin:0}
-  .badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;text-transform:capitalize;white-space:nowrap;display:inline-block}
+  .co-head h1{font-size:22px;margin:0;font-weight:650}
+  .badge{font-size:11px;font-weight:500;padding:2px 8px;border-radius:20px;text-transform:capitalize;white-space:nowrap;display:inline-block}
   .b-customer{background:var(--accent-soft);color:var(--accent)}
   .b-vendor{background:#eef0f3;color:var(--slate)}
   .b-lead{background:var(--amber-soft);color:var(--amber)}
@@ -101,19 +106,22 @@ TEMPLATE = r"""<!DOCTYPE html>
   .swatch.b-await{background:#2296ad} .swatch.b-stage{background:var(--muted)}
   .lt-head{display:flex;align-items:center;gap:9px;margin:0 0 10px;
            border-bottom:1px solid var(--line);padding-bottom:6px}
-  .lt-head h2{font-size:13.5px;font-weight:650;color:var(--ink)}
+  .lt-head h2{font-size:17px;font-weight:650;color:var(--ink);margin:0}
   .lt-card{border:1px solid var(--line);border-radius:10px;background:var(--panel);
-           padding:12px 14px;margin-bottom:10px}
+           padding:16px 18px;margin-bottom:10px}
   .lt-card.lt-unlinked{border-style:dashed}
   .lt-card.lt-hit{box-shadow:0 0 0 2px var(--accent);transition:box-shadow .2s}
-  .lt-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13.5px}
-  /* the note is the substance of this screen -- never truncated, wraps freely */
-  .lt-note{margin:8px 0 0;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
-  .lt-legs{margin-top:9px;display:flex;flex-direction:column;gap:4px}
-  .lt-leg{display:flex;gap:10px;align-items:center;font-size:12.5px;flex-wrap:wrap}
+  /* the metadata row is meta: 13px, mostly muted */
+  .lt-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+  .lt-top b{color:var(--ink);font-size:15px}
+  /* the note is the substance of this screen -- body size, full ink, never
+     truncated, wraps freely: larger and darker than the row above it */
+  .lt-note{margin:8px 0 0;font-size:15px;line-height:1.5;white-space:pre-wrap;color:var(--ink)}
+  .lt-legs{margin-top:10px;display:flex;flex-direction:column;gap:4px}
+  .lt-leg{display:flex;gap:10px;align-items:center;font-size:13px;flex-wrap:wrap}
   .lt-po{color:var(--muted);min-width:190px}
-  .lt-bad{color:var(--red);font-weight:600}
-  .lt-warn{color:var(--amber);font-weight:600}
+  .lt-bad{color:var(--red);font-weight:500}
+  .lt-warn{color:var(--amber);font-weight:500}
   .due-group{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
              padding:10px 8px 4px;border-bottom:1px solid var(--line)}
   .due-group.od{color:var(--red)}
@@ -124,12 +132,12 @@ TEMPLATE = r"""<!DOCTYPE html>
   .section{margin-top:22px}
   /* was 12px uppercase muted -- SMALLER than the body text it headed, so a
      section title read as quieter than its own contents */
-  .section h2{font-size:13.5px;font-weight:650;letter-spacing:-.005em;color:var(--ink);
+  .section h2{font-size:17px;font-weight:650;letter-spacing:-.01em;color:var(--ink);
               margin:0 0 8px;border-bottom:1px solid var(--line);padding-bottom:6px;
               text-transform:none}
-  .co-sum{margin:2px 0 4px;font-size:13.5px;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+  .co-sum{margin:2px 0 4px;font-size:15px;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
   .co-sum .late{color:var(--red)}
-  .co-sum .ok{color:var(--green);font-weight:600}
+  .co-sum .ok{color:var(--green);font-weight:500}
   .co-sum a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
   .empty-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 0;color:var(--muted)}
   .pill-btn.pri{background:var(--accent);color:#fff}
@@ -141,7 +149,7 @@ TEMPLATE = r"""<!DOCTYPE html>
              box-shadow:0 8px 24px rgba(20,30,50,.14);padding:5px;min-width:190px}
   .more.show .more-menu{display:block}
   .more-menu button{display:block;width:100%;text-align:left;border:0;background:none;
-                    font:inherit;font-size:13px;color:var(--ink);padding:7px 10px;
+                    font:inherit;font-size:14px;color:var(--ink);padding:7px 10px;
                     border-radius:6px;cursor:pointer;white-space:nowrap}
   .more-menu button:hover{background:var(--bg)}
   .more-menu button.danger{color:var(--red)}
@@ -182,25 +190,25 @@ TEMPLATE = r"""<!DOCTYPE html>
   .scrim.open{opacity:1;pointer-events:auto}
   .drawer .dh{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
   .drawer .db{padding:20px}
-  .drawer h3{margin:0;font-size:17px}
+  .drawer h3{margin:0;font-size:17px;font-weight:650}
   .x{cursor:pointer;color:var(--muted);font-size:20px;border:none;background:none}
   .field{margin-bottom:14px}
   .field label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);margin-bottom:4px}
-  .field input,.field select,.field textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px;font-family:inherit}
+  .field input,.field select,.field textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:14px;font-family:inherit}
   .field textarea{min-height:70px;resize:vertical}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-  .btn{background:var(--accent);color:#fff;border:none;padding:9px 16px;border-radius:8px;font-weight:600;cursor:pointer;font-size:13px}
+  .btn{background:var(--accent);color:#fff;border:none;padding:9px 16px;border-radius:8px;font-weight:500;cursor:pointer;font-size:14px;font-family:inherit}
   .btn:disabled{opacity:.55;cursor:wait}
   .btn.ghost{background:#fff;color:var(--slate);border:1px solid var(--line)}
   .saved{font-size:12px;margin-left:10px;opacity:0;transition:opacity .2s}
   .saved.show{opacity:1}
   .saved.okc{color:var(--green)}
   .saved.errc{color:var(--red)}
-  .kv{display:flex;gap:8px;margin:4px 0;font-size:13px}
+  .kv{display:flex;gap:8px;margin:4px 0;font-size:14px}
   .kv .k{color:var(--muted);min-width:110px}
   .pill-btn{background:var(--accent-soft);color:var(--accent);border:none;padding:5px 10px;border-radius:7px;
-            font-size:12px;font-weight:600;cursor:pointer}
-  .mvp{position:fixed;bottom:12px;left:12px;background:#111827;color:#cbd5e1;font-size:11px;
+            font-size:13px;font-weight:500;cursor:pointer;font-family:inherit}
+  .mvp{position:fixed;bottom:12px;left:12px;background:#111827;color:#cbd5e1;font-size:12px;
        padding:6px 10px;border-radius:6px;opacity:.9;z-index:30}
   .mvp.live{background:#0c5132;color:#d3f4e2}
 </style>
