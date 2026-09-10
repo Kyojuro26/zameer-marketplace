@@ -32,7 +32,8 @@ TEMPLATE = r"""<!DOCTYPE html>
 <title>Unrivaled CRM</title>
 <style>
   :root{
-    --bg:#f6f7f9; --panel:#ffffff; --ink:#1a2230; --muted:#5a687c; --line:#e4e8ee;
+    --bg:#f2f4f7; --panel:#ffffff;
+    --shadow:0 1px 2px rgba(20,30,50,.06), 0 4px 12px rgba(20,30,50,.05); --ink:#1a2230; --muted:#5a687c; --line:#e4e8ee;
     --accent:#2563eb; --accent-soft:#eaf1ff; --green:#127a4b; --green-soft:#e4f5ec;
     --amber:#8a5a00; --amber-soft:#fdf1dc; --red:#a3282b; --red-soft:#fbe7e7; --slate:#475569;
   }
@@ -127,10 +128,13 @@ TEMPLATE = r"""<!DOCTYPE html>
   .lt-head{display:flex;align-items:center;gap:9px;margin:0 0 10px;
            border-bottom:1px solid var(--line);padding-bottom:6px}
   .lt-head h2{font-size:17px;font-weight:650;color:var(--ink);margin:0}
-  .lt-card{border:1px solid var(--line);border-radius:10px;background:var(--panel);
-           padding:16px 18px;margin-bottom:10px}
-  .lt-card.lt-unlinked{border-style:dashed}
-  .lt-card.lt-hit{box-shadow:0 0 0 2px var(--accent);transition:box-shadow .2s}
+  /* Cards: white on a one-step-darker page, 12px radius, a soft two-layer
+     shadow instead of a hairline, 12px apart. The unlinked card keeps its
+     dashed edge and the liveJump target its ring, on top of the shadow. */
+  .lt-card{border:1px solid transparent;border-radius:12px;background:var(--panel);
+           box-shadow:var(--shadow);padding:16px 18px;margin-bottom:12px}
+  .lt-card.lt-unlinked{border-style:dashed;border-color:#c9d0da}
+  .lt-card.lt-hit{box-shadow:0 0 0 2px var(--accent),var(--shadow);transition:box-shadow .2s}
   /* the metadata row is meta: 13px, mostly muted */
   .lt-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
   .lt-top b{color:var(--ink);font-size:15px}
@@ -146,7 +150,11 @@ TEMPLATE = r"""<!DOCTYPE html>
              padding:10px 8px 4px;border-bottom:1px solid var(--line)}
   .due-group.od{color:var(--red)}
   .b-won,.b-pending,.b-lost,.b-stage{background:#fff;color:var(--slate)}
-  .section{margin-top:22px}
+  /* a section -- a heading and its table -- is a card too, so the tables sit
+     on white rather than directly on the page ground */
+  .section{margin-top:22px;background:var(--panel);border-radius:12px;box-shadow:var(--shadow);padding:14px 16px 6px}
+  /* a Live bucket is a heading over cards, not a card itself */
+  .section.lt-section{background:transparent;box-shadow:none;padding:0;border-radius:0}
   /* was 12px uppercase muted -- SMALLER than the body text it headed, so a
      section title read as quieter than its own contents */
   .section h2{font-size:17px;font-weight:650;letter-spacing:-.01em;color:var(--ink);
@@ -1187,7 +1195,7 @@ function renderLiveMain(){
   trackerBuckets().forEach(b=>{
     const mine = rows.filter(r=>st(r.p.tracker_status)===b.key);
     if(!mine.length) return;
-    h += `<div class="section"><div class="lt-head">
+    h += `<div class="section lt-section"><div class="lt-head">
       <span class="swatch ${bucketClass(b.key)}"></span>
       <h2 style="border:0;padding:0;margin:0">${esc(bucketLabel(b.key))}</h2>
       <span class="muted">${mine.length}</span></div>`;
@@ -1204,7 +1212,7 @@ function renderLiveMain(){
   });
 
   if(orphans.length){
-    h += `<div class="section"><div class="lt-head">
+    h += `<div class="section lt-section"><div class="lt-head">
       <span class="swatch b-stage"></span>
       <h2 style="border:0;padding:0;margin:0">Status not recognised</h2>
       <span class="muted">${orphans.length}</span></div>
@@ -1217,7 +1225,7 @@ function renderLiveMain(){
   }
 
   if(unlinked.length){
-    h += `<div class="section"><div class="lt-head">
+    h += `<div class="section lt-section"><div class="lt-head">
       <span class="swatch b-stage"></span>
       <h2 style="border:0;padding:0;margin:0">Not in the CRM yet</h2>
       <span class="muted">${leftToClear} row${leftToClear===1?'':'s'} left to clear${
@@ -1239,7 +1247,7 @@ function renderLiveMain(){
   // click from coming back. The import sweep is the other half: a dismissal
   // cannot outlive the row it was scoped to.
   if(dismissed.length){
-    h += `<div class="section"><div class="lt-head">
+    h += `<div class="section lt-section"><div class="lt-head">
       <span class="swatch b-stage"></span>
       <h2 style="border:0;padding:0;margin:0">Dismissed</h2>
       <span class="muted">${dismissed.length}</span></div>
