@@ -48,13 +48,21 @@ TEMPLATE = r"""<!DOCTYPE html>
          display:flex;align-items:center;gap:22px;position:sticky;top:0;z-index:5}
   .brand{font-weight:700;font-size:17px;letter-spacing:.2px}
   .brand span{color:var(--accent)}
-  .kpis{display:flex;gap:22px;margin-left:auto;flex-wrap:wrap}
-  .kpi{text-align:right}
-  .kpi .n{font-weight:700;font-size:26px;letter-spacing:-.02em;line-height:1.05;
-          font-variant-numeric:tabular-nums}
-  .kpi .l{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
-  .kpi.go{cursor:pointer;border-radius:8px;padding:2px 8px;margin:-2px -8px}
-  .kpi.go:hover{background:var(--bg)}
+  /* KPIs: one row of compact, neutral tiles -- label over an 18px tabular
+     figure -- instead of five 26px numbers competing with the page. Only the
+     receivables tile goes somewhere, so only it carries the accent and a
+     hover. The label wraps rather than truncates: the denominator beside the
+     receivables figure is the part that keeps it honest. */
+  .kpis{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
+  .kpi{display:flex;flex-direction:column-reverse;text-align:left;padding:6px 12px;
+       border:1px solid var(--line);border-radius:8px;background:var(--bg);min-width:0}
+  .kpi .n{font-weight:650;font-size:18px;letter-spacing:-.01em;line-height:1.15;
+          font-variant-numeric:tabular-nums;color:var(--ink)}
+  .kpi .l{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;
+          line-height:1.3;max-width:260px}
+  .kpi.go{cursor:pointer;border-color:#c7d7f8;background:var(--accent-soft)}
+  .kpi.go .n{color:var(--accent)}
+  .kpi.go:hover{background:#dbe7fd;border-color:var(--accent)}
   /* the stylesheet had no :focus rule at all -- a keyboard user could not
      see where they were, which matters more now the drawer holds focus */
   :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
@@ -163,8 +171,8 @@ TEMPLATE = r"""<!DOCTYPE html>
     .sidebar{border-right:0;border-bottom:1px solid var(--line);max-height:42vh}
     .main{height:auto}
     header{flex-wrap:wrap;gap:10px}
-    .kpis{margin-left:0;gap:14px;width:100%}
-    .kpi .n{font-size:20px}
+    .kpis{margin-left:0;gap:8px;width:100%;justify-content:flex-start}
+    .kpi .n{font-size:16px}
     .co-head h1{font-size:19px}
   }
   table{width:100%;border-collapse:collapse}
