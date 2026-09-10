@@ -57,8 +57,30 @@ M = [
  # ---- a project is (number, customer) --------------------------------------
  ("the lookup finds the first record of that number, whichever customer's",
   "  return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno)\n"
-  "                              && (!scoped || st(x.company_id) === st(cid)));",
+  "                              && (!hasCid(cid) || st(x.company_id) === st(cid)));",
   "  return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno));"),
+ # ---- review round 1: three classes on the page, one in the builder --------
+ ("an empty customer means no customer again",
+  "function hasCid(cid){ return cid !== undefined && cid !== null; }",
+  "function hasCid(cid){ return cid !== undefined && cid !== null && st(cid) !== ''; }"),
+ ("the Receivables link uses the invoice's customer as a hard filter",
+  "  const holders = projectsNumbered(pno);\n"
+  "  if(holders.some(x => st(x.company_id) === st(cid))) return st(cid);\n"
+  "  return holders.length === 1 ? st(holders[0].company_id) : null;",
+  "  return st(cid);"),
+ ("the local mirror is confined to the customer on an unshared number too",
+  "  return projectsNumbered(pno).length > 1 ? st(cid) : null;",
+  "  return st(cid);"),
+ ("the page hides invoices by the number alone again",
+  "    data[\"invoices\"] = [i for i in data[\"invoices\"]\n"
+  "                        if not _srv._invoice_hidden(i, arch)]",
+  "    data[\"invoices\"] = [i for i in data[\"invoices\"]\n"
+  "                        if _srv._key(i.get(\"project_no\")) not in arch.archived]"),
+ ("the page hides legs by the number alone again",
+  "    data[\"shipments\"] = [x for x in data[\"shipments\"]\n"
+  "                         if not _srv._shipment_hidden(x, arch)]",
+  "    data[\"shipments\"] = [x for x in data[\"shipments\"]\n"
+  "                         if not _srv._shipment_project_nos(x) <= arch.archived]"),
  ("the Live card Edit passes the number alone",
   "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button>`",
   "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}')\">Edit</button>`"),

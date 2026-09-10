@@ -194,4 +194,97 @@ def run(server, crm_dir=None):
     res = s.call("get_project", project_no="4521", company_id="beta")
     r.check("while the other customer's single record is still reachable",
             res.get("ok") and res["project"]["description"] == "Beta's job", json.dumps(res)[:200])
+
+    # ---- 5. archiving one twin hides that customer's records, not the number's ----
+    # (review round 1) The archived set was keyed by the number alone, so
+    # archiving Acme's 4521 hid Beta's live leg and invoice from every read.
+    r.section("archiving one twin hides only that customer's records")
+    seed(s)
+    s.call("archive_project", project_no="4521", company_id="acme")
+    res = s.call("list_shipments")
+    r.check("list_shipments still lists the live twin's leg, and not the archived twin's",
+            [x["shipment_id"] for x in res.get("shipments", [])] == ["4521-L2"], json.dumps(res)[:200])
+    res = s.call("list_invoices")
+    r.check("list_invoices still lists the live twin's invoice, and not the archived twin's",
+            [x["invoice_no"] for x in res.get("invoices", [])] == ["7002"], json.dumps(res)[:200])
+    res = s.call("get_company", ref="beta")
+    r.check("get_company for the live twin's customer shows its leg and invoice",
+            [x["shipment_id"] for x in res.get("shipments", [])] == ["4521-L2"]
+            and [x["invoice_no"] for x in res.get("invoices", [])] == ["7002"], json.dumps(res)[:300])
+    res = s.call("get_company", ref="acme")
+    r.check("and the archived twin's customer shows neither",
+            res.get("ok") and res.get("shipments") == [] and res.get("invoices") == [], json.dumps(res)[:300])
+    res = s.call("get_project", project_no="4521", company_id="beta")
+    r.check("get_project for the live twin lists its leg",
+            res.get("ok") and [x["shipment_id"] for x in res["shipments"]] == ["4521-L2"], json.dumps(res)[:200])
+    s.call("archive_project", project_no="4521", company_id="beta")
+    res = s.call("list_shipments")
+    r.check("with both twins archived every leg on the number hides",
+            [x["shipment_id"] for x in res.get("shipments", [])] == [], json.dumps(res)[:200])
+    # an UNSHARED number archived hides every record on it, whatever company
+    # the record carries -- the importer leaves legs and invoices with no
+    # company, and they must follow their only project as they always did
+    seed(s)
+    s.write("shipments", s.read("shipments")
+            + [shipment("4600-L1", "4600", None), shipment("4600-L2", "4600", "acme")])
+    s.write("invoices", s.read("invoices")
+            + [invoice("7003", None, project_no="4600"), invoice("7004", "beta", project_no="4600")])
+    s.call("archive_project", project_no="4600", company_id="acme")
+    res = s.call("list_shipments")
+    r.check("archiving a number one customer holds hides its company-less leg too",
+            sorted(x["shipment_id"] for x in res.get("shipments", [])) == ["4521-L1", "4521-L2"],
+            json.dumps(res)[:200])
+    res = s.call("list_invoices")
+    r.check("and its company-less and mis-filed invoices",
+            sorted(x["invoice_no"] for x in res.get("invoices", [])) == ["7001", "7002"],
+            json.dumps(res)[:200])
+    s.call("restore_project", project_no="4600", company_id="acme")
+    res = s.call("list_shipments")
+    r.check("restoring it brings them back",
+            len(res.get("shipments", [])) == 4, json.dumps(res)[:200])
+
+    # ---- 6. a move cannot mint a same-customer duplicate ---------------------------
+    # (review round 1) create_project and rename_project refuse a second
+    # record of one number at one customer; the move path did not.
+    r.section("a move onto a customer that already holds the number is refused")
+    seed(s)
+    s.write("companies", [company("acme", "Ace Manufacturing"), company("beta", "Beta Works"),
+                          company("gamma", "Gamma Ltd")])
+    before = copy.deepcopy(s.read("projects")), copy.deepcopy(s.read("shipments"))
+    res = s.call("update_project", project_no="4521", fields={"company_id": "beta"}, company_id="acme")
+    r.check("moving one twin onto the other's customer is refused",
+            res.get("ok") is False and "already exists" in str(res.get("error")), json.dumps(res)[:200])
+    r.check("and nothing moved",
+            (s.read("projects"), s.read("shipments")) == before)
+    res = s.call("update_project", project_no="4521", fields={"company_id": "gamma"}, company_id="acme")
+    r.check("moving it to a customer without the number still works and carries its records",
+            res.get("ok") and res.get("shipments_moved") == 1 and res.get("invoices_moved") == 1
+            and rec(s, "gamma") is not None and rec(s, "acme") is None, json.dumps(res)[:200])
+
+    # ---- 7. company_id on a number one customer holds changes nothing ---------------
+    # (review round 1) The cascade and the leg list were confined to the
+    # named customer whenever one was named, so a scoped rename on an
+    # unshared number stranded the company-less and mis-filed records on a
+    # dead number -- and the drawer always names the customer.
+    r.section("a scoped call on a number one customer holds follows the number alone")
+    seed(s)
+    s.write("shipments", s.read("shipments")
+            + [shipment("4600-L1", "4600", None), shipment("4600-L2", "4600", "acme")])
+    s.write("invoices", s.read("invoices")
+            + [invoice("7003", None, project_no="4600"), invoice("7004", "beta", project_no="4600")])
+    res = s.call("get_project", project_no="4600", company_id="acme")
+    r.check("get_project with company_id lists the company-less leg on an unshared number",
+            res.get("ok") and sorted(x["shipment_id"] for x in res["shipments"]) == ["4600-L1", "4600-L2"],
+            json.dumps(res.get("shipments"))[:200])
+    res = s.call("rename_project", old_project_no="4600", new_project_no="4601", company_id="acme")
+    ships = {x["shipment_id"]: x for x in s.read("shipments")}
+    invs = {x["invoice_no"]: x for x in s.read("invoices")}
+    r.check("a scoped rename on an unshared number carries every leg on it",
+            res.get("ok") and res.get("shipments_updated") == 2
+            and str(ships["4600-L1"]["project_no"]) == "4601" and str(ships["4600-L2"]["project_no"]) == "4601",
+            json.dumps(res)[:200])
+    r.check("and every invoice on it, company-less or mis-filed",
+            res.get("invoices_updated") == 2
+            and str(invs["7003"]["project_no"]) == "4601" and str(invs["7004"]["project_no"]) == "4601",
+            json.dumps(invs)[:300])
     return r

@@ -182,7 +182,7 @@ M = [
  ("invoices of archived companies are in the population",
   '        self.invoices = [i for i in STORE.load("invoices")\n'
   '                         if _hk(i.get("company_id")) not in self.arch_cids\n'
-  '                         and _key(i.get("project_no")) not in self.arch_pnos]',
+  '                         and not _invoice_hidden(i, self.arch_pnos)]',
   '        self.invoices = list(STORE.load("invoices"))'),
  ("legs of archived projects are in the population",
   '        self.shipments = [s for s in STORE.load("shipments")\n'

@@ -44,7 +44,7 @@ M = [
  ("get_project lists every leg carrying the number, whichever customer's",
   '    shipments = [s for s in STORE.load("shipments")\n'
   '                 if want in _shipment_project_nos(s)\n'
-  '                 and (company_id is None or _key(s.get("company_id")) == cid)]',
+  '                 and (scope is None or _key(s.get("company_id")) == scope)]',
   '    shipments = [s for s in STORE.load("shipments")\n'
   '                 if want in _shipment_project_nos(s)]'),
  ("update_project ignores company_id",
@@ -66,6 +66,23 @@ M = [
  ("the rename cascade carries the OTHER customer's invoices too",
   '                if scope is not None and _key(i.get("company_id")) != scope:\n'
   '                    continue\n', ""),
+ # ---- review round 1: three classes ---------------------------------------
+ ("an archived twin hides the live twin's records again -- by the number alone",
+  '        if pno_key not in self.live:\n'
+  '            return True\n'
+  '        return (pno_key, cid_key) in self.pairs',
+  '        return True'),
+ ("an archived number hides only records filed under its own customer, so an unshared project's company-less legs stay",
+  '        if pno_key not in self.live:\n'
+  '            return True\n', ""),
+ ("a move onto a customer already holding the number goes through",
+  '            if new_cid != old_cid and any(\n'
+  '                    p is not target[0] and _key(p.get("project_no")) == want\n'
+  '                    and _key(p.get("company_id")) == new_cid for p in projects):\n',
+  '            if False:\n'),
+ ("the cascade is confined whenever a customer is named, shared number or not",
+  '    return _key(company_id) if len(holders) > 1 else None',
+  '    return _key(company_id)'),
  # RETIRED, deliberately: "the cascade scope is taken from the argument, not
  # the record it found" -- _key(company_id) vs _key(target[0]["company_id"]).
  # The filter in _one_project only returns a record whose key EQUALS the

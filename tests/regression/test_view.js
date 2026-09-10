@@ -56,16 +56,24 @@ function seedStore(dir) {
     // and one on the Live screen, which renders its own card and list item
     { company_id: 'acme', project_no: null, status: 'won', year: 2024,
       revenue: 700, description: 'numberless live', archived: false, date: '2026-05-05',
-      tracker_status: 'action_admin', open_orders_notes: 'numberless live job' }]);
+      tracker_status: 'action_admin', open_orders_notes: 'numberless live job' },
+    // a number only Acme holds, with a leg the importer left company-less and
+    // an invoice mis-filed under Beta (review round 1). year 2024 again.
+    { company_id: 'acme', project_no: '4600', status: 'won', year: 2024, revenue: 60,
+      description: 'acme only', archived: false }]);
   w('shipments', [
     { shipment_id: '4521-L1', company_id: 'acme', project_no: '4521',
       all_project_nos: '4521', stage: null, ship_date: 45731 },
     { shipment_id: '4521-L2', company_id: 'acme', project_no: '4521',
       all_project_nos: ['4521'], stage: 'Shipped', ship_date: '3/14/2026' },
     { shipment_id: '4521-L3', company_id: 'acme', project_no: 4521,
-      all_project_nos: [4521], stage: 'Ordered', ship_date: '2026-03-14 00:00:00' }]);
+      all_project_nos: [4521], stage: 'Ordered', ship_date: '2026-03-14 00:00:00' },
+    { shipment_id: '4600-L1', company_id: null, project_no: '4600',
+      all_project_nos: ['4600'], stage: 'Ordered' }]);
   w('invoices', [{ company_id: 'acme', invoice_no: '9001', project_no: '4521',
-    payment_status: 'partial:30%', payment_notes: 45731, invoice_date: 45731 }]);
+    payment_status: 'partial:30%', payment_notes: 45731, invoice_date: 45731 },
+    { company_id: 'beta', invoice_no: '9002', project_no: '4600',
+      payment_status: 'open', invoice_date: '2026-01-01' }]);
   w('vendors', []); w('needs_review', []);
   return dir;
 }
@@ -345,6 +353,74 @@ async function run(crmDir) {
   r.check('a save with no customer given sends none',
     bare && !('company_id' in bare.args) && bare.args.project_no === '4521', bare && JSON.stringify(bare.args).slice(0, 120));
   safe('closeDrawer');
+
+  // ---- review round 1: the customer is a guess on the Receivables screen ------
+  // Invoice 9002 is filed under Beta but linked to 4600, which only Acme
+  // holds. The invoice's company used as a hard filter rendered a link that
+  // opened nothing.
+  safe('setFilter', 'receivable');
+  const recvRow = clickOf((app.el('main') || EMPTY).innerHTML, '9002', 'tr');
+  r.check("a Receivables link for an invoice filed under a customer that does not hold the number names the holder",
+    /openProject\('4600','acme'\)/.test(recvRow), recvRow.slice(0, 300));
+  safe('closeDrawer'); safe('openProject', '4600', 'acme');
+  r.check('and it opens the holder\'s project',
+    (app.el('f_desc') || EMPTY).value === 'acme only', `desc=${(app.el('f_desc') || EMPTY).value}`);
+  // ---- review round 1: a scoped mirror on a number one customer holds ------
+  // The server's cascade follows the number alone when it is unshared; the
+  // page's mirror must too, or the company-less leg and the mis-filed
+  // invoice stay on a number no project holds until the next reload.
+  if (app.el('f_pno')) app.el('f_pno').value = '4601';
+  app.resetCalls();
+  await app.fn('saveProject')('4600', 'acme');
+  const moved = JSON.parse(app.eval("JSON.stringify([DATA.shipments.find(x=>x.shipment_id==='4600-L1').project_no, DATA.invoices.find(x=>x.invoice_no==='9002').project_no])"));
+  r.check("a rename from the sole holder's drawer renumbers its company-less leg and mis-filed invoice locally",
+    JSON.stringify(moved) === JSON.stringify(['4601', '4601']), JSON.stringify(moved));
+  safe('closeDrawer'); safe('openProject', '4601', 'acme');
+  if (app.el('f_pno')) app.el('f_pno').value = '4600';
+  await app.fn('saveProject')('4601', 'acme');
+  safe('closeDrawer');
+
+  // ---- review round 1: one twin archived, and a company-less twin ------------
+  // A second store: Acme's 4521 archived, Beta's live, and a third record of
+  // 4521 with no company at all. The page hid Beta's leg and invoice along
+  // with Acme's (the archived set keyed by the number alone), and the
+  // company-less twin's own card opened ACME's drawer ('' read as "no
+  // customer" on the page, while the server reads it as the empty key).
+  const dirB = path.join(tmp, 'store-twins');
+  fs.mkdirSync(dirB, { recursive: true });
+  const wB = (n, v) => fs.writeFileSync(path.join(dirB, n + '.json'), JSON.stringify(v, null, 2));
+  wB('companies', [{ company_id: 'acme', display_name: 'Ace Manufacturing', role: 'customer', domains: [], locations: [], archived: false },
+    { company_id: 'beta', display_name: 'Beta Works', role: 'customer', domains: [], locations: [], archived: false }]);
+  wB('projects', [
+    { company_id: 'acme', project_no: '4521', status: 'won', year: 2024, revenue: 1, description: 'Acme job', archived: true },
+    { company_id: 'beta', project_no: '4521', status: 'won', year: 2024, revenue: 2, description: 'Beta job', archived: false,
+      tracker_status: 'action_admin', open_orders_notes: 'beta live job' },
+    { company_id: null, project_no: '4521', status: 'won', year: 2024, revenue: 3, description: 'orphan job', archived: false,
+      tracker_status: 'action_admin', open_orders_notes: 'orphan live job' }]);
+  wB('shipments', [
+    { shipment_id: '4521-LA', company_id: 'acme', project_no: '4521', all_project_nos: ['4521'], stage: 'Ordered', vendor_po_raw: 'VPO-ACME' },
+    { shipment_id: '4521-LB', company_id: 'beta', project_no: '4521', all_project_nos: ['4521'], stage: 'Ordered', vendor_po_raw: 'VPO-BETA' }]);
+  wB('invoices', [
+    { company_id: 'acme', invoice_no: '7001', project_no: '4521', payment_status: 'open', invoice_date: '2026-01-01' },
+    { company_id: 'beta', invoice_no: '7002', project_no: '4521', payment_status: 'open', invoice_date: '2026-01-01' }]);
+  wB('contacts', []); wB('vendors', []); wB('needs_review', []);
+  const appB = launch({ crmDir, storeDir: dirB, outDir: tmp, mode: 'http' });
+  const onPageB = JSON.parse(appB.eval("JSON.stringify([DATA.shipments.map(s=>s.shipment_id), DATA.invoices.map(i=>i.invoice_no)])"));
+  r.check("with one twin archived, the live twin's leg and invoice are still on the page, and the archived twin's are not",
+    JSON.stringify(onPageB) === JSON.stringify([['4521-LB'], ['7002']]), JSON.stringify(onPageB));
+  appB.eval("setFilter('all'); select('beta');");
+  const mainB = appB.doc.getElementById('main').innerHTML;
+  r.check("and Beta's company page shows them",
+    /VPO-BETA/.test(mainB) && /7002/.test(mainB), mainB.slice(0, 300));
+  appB.eval("setFilter('live');");
+  const orphanCard = clickOf(appB.doc.getElementById('main').innerHTML, 'orphan live job', 'div class="lt-card"');
+  r.check("a company-less twin's own Live card names its empty customer",
+    /openProject\('4521',''\)/.test(orphanCard), orphanCard.slice(0, 300));
+  appB.fn('openProject')('4521', '');
+  r.check("and opens ITS drawer, not another customer's record of the number",
+    (appB.el('f_desc') || EMPTY).value === 'orphan job'
+      && /saveProject\('4521',''\)/.test((appB.el('dbody') || EMPTY).innerHTML || ''),
+    `desc=${(appB.el('f_desc') || EMPTY).value}`);
 
   // ---- KPI arithmetic ----------------------------------------------------
   // nothing validates the TYPE of year or revenue, and `a + (p.revenue||0)` on

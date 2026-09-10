@@ -940,6 +940,27 @@ def _one_project(projects, key, what, company_id=None):
     return matches[0] if matches else None
 
 
+def _cascade_scope(projects, key, company_id):
+    """The company a cascade or a leg list is confined to, or None.
+
+    company_id only narrows. It names which of two customers' projects a call
+    means, and once _one_project has answered that, the records on the number
+    are that project's whether the number was shared or not. Confining the
+    rename cascade and get_project's leg list to the named company whenever
+    one was named -- as the first version did -- stranded, on an UNSHARED
+    number, every leg the importer left with no company and every invoice
+    mis-filed under another customer: the number-only call carried them, the
+    same call with company_id left them pointing at a number no project held.
+    The drawer always names the customer now, so that was every rename from
+    the screen. Confined only when a second project holds the number, where
+    the name is the only thing that tells the twins' records apart.
+    """
+    if company_id is None:
+        return None
+    holders = [p for p in projects if _key(p.get("project_no")) == key]
+    return _key(company_id) if len(holders) > 1 else None
+
+
 def _live_project(pno, company_id=None):
     """The project a link may point at, or None. `company_id` narrows as in
     _one_project.
@@ -1029,23 +1050,63 @@ def _shipment_hidden(s, arch_pnos):
     another live deal still owns.
     """
     nos = _shipment_project_nos(s)
-    return bool(nos) and nos <= arch_pnos
+    cid = _key(s.get("company_id"))
+    return bool(nos) and all(arch_pnos.hides(n, cid) for n in nos)
 
 
-def _archived_project_nos():
-    """Set of project_no (as str) currently archived (soft-deleted).
+def _invoice_hidden(i, arch):
+    """True when an invoice should be hidden because its project is archived
+    -- the project it names under the customer it is filed under, per
+    _Archived.hides."""
+    return arch.hides(_key(i.get("project_no")), _key(i.get("company_id")))
+
+
+class _Archived:
+    """What the archived (soft-deleted) projects hide, asked per record.
+
+    A project is (project_no, company_id): two customers can hold one number,
+    and archive_project with company_id archives ONE of them. The set of
+    archived numbers this used to be hid by the number alone, so archiving
+    Acme's 4521 made Beta's live legs and invoices on 4521 vanish from
+    get_company, list_shipments, list_invoices and every metric, with ok:true
+    and Beta's project still live. hides() asks two things: is there an
+    archived project on this number at all, and if a LIVE project still holds
+    the number, does the record belong to an archived holder rather than the
+    live one. When no live project holds the number -- the only case that
+    could arise before company_id existed -- every record on it hides, as it
+    always did, whatever company the record carries: a leg the importer left
+    with no company, or one mis-filed under another customer, still follows
+    its only project into the archive.
 
     Falsy keys are dropped, and that is load-bearing. _key(None/True/"  ") is
     "", and an invoice with no project keys to "" too -- so a single archived
-    project with a missing or non-string project_no put "" in this set and
+    project with a missing or non-string project_no put "" in the old set and
     every UNLINKED invoice in the store vanished from get_company and
     list_invoices, across all companies, with ok:true. normalize.py leaves
     project_no null whenever an invoice has no tracker link, so those are
     ordinary records, not edge cases. _shipment_project_nos already filtered
     falsy; this did not.
     """
-    return {k for p in STORE.load("projects") if p.get("archived")
-            and (k := _key(p.get("project_no")))}
+
+    def __init__(self, projects):
+        self.pairs = {(k, _key(p.get("company_id"))) for p in projects
+                      if p.get("archived") and (k := _key(p.get("project_no")))}
+        self.archived = {k for k, _ in self.pairs}
+        self.live = {k for p in projects if not p.get("archived")
+                     and (k := _key(p.get("project_no")))}
+
+    def hides(self, pno_key, cid_key):
+        """True when a record on `pno_key` filed under `cid_key` is hidden."""
+        if pno_key not in self.archived:
+            return False
+        if pno_key not in self.live:
+            return True
+        return (pno_key, cid_key) in self.pairs
+
+
+def _archived_projects():
+    """The archived projects, as a _Archived, from the store as it is now."""
+    return _Archived(STORE.load("projects"))
 
 
 def _as_list(v):
@@ -1262,7 +1323,7 @@ class _MetricsCtx:
 
     def __init__(self):
         self.arch_cids = _archived_ids()
-        self.arch_pnos = _archived_project_nos()
+        self.arch_pnos = _archived_projects()
         self.companies = STORE.load("companies")
         self.projects = [p for p in STORE.load("projects")
                          if not p.get("archived")
@@ -1272,7 +1333,7 @@ class _MetricsCtx:
                           and not _shipment_hidden(s, self.arch_pnos)]
         self.invoices = [i for i in STORE.load("invoices")
                          if _hk(i.get("company_id")) not in self.arch_cids
-                         and _key(i.get("project_no")) not in self.arch_pnos]
+                         and not _invoice_hidden(i, self.arch_pnos)]
         self.vendors = {}
         for v in STORE.load("vendors"):
             self.vendors.setdefault(_hk(v.get("company_id")), v)
@@ -1609,13 +1670,13 @@ def get_company(ref: str) -> dict:
     contacts = [x for x in STORE.load("contacts") if x["company_id"] == cid]
     projects = [x for x in STORE.load("projects")
                 if x["company_id"] == cid and not x.get("archived")]
-    arch_pnos = _archived_project_nos()
+    arch_pnos = _archived_projects()
     shipments = [x for x in STORE.load("shipments")
                  if x["company_id"] == cid
                  and not _shipment_hidden(x, arch_pnos)]
     invoices = [x for x in STORE.load("invoices")
                 if x.get("company_id") == cid
-                and _key(x.get("project_no")) not in arch_pnos]
+                and not _invoice_hidden(x, arch_pnos)]
     flags = [x for x in STORE.load("needs_review")
              if cid in (x.get("company_ids") or []) or x.get("company_id") == cid]
     ctx = _MetricsCtx()
@@ -1652,7 +1713,8 @@ def get_project(project_no: str, company_id: Optional[str] = None) -> dict:
     """Project card with its shipments, company, and contacts. `company_id`
     (optional) narrows the number to that customer's project when two
     customers hold one number; the shipments listed are then that customer's
-    legs on the number, not every leg carrying it."""
+    legs on the number, not every leg carrying it. On a number only one
+    customer holds it changes nothing."""
     projects = STORE.load("projects")
     want = _resolve(project_no, _project_keys(projects))
     _hit = _one_project(projects, want, "Opening it", company_id) if want else None
@@ -1660,13 +1722,14 @@ def get_project(project_no: str, company_id: Optional[str] = None) -> dict:
     if not pr:
         return _err(f"project '{project_no}' not found")
     p = pr[0]
-    # Number-only, as always, unless the caller named the customer: a leg is
-    # keyed by company AND number on the Live screen, and one customer's leg
-    # must never surface on another's card.
-    cid = _key(p.get("company_id"))
+    # Number-only, as always, unless the caller named the customer AND the
+    # number is shared (_cascade_scope): a leg is keyed by company AND number
+    # on the Live screen, and one customer's leg must never surface on
+    # another's card.
+    scope = _cascade_scope(projects, want, company_id)
     shipments = [s for s in STORE.load("shipments")
                  if want in _shipment_project_nos(s)
-                 and (company_id is None or _key(s.get("company_id")) == cid)]
+                 and (scope is None or _key(s.get("company_id")) == scope)]
     companies = STORE.load("companies")
     company = next((c for c in companies if c["company_id"] == p["company_id"]), None)
     contacts = [c for c in STORE.load("contacts") if c["company_id"] == p["company_id"]]
@@ -1719,7 +1782,7 @@ def list_shipments(stage: str = None, company: str = None, vendor_po: str = None
     out = STORE.load("shipments")
     if not include_archived:
         arch = _archived_ids()
-        arch_pnos = _archived_project_nos()
+        arch_pnos = _archived_projects()
         out = [s for s in out if _hk(s.get("company_id")) not in arch
                and not _shipment_hidden(s, arch_pnos)]
     if stage:
@@ -1772,9 +1835,9 @@ def list_invoices(payment_status: str = None, company: str = None,
     out = STORE.load("invoices")
     if not include_archived:
         arch = _archived_ids()
-        arch_pnos = _archived_project_nos()
+        arch_pnos = _archived_projects()
         out = [i for i in out if _hk(i.get("company_id")) not in arch
-               and _key(i.get("project_no")) not in arch_pnos]
+               and not _invoice_hidden(i, arch_pnos)]
     if payment_status:
         out = [i for i in out
                if str(i.get("payment_status") or "").startswith(payment_status)]
@@ -1856,7 +1919,8 @@ def update_project(project_no: str, fields: dict,
     """Edit a project card (status, owner, revenue, collection_status, notes, ...).
     Validated against the v0.1 schema; persists atomically. `company_id`
     (optional) names the customer whose project this is, for a number two
-    customers hold; a company_id inside `fields` still MOVES the project."""
+    customers hold; a company_id inside `fields` still MOVES the project, and
+    is refused when the destination customer already holds the number."""
     try:
         with STORE.write_lock():
             _validate(fields, PROJECT_FIELDS - {"project_no"}, "project")
@@ -1884,6 +1948,20 @@ def update_project(project_no: str, fields: dict,
             old_cid = _key(target[0].get("company_id"))
             new_cid = _key(fields["company_id"]) if "company_id" in fields \
                 else old_cid
+            if new_cid != old_cid and any(
+                    p is not target[0] and _key(p.get("project_no")) == want
+                    and _key(p.get("company_id")) == new_cid for p in projects):
+                # create_project and rename_project both refuse to mint a
+                # second record of one number at one customer; the move did
+                # not, and with company_id narrowing the source it could be
+                # reached: moving Acme's 4521 onto Beta, which holds 4521,
+                # returned ok:true and left Beta with two, which every scoped
+                # call then refused as a duplicate.
+                raise StoreError(
+                    f"project '{project_no}' already exists at company "
+                    f"'{fields['company_id']}' -- moving this one there would "
+                    f"give that customer the number twice, and nothing could "
+                    f"then tell them apart. Rename one of them first.")
             target[0].update(fields)
             updates = {"projects": projects}
             moved_ship = moved_inv = 0
@@ -1999,7 +2077,8 @@ def rename_project(old_project_no: str, new_project_no: str,
     a historical note about the original migration, not a live pointer.)
     `company_id` (optional) names the customer whose project this is when two
     hold the number; the cascade then carries ONLY that customer's shipments
-    and invoices. The new number must still be unused store-wide."""
+    and invoices. On a number only one customer holds it changes nothing. The
+    new number must still be unused store-wide."""
     try:
         with STORE.write_lock():
             # _canon, not str: a caller sending 9999.0 would otherwise persist
@@ -2025,14 +2104,15 @@ def rename_project(old_project_no: str, new_project_no: str,
             if new_pn != old_pn and any(_key(p.get("project_no")) == new_pn
                                         for p in projects):
                 raise StoreError(f"project '{new_pn}' already exists")
+            # Confined to the named customer's records when one was named AND
+            # the number is shared (_cascade_scope) -- counted BEFORE this
+            # record leaves the old number, or its twin would count alone.
+            # Otherwise the cascade keys on the number alone, as it always has.
+            scope = _cascade_scope(projects, old_pn, company_id)
             target[0]["project_no"] = new_pn
             # NOT saved yet -- collected and committed as one unit below, so a
             # lock on shipments.json cannot leave the project renamed while its
             # invoices still point at the old number.
-            # Scoped to the named customer's records when one was named. On
-            # the number-only path the cascade keys on the number alone, as it
-            # always has.
-            scope = _key(target[0].get("company_id")) if company_id is not None else None
             shipments = STORE.load("shipments")
             touched_shipments = 0
             for s in shipments:

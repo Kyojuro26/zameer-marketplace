@@ -635,10 +635,40 @@ function projItemClick(p){ return hasProjectNo(p) ? `onclick="openProject('${jes
    record of that number put one customer's fields under the other's card,
    after which every save was refused as ambiguous. By number alone when no
    customer is given, exactly as before. */
+/* A customer argument is one whenever it is given at all. Only undefined and
+   null -- a bare openProject(pno) -- mean "no customer". '' is a customer: the
+   one a record with no company_id has, and the server's _key('') for it; so
+   is 0. Treating '' as "no customer" opened Acme's drawer from a company-less
+   twin's own card, and treating 0 as one in the lookup but not in the mirrors
+   renumbered every record of the number locally. One predicate, used by the
+   lookup and every mirror. */
+function hasCid(cid){ return cid !== undefined && cid !== null; }
 function findProject(pno, cid){
-  const scoped = cid !== undefined && cid !== null && st(cid) !== '';
   return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno)
-                              && (!scoped || st(x.company_id) === st(cid)));
+                              && (!hasCid(cid) || st(x.company_id) === st(cid)));
+}
+function projectsNumbered(pno){
+  return DATA.projects.filter(x => hasProjectNo(x) && st(x.project_no) === st(pno));
+}
+/* The customer a local mirror is confined to after a scoped save, or null:
+   only when a second record holds the number, as the server's cascade is
+   (_cascade_scope). On an unshared number the mirror follows the number
+   alone, so a leg filed with no company, or an invoice under the wrong one,
+   moves with its project on the page exactly as it does on disk. */
+function mirrorScope(pno, cid){
+  if(!hasCid(cid)) return null;
+  return projectsNumbered(pno).length > 1 ? st(cid) : null;
+}
+/* The customer to open a project link under when the customer is a GUESS --
+   an invoice's own company, which can be mis-filed against a project another
+   customer holds. The guess when a record of that customer holds the number;
+   the sole holder's when the number is unshared; none (the first record, as
+   a bare number opens) when it is shared and the guess holds none of them. A
+   guess used as a hard filter rendered a link that opened nothing. */
+function linkCid(pno, cid){
+  const holders = projectsNumbered(pno);
+  if(holders.some(x => st(x.company_id) === st(cid))) return st(cid);
+  return holders.length === 1 ? st(holders[0].company_id) : null;
 }
 function projNoCell(p){ return hasProjectNo(p) ? `<b>${esc(st(p.project_no))}</b>` : `<span class="muted">${esc(NO_NUMBER_NOTE)}</span>`; }
 // Options for a <select>, ALWAYS including whatever is actually stored.
@@ -892,8 +922,9 @@ function renderReceivables(){
     const co = companyById[v.company_id];
     const coName = co ? (co.display_name||v.company_id) : st(v.company_id);
     const pno = st(v.project_no);
+    const lc = pno ? linkCid(pno, v.company_id) : null;
     const proj = pno
-      ? `<a href="#" onclick="event.stopPropagation();openProject('${jesc(pno)}','${jesc(st(v.company_id))}');return false">${esc(pno)}</a>`
+      ? `<a href="#" onclick="event.stopPropagation();openProject('${jesc(pno)}'${lc===null?'':`,'${jesc(lc)}'`});return false">${esc(pno)}</a>`
       : '<span class="badge b-stage">Not linked</span>';
     const lateCell = r.late == null ? '<span class="muted">—</span>'
       : (r.late > 30 ? `<b style="color:var(--red)">${r.late}d</b>`
@@ -2284,10 +2315,12 @@ async function saveProject(pnoArg, cid){
     // Mirror the rename across local state before the follow-up field save,
     // so update_project below targets the record under its new key and the
     // shipments/invoices sections re-render pointing at the right project.
-    // Mirrored within the named customer, as the server's cascade is.
+    // Mirrored within the named customer when the number is shared, as the
+    // server's cascade is; taken BEFORE the record is renumbered.
+    const scope = mirrorScope(pno, cid);
+    const mine = (x)=> scope===null || st(x.company_id)===scope;
     const p=findProject(pno, cid);
     if(p) p.project_no = newPno;
-    const mine = (x)=> !cid || st(x.company_id)===st(cid);
     DATA.shipments.forEach(s=>{
       if(!mine(s)) return;
       if(String(s.project_no)===String(pno)) s.project_no=newPno;
@@ -2339,8 +2372,11 @@ async function deleteProject(pno, cid){
   try{ r = await CRM.call('archive_project', {project_no:pno, company_id:cid}); }
   catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
   if(r&&r.ok){
-    // Only that customer's records leave the page, as only theirs were archived.
-    const mine = (x)=> !cid || st(x.company_id)===st(cid);
+    // Only that customer's records leave the page, as only theirs were
+    // archived -- when the number is shared; every record of an unshared
+    // number hides, as the server hides them.
+    const scope = mirrorScope(pno, cid);
+    const mine = (x)=> scope===null || st(x.company_id)===scope;
     DATA.projects=DATA.projects.filter(x=>!(mine(x) && String(x.project_no)===String(pno)));
     DATA.shipments=DATA.shipments.filter(x=>!(mine(x) && _shipmentProjectNos(x).has(String(pno))));
     DATA.invoices=DATA.invoices.filter(x=>!(mine(x) && String(x.project_no)===String(pno)));
@@ -3350,15 +3386,17 @@ def _drop_archived_project_records(data):
         print(f"WARNING: archived-project filter not applied ({type(ex).__name__}: {ex})",
               file=sys.stderr)
         return
-    # falsy keys dropped, as _archived_project_nos does: "" would hide every
-    # unlinked invoice in the store
-    arch = {k for p in data["projects"] if p.get("archived")
-            and (k := _srv._key(p.get("project_no")))}
+    # The server's own _Archived: hides by (number, customer), so when two
+    # customers hold one number and one twin is archived, the live twin's
+    # legs and invoices stay on the page as they stay in every read tool.
+    # Built from the projects BEFORE the archived ones are dropped -- it needs
+    # to see both twins to know a live one still holds the number.
+    arch = _srv._Archived(data["projects"])
     data["projects"] = [p for p in data["projects"] if not p.get("archived")]
-    if not arch:
+    if not arch.archived:
         return
     data["invoices"] = [i for i in data["invoices"]
-                        if _srv._key(i.get("project_no")) not in arch]
+                        if not _srv._invoice_hidden(i, arch)]
     data["shipments"] = [x for x in data["shipments"]
                          if not _srv._shipment_hidden(x, arch)]
 
