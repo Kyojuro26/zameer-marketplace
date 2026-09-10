@@ -628,8 +628,18 @@ function arr(v){ return Array.isArray(v) ? v : (v===null||v===undefined||v==='' 
    rendered inert and says why: the fix is a number, given in chat. */
 const NO_NUMBER_NOTE = 'no number \u2014 give it one in chat to edit here';
 function hasProjectNo(p){ return st(p && p.project_no).trim() !== ''; }
-function projRowClick(p){ return hasProjectNo(p) ? `class="click" onclick="openProject('${jesc(st(p.project_no))}')"` : ''; }
-function projItemClick(p){ return hasProjectNo(p) ? `onclick="openProject('${jesc(st(p.project_no))}')"` : ''; }
+function projRowClick(p){ return hasProjectNo(p) ? `class="click" onclick="openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')"` : ''; }
+function projItemClick(p){ return hasProjectNo(p) ? `onclick="openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')"` : ''; }
+/* The project a drawer or a save means. By number AND customer when the
+   customer is known: two customers can hold one number, and finding the FIRST
+   record of that number put one customer's fields under the other's card,
+   after which every save was refused as ambiguous. By number alone when no
+   customer is given, exactly as before. */
+function findProject(pno, cid){
+  const scoped = cid !== undefined && cid !== null && st(cid) !== '';
+  return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno)
+                              && (!scoped || st(x.company_id) === st(cid)));
+}
 function projNoCell(p){ return hasProjectNo(p) ? `<b>${esc(st(p.project_no))}</b>` : `<span class="muted">${esc(NO_NUMBER_NOTE)}</span>`; }
 // Options for a <select>, ALWAYS including whatever is actually stored.
 // A stored value absent from the preset list selects nothing, so the browser
@@ -883,7 +893,7 @@ function renderReceivables(){
     const coName = co ? (co.display_name||v.company_id) : st(v.company_id);
     const pno = st(v.project_no);
     const proj = pno
-      ? `<a href="#" onclick="event.stopPropagation();openProject('${jesc(pno)}');return false">${esc(pno)}</a>`
+      ? `<a href="#" onclick="event.stopPropagation();openProject('${jesc(pno)}','${jesc(st(v.company_id))}');return false">${esc(pno)}</a>`
       : '<span class="badge b-stage">Not linked</span>';
     const lateCell = r.late == null ? '<span class="muted">—</span>'
       : (r.late > 30 ? `<b style="color:var(--red)">${r.late}d</b>`
@@ -1205,7 +1215,7 @@ function liveCard(r){
       <span class="muted nw">${liveStart(p)}</span>
       ${r.flags.red.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}${r.flags.amber.map(f=>`<span class="badge b-pending">${esc(f)}</span>`).join('')}
       <span style="margin-left:auto">${hasProjectNo(p)
-        ? `<button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}')">Edit</button>`
+        ? `<button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')">Edit</button>`
         : `<span class="muted nw">${esc(NO_NUMBER_NOTE)}</span>`}</span>
     </div>
     <div class="lt-note">${esc(st(p.open_orders_notes)||'')||'<span class="muted">no note</span>'}</div>
@@ -2013,7 +2023,7 @@ function renderMain(){
       <td><span class="badge b-stage">${esc(s.stage||'—')}</span></td>
       <td class="muted num">${esc(fmtDate(s.ship_date))}</td></tr>`).join('')+
     `</tbody></table>`:emptyState('No shipments yet.', prs.length
-      ? `<button class="pill-btn" onclick="navFromDrawer(()=>openNewShipment('${jesc(st(prs[0].project_no))}'))">+ Add shipment</button>`
+      ? `<button class="pill-btn" onclick="navFromDrawer(()=>openNewShipment('${jesc(st(prs[0].project_no))}','${jesc(selected)}'))">+ Add shipment</button>`
       : '<span class="muted">Add a project first — shipments hang off one.</span>');
   h+=`</div>`;
 
@@ -2101,12 +2111,16 @@ document.addEventListener('click', closeMore);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeMore(); });
 
 /* ------------------------------------------------------- project drawer -- */
-function openProject(pno){
+function openProject(pno, cid){
   // String(null) is 'null', so a bare String comparison let openProject('null')
   // open a numberless project -- a drawer whose save would key on a number
   // the record does not have. A project with no number is never opened here.
   if(!st(pno).trim()) return;
-  const p=DATA.projects.find(x=>hasProjectNo(x) && st(x.project_no)===st(pno)); if(!p) return;
+  const p=findProject(pno, cid); if(!p) return;
+  // The record's OWN customer is baked into every handler below, whichever
+  // way the drawer was opened, so a save, a rename, a delete or a new leg
+  // names the customer and the server can tell the twins apart.
+  cid = st(p.company_id);
   document.getElementById('dtitle').textContent='Project '+(pno||'');
   // revenue/total_cost/gross_profit/margin are independent stored values
   // (each read from its own tracker column, never computed from the
@@ -2165,9 +2179,9 @@ function openProject(pno){
         own — editing one of those does not change this.</p></div>
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
     <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc(arr(p.annotations).join('\n'))}</textarea></div>
-    <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}')">Save changes</button>
-    <button class="btn ghost" onclick="navFromDrawer(()=>openNewShipment('${jesc(pno)}'))" style="margin-left:8px">+ Add shipment</button>
-    <button class="pill-btn" style="background:var(--red-soft);color:var(--red);margin-left:8px" onclick="deleteProject('${jesc(pno)}')">Delete project</button>
+    <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}','${jesc(cid)}')">Save changes</button>
+    <button class="btn ghost" onclick="navFromDrawer(()=>openNewShipment('${jesc(pno)}','${jesc(cid)}'))" style="margin-left:8px">+ Add shipment</button>
+    <button class="pill-btn" style="background:var(--red-soft);color:var(--red);margin-left:8px" onclick="deleteProject('${jesc(pno)}','${jesc(cid)}')">Delete project</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px" id="drawerNote"></p>`;
   // Snapshot the bucket baseline FROM THE CONTROL, after the markup has been
@@ -2194,7 +2208,7 @@ function numOrNull(id){
   return v===''?null:parseFloat(v);
 }
 
-async function saveProject(pnoArg){
+async function saveProject(pnoArg, cid){
   // The number the STORE currently holds, which after a rename that already
   // landed is NOT the one baked into this button's onclick. Renaming is two
   // calls: if rename_project succeeds and update_project is then refused, the
@@ -2260,7 +2274,7 @@ async function saveProject(pnoArg){
     // folding it into the branch that already exists keeps ONE failure
     // path rather than a parallel one that can drift out of step.
     let rr;
-    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno}); }
+    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno, company_id: cid}); }
     catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }
     if(!rr || !rr.ok){
       msg.textContent='✗ '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';
@@ -2270,14 +2284,17 @@ async function saveProject(pnoArg){
     // Mirror the rename across local state before the follow-up field save,
     // so update_project below targets the record under its new key and the
     // shipments/invoices sections re-render pointing at the right project.
-    const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
+    // Mirrored within the named customer, as the server's cascade is.
+    const p=findProject(pno, cid);
     if(p) p.project_no = newPno;
+    const mine = (x)=> !cid || st(x.company_id)===st(cid);
     DATA.shipments.forEach(s=>{
+      if(!mine(s)) return;
       if(String(s.project_no)===String(pno)) s.project_no=newPno;
       if(Array.isArray(s.all_project_nos))
         s.all_project_nos = s.all_project_nos.map(n=>String(n)===String(pno)?newPno:n);
     });
-    DATA.invoices.forEach(i=>{ if(String(i.project_no)===String(pno)) i.project_no=newPno; });
+    DATA.invoices.forEach(i=>{ if(mine(i) && String(i.project_no)===String(pno)) i.project_no=newPno; });
     reindex();
     // The rename is committed, so record it on the control: a retry after a
     // refused field save must not fire it a second time.
@@ -2290,9 +2307,9 @@ async function saveProject(pnoArg){
     // operator a number that no longer existed anywhere.
     renderList(); renderMain();
   }
-  const ok = await doSave('update_project', {project_no: pno, fields}, (r)=>{
-    const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
-    Object.assign(p, r.project || fields);
+  const ok = await doSave('update_project', {project_no: pno, fields, company_id: cid}, (r)=>{
+    const p=findProject(pno, cid);
+    if(p) Object.assign(p, r.project || fields);
     // The bucket's baseline used to be re-taken HERE, alone. doSave now
     // re-baselines every control carrying data-orig on its success path --
     // one rule for the bucket, the deal date and every other snapshotted
@@ -2309,22 +2326,24 @@ async function saveProject(pnoArg){
   // just written and every typed value -- redrawing from DATA the failed save
   // never updated. The operator saw the new project number with the old
   // figures, no error and no prompt, and would reasonably conclude it saved.
-  if(renamed && ok) openProject(pno);
+  if(renamed && ok) openProject(pno, cid);
 }
 
-async function deleteProject(pno){
-  const p=DATA.projects.find(x=>String(x.project_no)===String(pno));
+async function deleteProject(pno, cid){
+  const p=findProject(pno, cid);
   if(!confirm(`Delete project ${pno}${p&&p.description?' ('+p.description+')':''}? It and its shipments/invoices will be archived (hidden from the CRM) and can be restored later — nothing is permanently destroyed.`)) return;
   // A rejection and an {ok:false} are the same event to the operator;
   // folding it into the branch that already exists keeps ONE failure
   // path rather than a parallel one that can drift out of step.
   let r;
-  try{ r = await CRM.call('archive_project', {project_no:pno}); }
+  try{ r = await CRM.call('archive_project', {project_no:pno, company_id:cid}); }
   catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
   if(r&&r.ok){
-    DATA.projects=DATA.projects.filter(x=>String(x.project_no)!==String(pno));
-    DATA.shipments=DATA.shipments.filter(x=>!(_shipmentProjectNos(x).has(String(pno))));
-    DATA.invoices=DATA.invoices.filter(x=>String(x.project_no)!==String(pno));
+    // Only that customer's records leave the page, as only theirs were archived.
+    const mine = (x)=> !cid || st(x.company_id)===st(cid);
+    DATA.projects=DATA.projects.filter(x=>!(mine(x) && String(x.project_no)===String(pno)));
+    DATA.shipments=DATA.shipments.filter(x=>!(mine(x) && _shipmentProjectNos(x).has(String(pno))));
+    DATA.invoices=DATA.invoices.filter(x=>!(mine(x) && String(x.project_no)===String(pno)));
     reindex(); kpis(); renderList(); closeDrawer();
     if(selected) renderMain();
     refreshMetrics();
@@ -2505,7 +2524,7 @@ async function saveEditContact(cid, origEmail, origName){
                          + 'there, because the name and the email both changed.');
 }
 
-function openNewShipment(pno){
+function openNewShipment(pno, cid){
   document.getElementById('dtitle').textContent='Add shipment — project '+pno;
   document.getElementById('dbody').innerHTML=`
     <div class="field"><label>Vendor PO</label><input id="n_po" placeholder="e.g. PO# 4521 Acme Freight"/></div>
@@ -2514,16 +2533,16 @@ function openNewShipment(pno){
         ${STAGES.map(x=>`<option ${x==='Ordered'?'selected':''}>${x}</option>`).join('')}</select></div>
       <div class="field"><label>Ship date</label><input id="n_sdate" type="date"/></div>
     </div>
-    <button class="btn" id="saveBtn" onclick="saveNewShipment('${jesc(pno)}')">Add shipment</button>
+    <button class="btn" id="saveBtn" onclick="saveNewShipment('${jesc(pno)}','${jesc(cid)}')">Add shipment</button>
     <span class="saved" id="savedMsg"></span>`;
   openDrawer();
 }
 
-async function saveNewShipment(pno){
+async function saveNewShipment(pno, cid){
   const fields={vendor_po_raw:document.getElementById('n_po').value||null,
     stage:document.getElementById('n_stage').value,
     ship_date:document.getElementById('n_sdate').value||null};
-  await doSave('create_shipment', {project_no:pno, fields}, (r)=>{
+  await doSave('create_shipment', {project_no:pno, fields, company_id:cid}, (r)=>{
     if(r.shipment){ DATA.shipments.push(r.shipment); reindex(); renderList(); }
     closeDrawer();
   });

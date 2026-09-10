@@ -33,7 +33,9 @@ function seedStore(dir) {
   fs.mkdirSync(dir, { recursive: true });
   const w = (n, v) => fs.writeFileSync(path.join(dir, n + '.json'), JSON.stringify(v, null, 2));
   w('companies', [{ company_id: 'acme', display_name: 'Ace Manufacturing',
-    role: 'customer', domains: [], locations: [], archived: false }]);
+    role: 'customer', domains: [], locations: [], archived: false },
+    { company_id: 'beta', display_name: 'Beta Works',
+      role: 'customer', domains: [], locations: [], archived: false }]);
   // every field below carries a type the render path did not expect
   w('contacts', [{ company_id: 'acme', name: 'A Person', email: FIXTURE_EMAIL,
     last_action: 45731 }]);
@@ -46,6 +48,11 @@ function seedStore(dir) {
     // app cannot open or edit one. year 2024 keeps it out of the KPI checks.
     { company_id: 'acme', project_no: null, status: 'won', year: 2024,
       revenue: 500, description: 'numberless deal', archived: false },
+    // Beta holds Acme's number 4521 too. A project is (number, customer);
+    // year 2024 keeps it out of the KPI checks.
+    { company_id: 'beta', project_no: '4521', status: 'won', year: 2024, revenue: 555,
+      description: 'Beta job', archived: false, tracker_status: 'action_admin',
+      open_orders_notes: 'beta live job' },
     // and one on the Live screen, which renders its own card and list item
     { company_id: 'acme', project_no: null, status: 'won', year: 2024,
       revenue: 700, description: 'numberless live', archived: false, date: '2026-05-05',
@@ -234,8 +241,8 @@ async function run(crmDir) {
   r.check('the projects sidebar item for it is inert too',
     side && !/onclick=/.test(side), side.slice(0, 200));
   const numbered = rowOf((app.el('main') || EMPTY).innerHTML, '12345', 'tr');
-  r.check('a numbered row is still clickable',
-    /onclick="openProject\('4521'\)"/.test(numbered), numbered.slice(0, 200));
+  r.check('a numbered row is still clickable, and names its customer',
+    /onclick="openProject\('4521','acme'\)"/.test(numbered), numbered.slice(0, 200));
   safe('setFilter', 'all'); safe('select', 'acme');
   row = rowOf((app.el('main') || EMPTY).innerHTML, 'numberless deal', 'tr');
   r.check('the company page renders the same row inert, with the note',
@@ -255,6 +262,89 @@ async function run(crmDir) {
   r.check('openProject with no number opens no drawer',
     !((app.el('drawer') || EMPTY).classList || { contains: () => false }).contains('open'));
   safe('setFilter', 'all'); safe('select', 'acme');
+
+  // ---- a project is (number, customer) ------------------------------------------
+  //
+  // Beta and Acme both hold 4521. openProject(pno) found the FIRST record of
+  // that number, so Beta's card opened a drawer showing Acme's fields, and
+  // every save was then refused by the server as ambiguous. Every call site
+  // now passes the customer, the drawer bakes the record's own customer into
+  // its handlers, and each write names it.
+  const clickOf = (html, marker, tag) => (String(html).split('<' + tag).find(x => x.includes(marker)) || '');
+  safe('setFilter', 'live');
+  const betaCard = clickOf((app.el('main') || EMPTY).innerHTML, 'beta live job', 'div class="lt-card"');
+  r.check("Beta's Live card Edit names Beta",
+    /openProject\('4521','beta'\)/.test(betaCard), betaCard.slice(0, 300));
+  safe('closeDrawer'); safe('openProject', '4521', 'beta');
+  r.check("and opens a drawer showing Beta's fields, not Acme's",
+    (app.el('f_desc') || EMPTY).value === 'Beta job' && String((app.el('f_revenue') || EMPTY).value) === '555',
+    `desc=${(app.el('f_desc') || EMPTY).value} revenue=${(app.el('f_revenue') || EMPTY).value}`);
+  r.check("the drawer bakes Beta into its own handlers",
+    /saveProject\('4521','beta'\)/.test((app.el('dbody') || EMPTY).innerHTML || '')
+      && /deleteProject\('4521','beta'\)/.test((app.el('dbody') || EMPTY).innerHTML || '')
+      && /openNewShipment\('4521','beta'\)/.test((app.el('dbody') || EMPTY).innerHTML || ''));
+  if (app.el('f_desc')) app.el('f_desc').value = 'Beta job edited';
+  app.resetCalls();
+  await app.fn('saveProject')('4521', 'beta');
+  const upd = app.calls().find(c => c.tool === 'update_project');
+  r.check("saving Beta's drawer sends company_id beta with the number",
+    upd && upd.args.company_id === 'beta' && upd.args.project_no === '4521'
+      && upd.args.fields.description === 'Beta job edited', upd && JSON.stringify(upd.args).slice(0, 200));
+  const descs = JSON.parse(app.eval("JSON.stringify(DATA.projects.filter(p=>String(p.project_no)==='4521').map(p=>[p.company_id, String(p.description)]))"));
+  r.check("and the local mirror edits Beta's record, leaving Acme's untouched",
+    JSON.stringify(descs) === JSON.stringify([['acme', '12345'], ['beta', 'Beta job edited']]), JSON.stringify(descs));
+  safe('closeDrawer');
+  safe('setFilter', 'all'); safe('select', 'beta');
+  const betaRow = clickOf((app.el('main') || EMPTY).innerHTML, 'Beta job edited', 'tr');
+  r.check("the company page row names Beta", /openProject\('4521','beta'\)/.test(betaRow), betaRow.slice(0, 200));
+  safe('setFilter', 'project');
+  const betaTab = clickOf((app.el('main') || EMPTY).innerHTML, 'Beta job edited', 'tr');
+  r.check("the Projects tab row names Beta", /openProject\('4521','beta'\)/.test(betaTab), betaTab.slice(0, 200));
+  const betaSide = ((app.el('clist') || EMPTY).innerHTML || '').split('class="citem"').find(x => x.includes('Beta job edited')) || '';
+  r.check("and so does the projects sidebar item", /openProject\('4521','beta'\)/.test(betaSide), betaSide.slice(0, 200));
+  // a rename from Beta's drawer names Beta, and the local mirror moves only
+  // Beta's number; Acme keeps 4521
+  safe('closeDrawer'); safe('openProject', '4521', 'beta');
+  if (app.el('f_pno')) app.el('f_pno').value = '4523';
+  app.resetCalls();
+  await app.fn('saveProject')('4521', 'beta');
+  const ren = app.calls().find(c => c.tool === 'rename_project');
+  r.check("a rename from Beta's drawer names Beta",
+    ren && ren.args.company_id === 'beta' && ren.args.old_project_no === '4521' && ren.args.new_project_no === '4523',
+    ren && JSON.stringify(ren.args));
+  const nums = JSON.parse(app.eval("JSON.stringify(DATA.projects.filter(p=>['4521','4523'].includes(String(p.project_no))).map(p=>[p.company_id, String(p.project_no)]))"));
+  r.check("and the local mirror renumbers Beta's record only",
+    JSON.stringify(nums) === JSON.stringify([['acme', '4521'], ['beta', '4523']]), JSON.stringify(nums));
+  // put the number back for the checks below
+  safe('closeDrawer'); safe('openProject', '4523', 'beta');
+  if (app.el('f_pno')) app.el('f_pno').value = '4521';
+  await app.fn('saveProject')('4523', 'beta');
+  // a new leg from Beta's drawer names Beta
+  safe('closeDrawer'); safe('openNewShipment', '4521', 'beta');
+  if (app.el('n_po')) app.el('n_po').value = 'VPO-BETA';
+  app.resetCalls();
+  await app.fn('saveNewShipment')('4521', 'beta');
+  const crs = app.calls().find(c => c.tool === 'create_shipment');
+  r.check("a leg added from Beta's drawer names Beta",
+    crs && crs.args.company_id === 'beta' && crs.args.project_no === '4521', crs && JSON.stringify(crs.args).slice(0, 200));
+  // delete from Beta's drawer archives Beta's, and only Beta's leaves the page
+  app.resetCalls();
+  await app.fn('deleteProject')('4521', 'beta');
+  const arc = app.calls().find(c => c.tool === 'archive_project');
+  r.check("deleting from Beta's drawer names Beta",
+    arc && arc.args.company_id === 'beta' && arc.args.project_no === '4521', arc && JSON.stringify(arc.args));
+  const left = JSON.parse(app.eval("JSON.stringify(DATA.projects.filter(p=>String(p.project_no)==='4521').map(p=>p.company_id))"));
+  r.check("and only Beta's record leaves the page", JSON.stringify(left) === '["acme"]', JSON.stringify(left));
+  // opened by number alone: the first record, as before, and no customer is sent
+  safe('closeDrawer'); safe('openProject', '4521');
+  r.check('a project opened by number alone still opens (the first record of that number)',
+    (app.el('f_desc') || EMPTY).value === '12345', `desc=${(app.el('f_desc') || EMPTY).value}`);
+  app.resetCalls();
+  await app.fn('saveProject')('4521');
+  const bare = app.calls().find(c => c.tool === 'update_project');
+  r.check('a save with no customer given sends none',
+    bare && !('company_id' in bare.args) && bare.args.project_no === '4521', bare && JSON.stringify(bare.args).slice(0, 120));
+  safe('closeDrawer');
 
   // ---- KPI arithmetic ----------------------------------------------------
   // nothing validates the TYPE of year or revenue, and `a + (p.revenue||0)` on

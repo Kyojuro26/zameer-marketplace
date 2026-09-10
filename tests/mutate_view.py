@@ -32,9 +32,9 @@ M = [
   "    <div class=\"citem\" onclick=\"openProject('${jesc(st(p.project_no))}')\">"),
  ("the Live card offers Edit on a job it cannot open",
   "      <span style=\"margin-left:auto\">${hasProjectNo(p)\n"
-  "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}')\">Edit</button>`\n"
+  "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button>`\n"
   "        : `<span class=\"muted nw\">${esc(NO_NUMBER_NOTE)}</span>`}</span>",
-  "      <span style=\"margin-left:auto\"><button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}')\">Edit</button></span>"),
+  "      <span style=\"margin-left:auto\"><button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button></span>"),
  ("the Live sidebar item keeps its onclick",
   "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\"`:''}>",
   "      h += `<div class=\"citem\" onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\">"),
@@ -52,8 +52,45 @@ M = [
   "function projNoCell(p){ return hasProjectNo(p) ? `<b>${esc(st(p.project_no))}</b>` : `</td></tr><!--`; }"),
  ("openProject matches a null number by its string form again",
   "  if(!st(pno).trim()) return;\n"
-  "  const p=DATA.projects.find(x=>hasProjectNo(x) && st(x.project_no)===st(pno)); if(!p) return;",
+  "  const p=findProject(pno, cid); if(!p) return;",
   "  const p=DATA.projects.find(x=>String(x.project_no)===String(pno)); if(!p) return;"),
+ # ---- a project is (number, customer) --------------------------------------
+ ("the lookup finds the first record of that number, whichever customer's",
+  "  return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno)\n"
+  "                              && (!scoped || st(x.company_id) === st(cid)));",
+  "  return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno));"),
+ ("the Live card Edit passes the number alone",
+  "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button>`",
+  "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}')\">Edit</button>`"),
+ ("the table rows pass the number alone",
+  "function projRowClick(p){ return hasProjectNo(p) ? `class=\"click\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\"` : ''; }",
+  "function projRowClick(p){ return hasProjectNo(p) ? `class=\"click\" onclick=\"openProject('${jesc(st(p.project_no))}')\"` : ''; }"),
+ ("the sidebar items pass the number alone",
+  "function projItemClick(p){ return hasProjectNo(p) ? `onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\"` : ''; }",
+  "function projItemClick(p){ return hasProjectNo(p) ? `onclick=\"openProject('${jesc(st(p.project_no))}')\"` : ''; }"),
+ ("the drawer bakes no customer into its handlers",
+  "    <button class=\"btn\" id=\"saveBtn\" onclick=\"saveProject('${jesc(pno)}','${jesc(cid)}')\">Save changes</button>",
+  "    <button class=\"btn\" id=\"saveBtn\" onclick=\"saveProject('${jesc(pno)}')\">Save changes</button>"),
+ ("the save drops company_id from its payload",
+  "  const ok = await doSave('update_project', {project_no: pno, fields, company_id: cid}, (r)=>{",
+  "  const ok = await doSave('update_project', {project_no: pno, fields}, (r)=>{"),
+ ("the local mirror after a save edits the first record of that number",
+  "    const p=findProject(pno, cid);\n"
+  "    if(p) Object.assign(p, r.project || fields);",
+  "    const p=DATA.projects.find(x=>String(x.project_no)===String(pno));\n"
+  "    if(p) Object.assign(p, r.project || fields);"),
+ ("the rename drops company_id",
+  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno, company_id: cid}); }",
+  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno}); }"),
+ ("the delete drops company_id",
+  "  try{ r = await CRM.call('archive_project', {project_no:pno, company_id:cid}); }",
+  "  try{ r = await CRM.call('archive_project', {project_no:pno}); }"),
+ ("a delete removes every record of that number from the page",
+  "    DATA.projects=DATA.projects.filter(x=>!(mine(x) && String(x.project_no)===String(pno)));",
+  "    DATA.projects=DATA.projects.filter(x=>String(x.project_no)!==String(pno));"),
+ ("a new leg drops company_id",
+  "  await doSave('create_shipment', {project_no:pno, fields, company_id:cid}, (r)=>{",
+  "  await doSave('create_shipment', {project_no:pno, fields}, (r)=>{"),
  # ---- the deal date follows the date rule; two labels ---------------------
  ("the deal date is sent on every save again",
   "  dateIfChanged('f_date', fields, 'date');     // never send a date he did not touch",

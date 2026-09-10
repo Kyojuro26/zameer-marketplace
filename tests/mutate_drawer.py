@@ -60,12 +60,12 @@ M = [
   "  // clean, to be discarded later without asking.\n  open();",
   "  // clean, to be discarded later without asking.\n  open();\n  drawerDirty = false;"),
  ("+ Add shipment bypasses navFromDrawer again",
-  "onclick=\"navFromDrawer(()=>openNewShipment('${jesc(pno)}'))\"",
-  "onclick=\"openNewShipment('${jesc(pno)}')\""),
+  "onclick=\"navFromDrawer(()=>openNewShipment('${jesc(pno)}','${jesc(cid)}'))\"",
+  "onclick=\"openNewShipment('${jesc(pno)}','${jesc(cid)}')\""),
 
  # ---- the failed-save path ----------------------------------------------
  ("failed save still triggers the reopen (hides a partial write)",
-  "if(renamed && ok) openProject(pno);", "if(renamed) openProject(pno);"),
+  "if(renamed && ok) openProject(pno, cid);", "if(renamed) openProject(pno, cid);"),
  ("doSave stops reporting success",
   "      refreshMetrics();     // the server's shapes predate this write\n      return true;",
   "      refreshMetrics();     // the server's shapes predate this write\n      return undefined;"),
@@ -115,9 +115,9 @@ M = [
   "    const r = await CRM.call(tool, args);\n    if (r && r.ok){\n      applyLocal(r);",
   "    const r = await CRM.call(tool, args);\n    applyLocal(r);\n    if (r && r.ok){"),
  ("a refused rename falls through instead of aborting",
-  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno}); }\n"
+  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno, company_id: cid}); }\n"
   "    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }\n    if(!rr || !rr.ok){",
-  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno}); }\n"
+  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno, company_id: cid}); }\n"
   "    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }\n    if(!rr){"),
  ("a refused rename leaves the save button disabled",
   "      msg.textContent='\u2717 '+((rr&&rr.error)||'rename failed'); msg.className='saved show errc';\n      btn.disabled=false;\n      return;\n    }\n    // Mirror the rename",

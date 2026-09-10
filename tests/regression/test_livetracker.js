@@ -598,8 +598,8 @@ async function run(crmDir) {
       && ev("document.getElementById('lt-mer::4503').classList.contains('lt-hit')"),
     `drawer open=${ev("document.getElementById('drawer').classList.contains('open')")}`);
   r.check('the card it marks is the one on the page for that job',
-    /<div class="lt-card" id="lt-mer::4503">/.test(mainNow) && /openProject\('4503'\)/.test(mainNow),
-    'Edit stays on the card');
+    /<div class="lt-card" id="lt-mer::4503">/.test(mainNow) && /openProject\('4503','mer'\)/.test(mainNow),
+    'Edit stays on the card, and names the customer');
 
   // ---- two customers, one project number -------------------------------------
   //

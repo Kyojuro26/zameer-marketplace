@@ -69,14 +69,14 @@ REFRESH = [
 SITES = [
  ("rename_project unwrapped",
   "    let rr;\n"
-  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno}); }\n"
+  "    try{ rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno, company_id: cid}); }\n"
   "    catch(e){ rr = {ok:false, error:(e && e.message) || String(e)}; }",
-  "    const rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno});"),
+  "    const rr = await CRM.call('rename_project', {old_project_no: pno, new_project_no: newPno, company_id: cid});"),
  ("archive_project unwrapped",
   "  let r;\n"
-  "  try{ r = await CRM.call('archive_project', {project_no:pno}); }\n"
+  "  try{ r = await CRM.call('archive_project', {project_no:pno, company_id:cid}); }\n"
   "  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }",
-  "  const r=await CRM.call('archive_project', {project_no:pno});"),
+  "  const r=await CRM.call('archive_project', {project_no:pno, company_id:cid});"),
  ("convert_lead unwrapped",
   "  let r;\n"
   "  try{ r = await CRM.call('convert_lead', {company_id:cid}); }\n"
@@ -117,9 +117,9 @@ SITES = [
  # rejection is handled, nothing escapes, and the operator still learns
  # nothing. If this survives, the checks above are asserting the wrong thing.
  ("archive_project catches the rejection and reports success",
-  "  try{ r = await CRM.call('archive_project', {project_no:pno}); }\n"
+  "  try{ r = await CRM.call('archive_project', {project_no:pno, company_id:cid}); }\n"
   "  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }",
-  "  try{ r = await CRM.call('archive_project', {project_no:pno}); }\n"
+  "  try{ r = await CRM.call('archive_project', {project_no:pno, company_id:cid}); }\n"
   "  catch(e){ r = {ok:true}; }"),
 ]
 
