@@ -940,25 +940,31 @@ def _one_project(projects, key, what, company_id=None):
     return matches[0] if matches else None
 
 
-def _cascade_scope(projects, key, company_id):
-    """The company a cascade or a leg list is confined to, or None.
+def _other_holders(projects, key, company_id):
+    """The companies of the OTHER projects holding `key`: what a record on
+    the number must not be filed under to count as the named customer's.
 
     company_id only narrows. It names which of two customers' projects a call
-    means, and once _one_project has answered that, the records on the number
-    are that project's whether the number was shared or not. Confining the
-    rename cascade and get_project's leg list to the named company whenever
-    one was named -- as the first version did -- stranded, on an UNSHARED
-    number, every leg the importer left with no company and every invoice
-    mis-filed under another customer: the number-only call carried them, the
-    same call with company_id left them pointing at a number no project held.
-    The drawer always names the customer now, so that was every rename from
-    the screen. Confined only when a second project holds the number, where
-    the name is the only thing that tells the twins' records apart.
+    means, and once _one_project has answered that, every record on the
+    number is that project's EXCEPT one filed under another holder of the
+    number. Two earlier rules each stranded records on a dead number:
+    confining the rename cascade and get_project's leg list to the named
+    company whenever one was named left, on an UNSHARED number, every leg
+    the importer wrote with no company and every invoice mis-filed under
+    another customer pointing at a number no project held; confining only
+    when a second project held the number did the same when that second
+    project was ARCHIVED -- the number-only rename is refused while a twin
+    exists, so the scoped one was the only rename the live customer had, and
+    it left the company-less records on a number whose only holder was
+    archived, where _Archived then hid them. Excluding the other holders'
+    records, and nothing else, is right in every case: empty when the
+    number is unshared, the twin's own records when it is, whether the twin
+    is live or archived.
     """
     if company_id is None:
-        return None
-    holders = [p for p in projects if _key(p.get("project_no")) == key]
-    return _key(company_id) if len(holders) > 1 else None
+        return set()
+    return {_key(p.get("company_id")) for p in projects
+            if _key(p.get("project_no")) == key} - {_key(company_id)}
 
 
 def _live_project(pno, company_id=None):
@@ -1712,9 +1718,9 @@ def list_companies(role: str = None, query: str = None,
 def get_project(project_no: str, company_id: Optional[str] = None) -> dict:
     """Project card with its shipments, company, and contacts. `company_id`
     (optional) narrows the number to that customer's project when two
-    customers hold one number; the shipments listed are then that customer's
-    legs on the number, not every leg carrying it. On a number only one
-    customer holds it changes nothing."""
+    customers hold one number; the shipments listed then leave out the other
+    customer's legs on the number. On a number only one customer holds it
+    changes nothing."""
     projects = STORE.load("projects")
     want = _resolve(project_no, _project_keys(projects))
     _hit = _one_project(projects, want, "Opening it", company_id) if want else None
@@ -1722,14 +1728,14 @@ def get_project(project_no: str, company_id: Optional[str] = None) -> dict:
     if not pr:
         return _err(f"project '{project_no}' not found")
     p = pr[0]
-    # Number-only, as always, unless the caller named the customer AND the
-    # number is shared (_cascade_scope): a leg is keyed by company AND number
-    # on the Live screen, and one customer's leg must never surface on
-    # another's card.
-    scope = _cascade_scope(projects, want, company_id)
+    # Number-only, as always, unless the caller named the customer and
+    # another project holds the number (_other_holders): a leg is keyed by
+    # company AND number on the Live screen, and one customer's leg must
+    # never surface on another's card.
+    others = _other_holders(projects, want, company_id)
     shipments = [s for s in STORE.load("shipments")
                  if want in _shipment_project_nos(s)
-                 and (scope is None or _key(s.get("company_id")) == scope)]
+                 and _key(s.get("company_id")) not in others]
     companies = STORE.load("companies")
     company = next((c for c in companies if c["company_id"] == p["company_id"]), None)
     contacts = [c for c in STORE.load("contacts") if c["company_id"] == p["company_id"]]
@@ -2076,9 +2082,9 @@ def rename_project(old_project_no: str, new_project_no: str,
     needs_review entries referencing the old number are left as-is -- they're
     a historical note about the original migration, not a live pointer.)
     `company_id` (optional) names the customer whose project this is when two
-    hold the number; the cascade then carries ONLY that customer's shipments
-    and invoices. On a number only one customer holds it changes nothing. The
-    new number must still be unused store-wide."""
+    hold the number; the cascade then leaves the other customer's shipments
+    and invoices behind. On a number only one customer holds it changes
+    nothing. The new number must still be unused store-wide."""
     try:
         with STORE.write_lock():
             # _canon, not str: a caller sending 9999.0 would otherwise persist
@@ -2104,11 +2110,11 @@ def rename_project(old_project_no: str, new_project_no: str,
             if new_pn != old_pn and any(_key(p.get("project_no")) == new_pn
                                         for p in projects):
                 raise StoreError(f"project '{new_pn}' already exists")
-            # Confined to the named customer's records when one was named AND
-            # the number is shared (_cascade_scope) -- counted BEFORE this
-            # record leaves the old number, or its twin would count alone.
-            # Otherwise the cascade keys on the number alone, as it always has.
-            scope = _cascade_scope(projects, old_pn, company_id)
+            # The other holders' records stay behind when a customer was
+            # named (_other_holders) -- taken BEFORE this record leaves the
+            # old number. Otherwise the cascade keys on the number alone, as
+            # it always has.
+            others = _other_holders(projects, old_pn, company_id)
             target[0]["project_no"] = new_pn
             # NOT saved yet -- collected and committed as one unit below, so a
             # lock on shipments.json cannot leave the project renamed while its
@@ -2116,7 +2122,7 @@ def rename_project(old_project_no: str, new_project_no: str,
             shipments = STORE.load("shipments")
             touched_shipments = 0
             for s in shipments:
-                if scope is not None and _key(s.get("company_id")) != scope:
+                if _key(s.get("company_id")) in others:
                     continue
                 changed = False
                 if _key(s.get("project_no")) == old_pn:
@@ -2131,7 +2137,7 @@ def rename_project(old_project_no: str, new_project_no: str,
             invoices = STORE.load("invoices")
             touched_invoices = 0
             for i in invoices:
-                if scope is not None and _key(i.get("company_id")) != scope:
+                if _key(i.get("company_id")) in others:
                     continue
                 if _key(i.get("project_no")) == old_pn:
                     i["project_no"] = new_pn

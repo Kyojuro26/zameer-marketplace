@@ -643,21 +643,34 @@ function projItemClick(p){ return hasProjectNo(p) ? `onclick="openProject('${jes
    renumbered every record of the number locally. One predicate, used by the
    lookup and every mirror. */
 function hasCid(cid){ return cid !== undefined && cid !== null; }
+/* The comparison form of a company id, the server's _key: trimmed, exact.
+   The mirrors compared st() untrimmed while the server trimmed, so a leg
+   filed under ' acme ' was another customer's on the page and Acme's on
+   disk, and the two disagreed until reload. */
+function ck(v){ return st(v).trim(); }
 function findProject(pno, cid){
   return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno)
-                              && (!hasCid(cid) || st(x.company_id) === st(cid)));
+                              && (!hasCid(cid) || ck(x.company_id) === ck(cid)));
 }
 function projectsNumbered(pno){
   return DATA.projects.filter(x => hasProjectNo(x) && st(x.project_no) === st(pno));
 }
-/* The customer a local mirror is confined to after a scoped save, or null:
-   only when a second record holds the number, as the server's cascade is
-   (_cascade_scope). On an unshared number the mirror follows the number
-   alone, so a leg filed with no company, or an invoice under the wrong one,
-   moves with its project on the page exactly as it does on disk. */
+/* The other holders of a number, by company key -- what a record must not
+   be filed under to follow a scoped rename on the page, as the server's
+   cascade is (_other_holders). Empty on an unshared number, so a leg filed
+   with no company, or an invoice under the wrong one, moves with its project
+   on the page exactly as it does on disk. */
+function otherHolders(pno, cid){
+  const others = new Set(projectsNumbered(pno).map(x => ck(x.company_id)));
+  others.delete(ck(cid));
+  return others;
+}
+/* The customer a local delete is confined to, or null: only while another
+   live record holds the number, as _Archived hides -- every record of an
+   unshared number leaves the page, as every one hides on disk. */
 function mirrorScope(pno, cid){
   if(!hasCid(cid)) return null;
-  return projectsNumbered(pno).length > 1 ? st(cid) : null;
+  return projectsNumbered(pno).length > 1 ? ck(cid) : null;
 }
 /* The customer to open a project link under when the customer is a GUESS --
    an invoice's own company, which can be mis-filed against a project another
@@ -667,7 +680,7 @@ function mirrorScope(pno, cid){
    guess used as a hard filter rendered a link that opened nothing. */
 function linkCid(pno, cid){
   const holders = projectsNumbered(pno);
-  if(holders.some(x => st(x.company_id) === st(cid))) return st(cid);
+  if(holders.some(x => ck(x.company_id) === ck(cid))) return st(cid);
   return holders.length === 1 ? st(holders[0].company_id) : null;
 }
 function projNoCell(p){ return hasProjectNo(p) ? `<b>${esc(st(p.project_no))}</b>` : `<span class="muted">${esc(NO_NUMBER_NOTE)}</span>`; }
@@ -2315,10 +2328,10 @@ async function saveProject(pnoArg, cid){
     // Mirror the rename across local state before the follow-up field save,
     // so update_project below targets the record under its new key and the
     // shipments/invoices sections re-render pointing at the right project.
-    // Mirrored within the named customer when the number is shared, as the
-    // server's cascade is; taken BEFORE the record is renumbered.
-    const scope = mirrorScope(pno, cid);
-    const mine = (x)=> scope===null || st(x.company_id)===scope;
+    // The other holders' records stay behind, as on disk (_other_holders);
+    // taken BEFORE the record is renumbered.
+    const others = hasCid(cid) ? otherHolders(pno, cid) : new Set();
+    const mine = (x)=> !others.has(ck(x.company_id));
     const p=findProject(pno, cid);
     if(p) p.project_no = newPno;
     DATA.shipments.forEach(s=>{
@@ -2376,7 +2389,7 @@ async function deleteProject(pno, cid){
     // archived -- when the number is shared; every record of an unshared
     // number hides, as the server hides them.
     const scope = mirrorScope(pno, cid);
-    const mine = (x)=> scope===null || st(x.company_id)===scope;
+    const mine = (x)=> scope===null || ck(x.company_id)===scope;
     DATA.projects=DATA.projects.filter(x=>!(mine(x) && String(x.project_no)===String(pno)));
     DATA.shipments=DATA.shipments.filter(x=>!(mine(x) && _shipmentProjectNos(x).has(String(pno))));
     DATA.invoices=DATA.invoices.filter(x=>!(mine(x) && String(x.project_no)===String(pno)));

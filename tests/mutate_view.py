@@ -57,7 +57,7 @@ M = [
  # ---- a project is (number, customer) --------------------------------------
  ("the lookup finds the first record of that number, whichever customer's",
   "  return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno)\n"
-  "                              && (!hasCid(cid) || st(x.company_id) === st(cid)));",
+  "                              && (!hasCid(cid) || ck(x.company_id) === ck(cid)));",
   "  return DATA.projects.find(x => hasProjectNo(x) && st(x.project_no) === st(pno));"),
  # ---- review round 1: three classes on the page, one in the builder --------
  ("an empty customer means no customer again",
@@ -65,12 +65,19 @@ M = [
   "function hasCid(cid){ return cid !== undefined && cid !== null && st(cid) !== ''; }"),
  ("the Receivables link uses the invoice's customer as a hard filter",
   "  const holders = projectsNumbered(pno);\n"
-  "  if(holders.some(x => st(x.company_id) === st(cid))) return st(cid);\n"
+  "  if(holders.some(x => ck(x.company_id) === ck(cid))) return st(cid);\n"
   "  return holders.length === 1 ? st(holders[0].company_id) : null;",
   "  return st(cid);"),
- ("the local mirror is confined to the customer on an unshared number too",
-  "  return projectsNumbered(pno).length > 1 ? st(cid) : null;",
-  "  return st(cid);"),
+ ("the delete mirror is confined to the customer on an unshared number too",
+  "  return projectsNumbered(pno).length > 1 ? ck(cid) : null;",
+  "  return ck(cid);"),
+ # ---- review round 2: the other holders, and one key form ------------------
+ ("the rename mirror carries only records filed under the customer",
+  "    const mine = (x)=> !others.has(ck(x.company_id));",
+  "    const mine = (x)=> !hasCid(cid) || ck(x.company_id)===ck(cid);"),
+ ("a padded company id is another customer on the page",
+  "function ck(v){ return st(v).trim(); }",
+  "function ck(v){ return st(v); }"),
  ("the page hides invoices by the number alone again",
   "    data[\"invoices\"] = [i for i in data[\"invoices\"]\n"
   "                        if not _srv._invoice_hidden(i, arch)]",

@@ -44,7 +44,7 @@ M = [
  ("get_project lists every leg carrying the number, whichever customer's",
   '    shipments = [s for s in STORE.load("shipments")\n'
   '                 if want in _shipment_project_nos(s)\n'
-  '                 and (scope is None or _key(s.get("company_id")) == scope)]',
+  '                 and _key(s.get("company_id")) not in others]',
   '    shipments = [s for s in STORE.load("shipments")\n'
   '                 if want in _shipment_project_nos(s)]'),
  ("update_project ignores company_id",
@@ -61,10 +61,10 @@ M = [
   '            pr = _live_project(project_no)'),
  # ---- the rename cascade is scoped, or is not ------------------------------
  ("the rename cascade carries the OTHER customer's legs too",
-  '                if scope is not None and _key(s.get("company_id")) != scope:\n'
+  '                if _key(s.get("company_id")) in others:\n'
   '                    continue\n', ""),
  ("the rename cascade carries the OTHER customer's invoices too",
-  '                if scope is not None and _key(i.get("company_id")) != scope:\n'
+  '                if _key(i.get("company_id")) in others:\n'
   '                    continue\n', ""),
  # ---- review round 1: three classes ---------------------------------------
  ("an archived twin hides the live twin's records again -- by the number alone",
@@ -80,9 +80,19 @@ M = [
   '                    p is not target[0] and _key(p.get("project_no")) == want\n'
   '                    and _key(p.get("company_id")) == new_cid for p in projects):\n',
   '            if False:\n'),
- ("the cascade is confined whenever a customer is named, shared number or not",
-  '    return _key(company_id) if len(holders) > 1 else None',
-  '    return _key(company_id)'),
+ ("every other company is another holder, so a scoped call on an unshared number strands company-less records",
+  '    return {_key(p.get("company_id")) for p in projects\n'
+  '            if _key(p.get("project_no")) == key} - {_key(company_id)}',
+  '    return {_key(p.get("company_id")) for p in projects} - {_key(company_id)}'),
+ # ---- review round 2: the other holders, live or archived ------------------
+ ("an archived twin is not another holder, so its own records follow the live twin's rename",
+  '    return {_key(p.get("company_id")) for p in projects\n'
+  '            if _key(p.get("project_no")) == key} - {_key(company_id)}',
+  '    return {_key(p.get("company_id")) for p in projects\n'
+  '            if _key(p.get("project_no")) == key and not p.get("archived")} - {_key(company_id)}'),
+ ("the cascade is confined to the named customer's own records when a twin exists",
+  '                if _key(s.get("company_id")) in others:\n',
+  '                if others and _key(s.get("company_id")) != _key(company_id):\n'),
  # RETIRED, deliberately: "the cascade scope is taken from the argument, not
  # the record it found" -- _key(company_id) vs _key(target[0]["company_id"]).
  # The filter in _one_project only returns a record whose key EQUALS the

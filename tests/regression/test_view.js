@@ -69,7 +69,13 @@ function seedStore(dir) {
     { shipment_id: '4521-L3', company_id: 'acme', project_no: 4521,
       all_project_nos: [4521], stage: 'Ordered', ship_date: '2026-03-14 00:00:00' },
     { shipment_id: '4600-L1', company_id: null, project_no: '4600',
-      all_project_nos: ['4600'], stage: 'Ordered' }]);
+      all_project_nos: ['4600'], stage: 'Ordered' },
+    // on the SHARED number: a leg with no company, and Acme's leg with its
+    // company id padded (review round 2)
+    { shipment_id: '4521-L4', company_id: null, project_no: '4521',
+      all_project_nos: ['4521'], stage: 'Ordered' },
+    { shipment_id: '4521-L5', company_id: ' acme ', project_no: '4521',
+      all_project_nos: ['4521'], stage: 'Ordered' }]);
   w('invoices', [{ company_id: 'acme', invoice_no: '9001', project_no: '4521',
     payment_status: 'partial:30%', payment_notes: 45731, invoice_date: 45731 },
     { company_id: 'beta', invoice_no: '9002', project_no: '4600',
@@ -323,6 +329,11 @@ async function run(crmDir) {
   const nums = JSON.parse(app.eval("JSON.stringify(DATA.projects.filter(p=>['4521','4523'].includes(String(p.project_no))).map(p=>[p.company_id, String(p.project_no)]))"));
   r.check("and the local mirror renumbers Beta's record only",
     JSON.stringify(nums) === JSON.stringify([['acme', '4521'], ['beta', '4523']]), JSON.stringify(nums));
+  // (review round 2) the company-less leg follows the rename, as on disk; the
+  // leg filed under ' acme ' is Acme's -- the other holder's -- and stays
+  const legs45 = JSON.parse(app.eval("JSON.stringify(['4521-L1','4521-L4','4521-L5'].map(id=>String(DATA.shipments.find(x=>x.shipment_id===id).project_no)))"));
+  r.check("the company-less leg on the shared number follows Beta's rename locally, and Acme's padded one stays",
+    JSON.stringify(legs45) === JSON.stringify(['4521', '4523', '4521']), JSON.stringify(legs45));
   // put the number back for the checks below
   safe('closeDrawer'); safe('openProject', '4523', 'beta');
   if (app.el('f_pno')) app.el('f_pno').value = '4521';
@@ -379,6 +390,12 @@ async function run(crmDir) {
   if (app.el('f_pno')) app.el('f_pno').value = '4600';
   await app.fn('saveProject')('4601', 'acme');
   safe('closeDrawer');
+  // and a delete from the sole holder's drawer takes them off the page, as the
+  // server hides every record of a number with no live holder
+  await app.fn('deleteProject')('4600', 'acme');
+  const left4600 = JSON.parse(app.eval("JSON.stringify([DATA.shipments.some(x=>x.shipment_id==='4600-L1'), DATA.invoices.some(x=>x.invoice_no==='9002')])"));
+  r.check("a delete from the sole holder's drawer removes its company-less leg and mis-filed invoice from the page",
+    JSON.stringify(left4600) === '[false,false]', JSON.stringify(left4600));
 
   // ---- review round 1: one twin archived, and a company-less twin ------------
   // A second store: Acme's 4521 archived, Beta's live, and a third record of

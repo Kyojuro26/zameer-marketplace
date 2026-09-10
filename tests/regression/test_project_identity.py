@@ -287,4 +287,47 @@ def run(server, crm_dir=None):
             res.get("invoices_updated") == 2
             and str(invs["7003"]["project_no"]) == "4601" and str(invs["7004"]["project_no"]) == "4601",
             json.dumps(invs)[:300])
+
+    # ---- 8. only the other holder's records stay behind -----------------------------
+    # (review round 2) Confining the cascade to the named customer's own
+    # records, only when a second project held the number, still stranded the
+    # company-less and mis-filed records when that second project was
+    # ARCHIVED: the number-only rename is refused while a twin exists, so the
+    # scoped rename was the only one the live customer had, and it left them
+    # on a number whose only holder was archived, where they hid. A record on
+    # the number follows the named project unless it is filed under ANOTHER
+    # holder of the number -- live or archived.
+    r.section("a scoped rename leaves behind only records filed under another holder")
+    seed(s)
+    s.write("companies", [company("acme", "Ace Manufacturing"), company("beta", "Beta Works"),
+                          company("gamma", "Gamma Ltd")])
+    s.write("shipments", s.read("shipments")
+            + [shipment("4521-LN", "4521", None), shipment("4521-LG", "4521", "gamma")])
+    s.write("invoices", s.read("invoices")
+            + [invoice("7005", None, project_no="4521"), invoice("7006", "gamma", project_no="4521")])
+    res = s.call("get_project", project_no="4521", company_id="acme")
+    r.check("on a shared number get_project lists the company-less and mis-filed legs, not the twin's",
+            res.get("ok") and sorted(x["shipment_id"] for x in res["shipments"]) == ["4521-L1", "4521-LG", "4521-LN"],
+            json.dumps(res.get("shipments"))[:200])
+    s.call("archive_project", project_no="4521", company_id="beta")
+    res = s.call("rename_project", old_project_no="4521", new_project_no="4522", company_id="acme")
+    ships = {x["shipment_id"]: str(x["project_no"]) for x in s.read("shipments")}
+    invs = {x["invoice_no"]: str(x["project_no"]) for x in s.read("invoices")}
+    r.check("with the twin archived, a scoped rename carries the company-less and mis-filed legs",
+            res.get("ok") and res.get("shipments_updated") == 3
+            and ships["4521-L1"] == "4522" and ships["4521-LN"] == "4522" and ships["4521-LG"] == "4522",
+            json.dumps(ships))
+    r.check("and leaves the archived twin's own leg on its number",
+            ships["4521-L2"] == "4521", json.dumps(ships))
+    r.check("the invoices likewise",
+            res.get("invoices_updated") == 3 and invs["7001"] == "4522" and invs["7005"] == "4522"
+            and invs["7006"] == "4522" and invs["7002"] == "4521", json.dumps(invs))
+    res = s.call("list_shipments")
+    r.check("so nothing that was visible before the rename has vanished",
+            sorted(x["shipment_id"] for x in res.get("shipments", [])) == ["4521-L1", "4521-LG", "4521-LN"],
+            json.dumps(res)[:200])
+    s.call("restore_project", project_no="4521", company_id="beta")
+    res = s.call("get_project", project_no="4521", company_id="beta")
+    r.check("and the restored twin still has its own leg",
+            res.get("ok") and [x["shipment_id"] for x in res["shipments"]] == ["4521-L2"], json.dumps(res)[:200])
     return r
