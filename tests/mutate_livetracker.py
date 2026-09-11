@@ -395,8 +395,8 @@ VIEW = [
   "let filter='live', selected=null, query='';",
   "let filter='all', selected=null, query='';"),
  ("the Live tab is present but not the one selected",
-  '        <button data-f="live" class="on">Live</button>',
-  '        <button data-f="live">Live</button>'),
+  '        <button data-f="live" class="on">Live<span class="fcount" id="fc_live"></span></button>',
+  '        <button data-f="live">Live<span class="fcount" id="fc_live"></span></button>'),
 
  # ---- what a ship-date cell means -------------------------------------------
  ("a passed estimate is reported as a passed hard date",
@@ -464,8 +464,8 @@ VIEW = [
   '    <div class="lt-note">${esc(st(p.open_orders_notes)||\'\')||\'<span class="muted">no note</span>\'}</div>',
   '    <div class="lt-note">${st(p.open_orders_notes)||\'<span class="muted">no note</span>\'}</div>'),
  ("the note box stops wrapping",
-  "  .lt-note{margin:8px 0 0;font-size:13.5px;line-height:1.5;white-space:pre-wrap}",
-  "  .lt-note{margin:8px 0 0;font-size:13.5px;line-height:1.5;white-space:nowrap;overflow:hidden}"),
+  "  .lt-note{margin:8px 0 0;font-size:15px;line-height:1.5;white-space:pre-wrap;color:var(--ink)}",
+  "  .lt-note{margin:8px 0 0;font-size:15px;line-height:1.5;white-space:nowrap;overflow:hidden;color:var(--ink)}"),
 
  # ---- bucket labels -----------------------------------------------------------
  ("a bucket with no label shows nothing instead of its key",
@@ -677,7 +677,7 @@ VIEW = [
   "'${jesc(no)}')\">inv ${esc(no)}</button>`"),
  # ---- the sidebar in the main pane's order --------------------------------
  ("the sidebar goes back to one flat flag-sorted list",
-  "  const groups = trackerBuckets().map(b=>({label: bucketLabel(b.key),\n"
+  "  const groups = trackerBuckets().map(b=>({label: bucketLabel(b.key), key: b.key,\n"
   "    rows: rows.filter(r=>st(r.p.tracker_status)===b.key)}));\n"
   "  groups.push({label: 'Status not recognised', cap: false,\n"
   "    rows: rows.filter(r=>!known.has(st(r.p.tracker_status)))});",
@@ -701,7 +701,7 @@ VIEW = [
   "  return `<div class=\"lt-card\"${hasProjectNo(p) ? ` id=\"lt-${esc(st(p.company_id))}::${esc(st(p.project_no))}\"` : ''}>\n"
   "    <div class=\"lt-top\">"),
  ("the bucket headings are dropped",
-  "    h += `<div class=\"due-group\" style=\"padding:8px 12px 2px\">${esc(g.label)}</div>`;\n", ""),
+  "    h += `<div class=\"due-group sw-${g.key?bucketClass(g.key):'b-stage'}\" style=\"padding:8px 12px 2px\">${esc(g.label)}</div>`;\n", ""),
  ("a sidebar click opens the edit drawer again",
   "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\"`:''}>",
   "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"openProject('${jesc(st(r.p.project_no))}')\"`:''}>"),
