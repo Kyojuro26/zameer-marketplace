@@ -120,6 +120,13 @@ M = [
  ("a new leg drops company_id",
   "  await doSave('create_shipment', {project_no:pno, fields, company_id:cid}, (r)=>{",
   "  await doSave('create_shipment', {project_no:pno, fields}, (r)=>{"),
+ # ---- an invoice row opens its drawer ---------------------------------------
+ ("an invoice row on the company page is inert again",
+  "        return `<tr class=\"click\" onclick=\"openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')\"><td><b class=\"nw\">",
+  "        return `<tr><td><b class=\"nw\">"),
+ ("the Edit button's click reaches the row too, opening the drawer twice",
+  "        <td><button class=\"pill-btn\" onclick=\"event.stopPropagation();openEditInvoice(",
+  "        <td><button class=\"pill-btn\" onclick=\"openEditInvoice("),
  # ---- the deal date follows the date rule; two labels ---------------------
  ("the deal date is sent on every save again",
   "  dateIfChanged('f_date', fields, 'date');     // never send a date he did not touch",

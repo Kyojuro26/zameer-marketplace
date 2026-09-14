@@ -386,6 +386,18 @@ async function run(crmDir) {
     bare && !('company_id' in bare.args) && bare.args.project_no === '4521', bare && JSON.stringify(bare.args).slice(0, 120));
   safe('closeDrawer');
 
+  // ---- an invoice row opens its drawer, as a project's or a shipment's does ----
+  // The rows in "Invoices / customer orders" carried no handler; the only way
+  // in was a 37x17px Edit button in the last column, off the right edge of a
+  // narrow window once the table scrolled.
+  safe('setFilter', 'all'); safe('select', 'acme');
+  const invRow = rowOf((app.el('main') || EMPTY).innerHTML, '9001', 'tr');
+  r.check('an invoice row on the company page is clickable into its edit drawer',
+    /^ class="click" onclick="openEditInvoice\('acme','9001'\)"/.test(invRow), invRow.slice(0, 160));
+  r.check('and its Edit button stops the click reaching the row, so the drawer opens once',
+    /onclick="event\.stopPropagation\(\);openEditInvoice\('acme','9001'\)">Edit</.test(invRow)
+      && !/style="padding:2px 8px;font-size:11px"/.test(invRow), invRow.slice(-200));
+
   // ---- review round 1: the customer is a guess on the Receivables screen ------
   // Invoice 9002 is filed under Beta but linked to 4600, which only Acme
   // holds. The invoice's company used as a hard filter rendered a link that

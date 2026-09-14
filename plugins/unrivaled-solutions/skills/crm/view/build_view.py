@@ -2123,14 +2123,17 @@ function renderMain(){
       invRows+=list.map(v=>{const ps=st(v.payment_status);const cls=ps==='paid'?'b-won':(ps.startsWith('partial')?'b-pending':'b-lost');
         const due=dueOn(v); const overdue = bk==='Overdue';
         const owed = outstanding(v); const late = daysLate(v);
-        return `<tr><td><b class="nw">${esc(v.invoice_no||'—')}</b></td><td class="muted nw">${esc(v.client_po_raw||'')}</td>
+        // the whole row opens the edit drawer, as a project's or a shipment's
+        // does; the Edit button stays as the visible affordance and stops the
+        // click reaching the row, so one click opens the drawer once
+        return `<tr class="click" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')"><td><b class="nw">${esc(v.invoice_no||'—')}</b></td><td class="muted nw">${esc(v.client_po_raw||'')}</td>
         <td class="muted num">${esc(fmtDate(v.invoice_date))}</td>
         <td class="num">${owed==null?'<span class="muted">—</span>':(owed?`<b>${money(owed)}</b>`:'<span class="muted">—</span>')}</td>
         <td>${statusPill(ps)}</td>
         <td class="num ${overdue?'':'muted'}" ${overdue?'style="color:var(--red);font-weight:600"':''}>${esc(fmtDate(due)||'—')}${
           overdue&&late?`<div style="font-size:11px;font-weight:400">${late} days late</div>`:''}</td>
         <td class="muted note-cell">${esc(st(v.payment_notes).slice(0,90))}</td>
-        <td><button class="pill-btn" style="padding:2px 8px;font-size:11px" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('');
+        <td><button class="pill-btn" onclick="event.stopPropagation();openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')">Edit</button></td></tr>`;}).join('');
     });
     h+=`<div class="section"><h2>Invoices / customer orders (${invs.length})</h2>
       <table><thead><tr><th>Invoice #</th><th>Client PO / order</th><th class="num">Invoice date</th><th class="num">Outstanding</th><th>Status</th><th class="num">Due on</th><th>Notes</th><th></th></tr></thead><tbody>`+
