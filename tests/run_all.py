@@ -47,6 +47,7 @@ PY_MODULES = [
     ("regression.test_metrics", "regression/test_metrics.py"),
     ("regression.test_project_identity", "regression/test_project_identity.py"),
     ("regression.test_next_action", "regression/test_next_action.py"),
+    ("regression.test_vendor_match", "regression/test_vendor_match.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
