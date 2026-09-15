@@ -156,6 +156,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   /* the note is the substance of this screen -- body size, full ink, never
      truncated, wraps freely: larger and darker than the row above it */
   .lt-note{margin:8px 0 0;font-size:15px;line-height:1.5;white-space:pre-wrap;color:var(--ink)}
+  .lt-next{margin-top:6px;font-size:13px;font-weight:500}
   .lt-legs{margin-top:10px;display:flex;flex-direction:column;gap:4px}
   .lt-leg{display:flex;gap:10px;align-items:center;font-size:13px;flex-wrap:wrap}
   .lt-po{color:var(--muted);min-width:190px}
@@ -1109,6 +1110,11 @@ function liveFlags(p, legs){
   const red = [], amber = [];
   const start = st(p.date || p.start_date).trim();
   if(/^tbd$/i.test(start)) red.push('start TBD');
+  // the operator's own "by when": before today is late now, today is worth
+  // a look; a date isoDate cannot read flags nothing
+  const nao = isoDate(p.next_action_on), today = todayISO();
+  if(nao && nao < today) red.push('next action overdue');
+  else if(nao && nao === today) amber.push('due today');
   legs.forEach(l=>{
     if(legSettled(l)) return;
     const d = legDate(l.ship_date);
@@ -1127,6 +1133,13 @@ function liveFlags(p, legs){
    classification, not a new figure: no amount appears on the card. The button
    opens the invoice drawer for exactly that (company, invoice). A number with
    no record behind it says so rather than vanishing. */
+/* The "by when" under the note: present when either field is set, absent
+   otherwise, so a card with no next action does not carry an empty line. */
+function liveNext(p){
+  const t = st(p.next_action).trim(), d = st(p.next_action_on).trim();
+  if(!t && !d) return '';
+  return `<div class="lt-next">Next: ${esc(t||'\u2014')}${d?` \u00b7 by ${esc(fmtDate(d))}`:''}</div>`;
+}
 function liveInvoice(p){
   const no = st(p.invoice_no).trim();
   if(!no) return '';
@@ -1168,8 +1181,14 @@ function liveRows(){
         _shipmentProjectNos(s).has(st(p.project_no)));
       return {p, legs, flags: liveFlags(p, legs)};
     });
+  // red count desc, then the next action's date ascending with none last,
+  // then amber count desc, then the number -- so within a bucket the job
+  // that is late now comes first, and among those the one due soonest
+  const naoKey = r => isoDate(r.p.next_action_on) || '';
   rows.sort((a,b)=>{
     if(a.flags.red.length !== b.flags.red.length) return b.flags.red.length - a.flags.red.length;
+    const na = naoKey(a), nb = naoKey(b);
+    if(na !== nb){ if(!na) return 1; if(!nb) return -1; return na < nb ? -1 : 1; }
     if(a.flags.amber.length !== b.flags.amber.length) return b.flags.amber.length - a.flags.amber.length;
     return st(a.p.project_no).localeCompare(st(b.p.project_no));
   });
@@ -1326,6 +1345,7 @@ function liveCard(r){
         : `<span class="muted nw">${esc(NO_NUMBER_NOTE)}</span>`}</span>
     </div>
     <div class="lt-note">${esc(st(p.open_orders_notes)||'')||'<span class="muted">no note</span>'}</div>
+    ${liveNext(p)}
     <div class="lt-legs">${legs}</div>
   </div>`;
 }
@@ -2302,6 +2322,10 @@ function openProject(pno, cid){
       <p class="muted" style="margin:4px 0 0;font-size:11px">This is the job's
         own note. Each vendor leg has a separate "Order notes" box of its
         own — editing one of those does not change this.</p></div>
+    <div class="row2">
+      <div class="field"><label>Next action</label><input id="f_na" value="${esc(p.next_action||'')}" placeholder="e.g. chase the revised PO"/></div>
+      <div class="field"><label>By when</label>${dateInput('f_nao', p.next_action_on)}</div>
+    </div>
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
     <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc(arr(p.annotations).join('\n'))}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}','${jesc(cid)}')">Save changes</button>
@@ -2321,7 +2345,7 @@ function openProject(pno, cid){
   // The deal date was a plain text box showing "2026-06-17 00:00:00" and was
   // sent on every save. Same rule as every other date field now: baseline
   // from the control, sent only if he touched it.
-  snapDates(['f_date']);
+  snapDates(['f_date','f_nao']);
   document.getElementById('drawerNote').textContent = CRM.mode==='embedded'
     ? 'Demo mode: this save lasts only for this browser session.'
     : 'Saves persist to your CRM records through the validated write interface.';
@@ -2368,6 +2392,7 @@ async function saveProject(pnoArg, cid){
     // cleared, so emptying it is a real edit the changelog records and the next
     // re-import preserves; null would read as "never set".
     open_orders_notes: document.getElementById('f_oon').value,
+    next_action: document.getElementById('f_na').value.trim() || null,
     owner: document.getElementById('f_owner').value.split(',').map(s=>s.trim()).filter(Boolean),
     annotations: document.getElementById('f_annos').value.split('\n').map(s=>s.trim()).filter(Boolean),
     revenue: numOrNull('f_revenue'),
@@ -2376,6 +2401,7 @@ async function saveProject(pnoArg, cid){
     margin: marginRaw==null ? null : marginRaw/100,
   };
   dateIfChanged('f_date', fields, 'date');     // never send a date he did not touch
+  dateIfChanged('f_nao', fields, 'next_action_on');   // same rule for "by when"
   // Sent ONLY when he actually changed it. Every other field here is sent
   // unconditionally, which is fine for fields the form always shows correctly
   // -- but this one can hold a value the server now refuses, and resending

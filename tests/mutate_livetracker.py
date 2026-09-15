@@ -315,6 +315,20 @@ MERGE = [
 
 # -------------------------------------------------------------------- view ---
 VIEW = [
+ # ---- next action, with a date -----------------------------------------------
+ ("the next line is dropped from the card",
+  "    ${liveNext(p)}\n", ""),
+ ("an overdue next action is amber, not red",
+  "  if(nao && nao < today) red.push('next action overdue');",
+  "  if(nao && nao < today) amber.push('next action overdue');"),
+ ("due today counts as late now",
+  "  else if(nao && nao === today) amber.push('due today');",
+  "  else if(nao && nao === today) red.push('due today');"),
+ ("the sort ignores the next action's date",
+  "    if(na !== nb){ if(!na) return 1; if(!nb) return -1; return na < nb ? -1 : 1; }\n", ""),
+ ("the drawer re-sends an untouched by-when date",
+  "  dateIfChanged('f_nao', fields, 'next_action_on');   // same rule for \"by when\"",
+  "  fields.next_action_on = document.getElementById('f_nao').value || null;"),
  # RETIRED with the behaviour they graded:
  #
  #   "adoption gets its own private write path" -- now INVERTED. Adoption MUST
@@ -755,7 +769,8 @@ SERVER = [
 
  # ---- the finishing pass ------------------------------------------------------
  ("tracker_key stops being a writable project field",
-  '    "tracker_key",\n}', "}"),
+  '    "tracker_key",\n    # The operator\'s own "by when".',
+  '    # The operator\'s own "by when".'),
  ("tracker_key is left as free text, so a numeric sheet key never matches",
   "    # coerced to text like every other identifier: the sheet's key cell can be\n"
   "    # a number, and a float 1419.0 stored here would never match the \"1419.0\"\n"

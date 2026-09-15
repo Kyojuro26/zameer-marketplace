@@ -99,6 +99,12 @@ PROJECT_FIELDS = {
     # sheet against the current store rather than against every adoption ever
     # made.
     "tracker_key",
+    # The operator's own "by when". The Live screen groups by whose court a
+    # job is in; the note carried the deadline as prose. Both are
+    # operator-owned: never in merge's IMPORTER_OWNED, preserved through the
+    # changelog on a re-import. next_action_on is stored as given and read
+    # with _parse_date_loose, like every other date.
+    "next_action", "next_action_on",
 }
 SHIPMENT_FIELDS = {
     "shipment_id", "project_no", "all_project_nos", "vendor_po_raw", "ship_date",
@@ -840,6 +846,19 @@ def _validate(fields, allowed, entity):
     if "collection_status" in fields and fields["collection_status"] is not None \
             and not COLLECTION_RE.match(str(fields["collection_status"])):
         raise StoreError("collection_status must be paid | open | partial[:detail]")
+    # next_action is text or null; next_action_on a date string or null. A
+    # number or a list is a wrong call, not something to stringify; and a
+    # date no reader can parse would sit on the record and never come due --
+    # a silent wrong answer -- so it is refused rather than stored. What IS
+    # stored is kept as given (ISO from the drawer, a tracker-style 9/12/26
+    # from chat), never rewritten.
+    if "next_action" in fields and fields["next_action"] is not None \
+            and not isinstance(fields["next_action"], str):
+        raise StoreError("next_action must be text or null")
+    if "next_action_on" in fields and fields["next_action_on"] is not None:
+        v = fields["next_action_on"]
+        if not isinstance(v, str) or not _parse_date_loose(v):
+            raise StoreError("next_action_on must be a date (YYYY-MM-DD or M/D/YYYY) or null")
     if "payment_status" in fields and fields["payment_status"] is not None \
             and not COLLECTION_RE.match(str(fields["payment_status"])):
         raise StoreError("payment_status must be paid | open | partial[:detail]")
@@ -1749,10 +1768,13 @@ def get_project(project_no: str, company_id: Optional[str] = None) -> dict:
 @mcp.tool()
 @_store_errors
 def list_projects(status: str = None, owner: str = None, year: int = None,
-                  collection_status: str = None, include_archived: bool = False) -> dict:
+                  collection_status: str = None, include_archived: bool = False,
+                  next_action_due: bool = False) -> dict:
     """Project cards filtered by status (won|pending|lost), owner initial,
     year, and/or collection_status (paid|open|partial). Projects of archived
-    companies are excluded unless include_archived=True."""
+    companies are excluded unless include_archived=True. next_action_due=True
+    keeps only projects whose next_action_on is today or earlier, not
+    archived, status not lost -- "what is due back today"."""
     out = STORE.load("projects")
     if not include_archived:
         arch = _archived_ids()
@@ -1772,6 +1794,16 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
     if collection_status:
         out = [p for p in out
                if str(p.get("collection_status") or "").startswith(collection_status)]
+    if next_action_due:
+        # <= today through _today(), the hook the metrics freeze; a date
+        # _parse_date_loose cannot read is not due, and an archived or lost
+        # project is not due whatever its date says
+        today = _today()
+        def _due(p):
+            d = _parse_date_loose(p.get("next_action_on"))
+            return bool(d) and d.date() <= today \
+                and p.get("status") != "lost" and not p.get("archived")
+        out = [p for p in out if _due(p)]
     return {"ok": True, "interface_version": VERSION,
             "count": len(out), "projects": _with_project_metrics(_MetricsCtx(), out)}
 

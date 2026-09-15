@@ -1481,6 +1481,76 @@ async function run(crmDir) {
   r.check('and the sidebar says it capped, like the main pane does',
     /Showing the first 400 of 430/.test(bigSide));
 
+  // ---- next action, with a date: "whose court" gets a "by when" -------------
+  // A store of its own, one bucket, the clock frozen at TODAY (2026-08-09):
+  //   N1 a leg whose ship date passed (red), no next action
+  //   N2 next action due yesterday (red "next action overdue")
+  //   N3 next action due today (amber "due today", not counted)
+  //   N4 next action due tomorrow (no flag)
+  //   N5 nothing            N6 next action text with no date
+  // Within the bucket: red count desc, then next_action_on ascending with
+  // none last, then amber count, then the number -> N2 N1 N3 N4 N5 N6.
+  const dirN = path.join(tmp, 'store-next');
+  fs.mkdirSync(dirN, { recursive: true });
+  const wN = (n, v) => fs.writeFileSync(path.join(dirN, n + '.json'), JSON.stringify(v, null, 2));
+  wN('companies', [{ company_id: 'acme', display_name: 'Ace Manufacturing', role: 'customer',
+    domains: [], locations: [], archived: false }]);
+  const np = (no, extra) => Object.assign({ company_id: 'acme', project_no: no, status: 'won',
+    year: 2026, archived: false, tracker_status: 'action_admin', open_orders_notes: 'note ' + no }, extra);
+  wN('projects', [
+    np('N1', {}),
+    np('N2', { next_action: 'Chase the revised PO', next_action_on: '2026-08-08' }),
+    np('N3', { next_action: 'Call about drawings', next_action_on: '2026-08-09' }),
+    np('N4', { next_action: 'Confirm install crew', next_action_on: '2026-08-10' }),
+    np('N5', {}),
+    np('N6', { next_action: 'Text only' })]);
+  wN('shipments', [{ shipment_id: 'N1-L1', company_id: 'acme', project_no: 'N1',
+    all_project_nos: ['N1'], vendor_po_raw: 'VPO-N1', ship_date: '2026-07-01', stage: 'Ordered',
+    linked_to_project: true }]);
+  wN('invoices', []); wN('contacts', []); wN('vendors', []); wN('needs_review', []);
+  const appN = launch({ crmDir, storeDir: dirN, outDir: tmp, mode: 'http' });
+  freezeClock(appN, TODAY);
+  appN.eval("setFilter('live');");
+  const mainN = appN.doc.getElementById('main').innerHTML;
+  const cardN = (no) => (mainN.split(/<div class="lt-card"[^>]*>/).find(c => c.includes('>' + no + '<')) || '');
+  r.check('a card with a next action and a date carries the line under the note',
+    /class="lt-next">Next: Chase the revised PO · by 8 Aug 2026</.test(cardN('N2')),
+    cardN('N2').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 200));
+  r.check('text with no date carries the text alone, without a "by"',
+    /class="lt-next">Next: Text only</.test(cardN('N6')) && !/ by /.test(cardN('N6')),
+    cardN('N6').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 200));
+  r.check('a card with neither carries no line at all', !/lt-next/.test(cardN('N5')));
+  r.check('a next action before today is a red flag',
+    /badge b-lost">next action overdue</.test(cardN('N2')), cardN('N2').replace(/<[^>]+>/g, ' ').slice(0, 160));
+  r.check('a next action due today is amber, and not red',
+    /badge b-pending">due today</.test(cardN('N3')) && !/b-lost/.test(cardN('N3')),
+    cardN('N3').replace(/<[^>]+>/g, ' ').slice(0, 160));
+  r.check('one due tomorrow flags nothing', !/badge/.test(cardN('N4')));
+  r.check('"need a look" counts the overdue next action, and not the one due today',
+    /2 need a look/.test(mainN), (/(\d+) need a look/.exec(mainN) || ['none'])[0]);
+  const orderN = [...mainN.matchAll(/<div class="lt-card" id="lt-([^"]*)">/g)].map(m => m[1]);
+  r.check('within the bucket: red first, then by next action date with none last, then amber, then number',
+    JSON.stringify(orderN) === JSON.stringify(['acme::N2', 'acme::N1', 'acme::N3', 'acme::N4', 'acme::N5', 'acme::N6']),
+    JSON.stringify(orderN));
+  // the drawer: both fields shown; an untouched date is never re-sent
+  appN.fn('openProject')('N2', 'acme');
+  r.check('the drawer shows the next action and its date',
+    appN.el('f_na').value === 'Chase the revised PO' && appN.el('f_nao').value === '2026-08-08',
+    `na=${(appN.el('f_na') || {}).value} nao=${(appN.el('f_nao') || {}).value}`);
+  appN.resetCalls();
+  await appN.fn('saveProject')('N2', 'acme');
+  const upN = appN.calls().find(c => c.tool === 'update_project');
+  r.check('a save that did not touch the date sends the text and NOT the date',
+    upN && upN.args.fields.next_action === 'Chase the revised PO' && !('next_action_on' in upN.args.fields),
+    upN && JSON.stringify(Object.keys(upN.args.fields)));
+  appN.fn('openProject')('N2', 'acme');
+  appN.el('f_nao').value = '2026-08-12';
+  appN.resetCalls();
+  await appN.fn('saveProject')('N2', 'acme');
+  const upN2 = appN.calls().find(c => c.tool === 'update_project');
+  r.check('a date he did change is sent',
+    upN2 && upN2.args.fields.next_action_on === '2026-08-12', upN2 && JSON.stringify(upN2.args.fields.next_action_on));
+
   fs.rmSync(tmp, { recursive: true, force: true });
   return r;
 }

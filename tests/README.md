@@ -36,6 +36,7 @@ not evidence. Re-run it after any change to the harness, and bump
 | `regression/test_livetracker.py` | the fill-colour decode, the legend boundary, unlinked rows, re-import |
 | `regression/test_livetracker.js` | the Live screen: lateness flags, adoption, the note |
 | `regression/test_project_identity.py` | a project is `(project_no, company_id)`: the optional `company_id` narrows a shared number BEFORE the ambiguity test and only narrows -- number-only calls still refuse, the other customer's twin stays byte-identical, a customer without the number gets "not found", a same-customer duplicate still refuses. Mutated by `mutate_project_identity.py` |
+| `regression/test_next_action.py` | the operator's "by when": `next_action` / `next_action_on` round-trip as given, a wrong type or an unreadable date is refused, `list_projects(next_action_due=true)` takes today and earlier and never a lost or archived project, and a re-import (changelog or add-only) leaves both fields untouched. Clock frozen at 2026-08-09. Mutated by `mutate_next_action.py` |
 | `regression/test_metrics.py` | every derived number's shape: `counted + Σexcluded == population`, `null` iff nothing counted, a closed exclusion vocabulary, "quoted" on anything profit-shaped, never persisted. Clock frozen at 2026-09-01; every expected figure hand-derived. Mutated by `mutate_metrics.py` |
 | `regression/test_harness.js` | **the instrument itself** — the four ways it has been unable to fail, and refreshData's three failure states |
 | `shapes/test_shape_*.py` | the three recurring failure shapes |

@@ -57,6 +57,9 @@ Use the read tools; they are side-effect-free:
   `owner`, `year`, or `collection_status` as asked.
 - "Who owes us" → `list_projects` with `collection_status="open"` and
   `"partial"` (both), plus any project whose collection status isn't paid.
+- "What's due today", "what do I owe someone by when" → `list_projects(next_action_due=true)`:
+  every project whose `next_action_on` is today or earlier. Set one with
+  `update_project(fields={"next_action": ..., "next_action_on": "YYYY-MM-DD"})`.
 - Shipments by stage or lateness → `list_shipments` (`overdue=true` for
   slipped ship dates; `vendor_po=` to find which project a vendor's PO
   number belongs to — the reverse lookup for "how does vendor PO X map to
