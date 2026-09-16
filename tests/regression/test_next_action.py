@@ -94,6 +94,14 @@ def run(server, crm_dir=None):
                  company_id="acme")
     r.check("a tracker-style date is accepted and kept verbatim, not rewritten",
             res.get("ok") and _f(s, "4524", "next_action_on") == "9/12/26", json.dumps(res)[:200])
+    for good in ("2026-9-1", "2026-09-01 00:00:00", "2026-09-01T00:00:00", " 2026-09-01 ", "1/1/69"):
+        res = s.call("update_project", project_no="4524", fields={"next_action_on": good}, company_id="acme")
+        r.check(f"{good!r}, which the screen reads, is accepted", res.get("ok") is True, json.dumps(res)[:160])
+    res = s.call("update_project", project_no="4524", fields={"next_action_on": "1/1/69"}, company_id="acme")
+    by69 = s.call("list_projects", next_action_due=True)
+    r.check("1/1/69 is 1969 on the server, and so overdue",
+            "4524" in [str(p["project_no"]) for p in by69.get("projects", [])])
+    s.call("update_project", project_no="4524", fields={"next_action_on": None}, company_id="acme")
     res = s.call("create_project", fields={"project_no": "4530", "company_id": "acme",
                                            "next_action": "Send the quote",
                                            "next_action_on": "2026-08-10"})
@@ -112,7 +120,10 @@ def run(server, crm_dir=None):
     for bad in ({"next_action": 5}, {"next_action": ["a"]}, {"next_action": True},
                 {"next_action_on": 20260808}, {"next_action_on": ["2026-08-08"]},
                 {"next_action_on": True}, {"next_action_on": "soon"},
-                {"next_action_on": "2026-13-45"}):
+                {"next_action_on": "2026-13-45"},
+                # (review round 4) strptime reads these; no page reader does
+                {"next_action_on": "2026-9- 1"}, {"next_action_on": "\uff12\u0660\u0662\u0666-9-1"},
+                {"next_action_on": "2026-9-1junk"}):
         res = s.call("update_project", project_no="4521", fields=bad, company_id="acme")
         r.check(f"{json.dumps(bad)} is refused with a message naming the field",
                 res.get("ok") is False and "next_action" in str(res.get("error")),
@@ -147,6 +158,15 @@ def run(server, crm_dir=None):
     nos = sorted(str(p["project_no"]) for p in res.get("projects", []))
     r.check("it stacks with the other filters",
             res.get("ok") and nos == ["4521", "4524", "4526"], json.dumps(nos))
+    # (review round 4) a status written raw as "Lost" or " lost " is lost to
+    # the due rule as it is to the screen: folded, not compared raw
+    by["4524"]["status"] = "Lost"
+    by["4526"]["status"] = " lost "
+    s.write("projects", projects)
+    res = s.call("list_projects", next_action_due=True)
+    nos = sorted(str(p["project_no"]) for p in res.get("projects", []))
+    r.check("a raw-disk 'Lost' or ' lost ' is not due either", res.get("ok") and nos == ["4521"], json.dumps(nos))
+    by["4524"]["status"] = "won"; by["4526"]["status"] = "won"; s.write("projects", projects)
 
     # ---- 4. a re-import leaves them alone ----------------------------------------
     r.section("a re-import never overwrites the operator's next action")

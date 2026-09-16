@@ -177,6 +177,9 @@ async function run(crmDir) {
       r.check('a fake leap day is rejected (kept as raw text)', iso === null, String(iso));
     }
   }
+  if (hasIso) r.check("the 2-digit year pivots at 69, as the server's strptime does",
+    app.eval(`isoDate("1/1/69")`) === '1969-01-01' && app.eval(`isoDate("1/1/68")`) === '2068-01-01',
+    `${app.eval(`isoDate("1/1/69")`)} ${app.eval(`isoDate("1/1/68")`)}`);
   if (hasIso) r.check('a 2-digit year uses a sane century pivot',
     app.eval(`isoDate("12/31/99")`) === '1999-12-31',
     String(app.eval(`isoDate("12/31/99")`)));

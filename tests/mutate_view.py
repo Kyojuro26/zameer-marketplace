@@ -127,6 +127,9 @@ M = [
  ("the Edit button's click reaches the row too, opening the drawer twice",
   "        <td><button class=\"pill-btn\" onclick=\"event.stopPropagation();openEditInvoice(",
   "        <td><button class=\"pill-btn\" onclick=\"openEditInvoice("),
+ ("the 2-digit year pivots at 70 again, a year apart from the server",
+  "    y = us[3].length===2 ? (+us[3] >= 69 ? 1900 + +us[3] : 2000 + +us[3]) : +us[3];",
+  "    y = us[3].length===2 ? (+us[3] >= 70 ? 1900 + +us[3] : 2000 + +us[3]) : +us[3];"),
  # ---- vendors on legs ---------------------------------------------------------
  ("the vendor select drops a stored id no record carries",
   "  if(cur && !ids.includes(cur)) h += `<option value=\"${esc(cur)}\" selected>${esc(cur)} (no vendor record)</option>`;\n", ""),

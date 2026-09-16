@@ -127,6 +127,13 @@ def run(server, crm_dir=None):
             vm.match_vendor("Hallowell", vendors, {}, None, {"hallowell"}) == (None, "vendor_archived")
             and vm.match_vendor("HW", vendors, {"hw": "hallowell"}, None, {"hallowell"}) == (None, "vendor_archived")
             and vm.match_vendor("Hallowell", vendors, {}, None, {"penco"}) == ("hallowell", "exact"))
+    r.check("an archived id padded on disk still archives (compared as a key)",
+            vm.match_vendor("Hallowell", vendors, {}, None, {" hallowell "}) == (None, "vendor_archived"))
+    probs = []
+    (tmp / "vendor_aliases.json").write_text(json.dumps({"FS": "fs-racking", "fs": "j-and-l-wire", "F.S.": "fs-racking"}))
+    al = vm.load_aliases(str(tmp), probs)
+    r.check("two spellings of one token naming different vendors answer NEITHER, and are named",
+            "fs" not in al and len(probs) == 1 and "two spellings" in probs[0], f"{al} {probs}")
 
     # ---- 3. the report ---------------------------------------------------------------
     r.section("report mode lists every leg without a vendor, and writes nothing")
@@ -180,6 +187,20 @@ def run(server, crm_dir=None):
     proc = subprocess.run([sys.executable, str(script), "--store", str(store2)], capture_output=True, text=True)
     r.check("an alias file that cannot be read is a WARNING at the top of the report, not silence",
             proc.stdout.startswith("WARNING: vendor_aliases.json") and "UNMATCHED" in proc.stdout, proc.stdout[:200])
+    (store2 / "companies.json").write_text("{not json")
+    proc = subprocess.run([sys.executable, str(script), "--store", str(store2)], capture_output=True, text=True)
+    r.check("a companies file that cannot be read is a WARNING, not a traceback",
+            proc.returncode == 0 and "WARNING: companies.json" in proc.stdout and "Traceback" not in proc.stderr,
+            (proc.stdout[:200] + proc.stderr[-200:]))
+    store4 = tmp / "store4"; store4.mkdir()
+    (store4 / "vendors.json").write_text(json.dumps(vendors))
+    (store4 / "shipments.json").write_text(json.dumps([{"shipment_id": "D1", "vendor_po_raw": "PO # 1 (FS Racking)"}]))
+    (store4 / "changelog.jsonl").mkdir()
+    snap4 = (store4 / "shipments.json").read_bytes()
+    proc = subprocess.run([sys.executable, str(script), "--store", str(store4), "--apply"], capture_output=True, text=True)
+    r.check("--apply refuses, before writing, a store whose changelog is not a file",
+            proc.returncode == 1 and "REFUSED" in proc.stdout and (store4 / "shipments.json").read_bytes() == snap4
+            and "Traceback" not in proc.stderr, proc.stdout[-200:] + proc.stderr[-200:])
 
     # ---- 4. --apply ------------------------------------------------------------------
     r.section("--apply writes exactly the exact and aliased matches, once, with a changelog")
@@ -329,6 +350,36 @@ def run(server, crm_dir=None):
         ent2 = [x for x in review2 if x.get("type") == "vendor_token_unmatched"]
         r.check("a vendor the operator created by hand, absent from the sheet, still matches at import",
                 by_po2.get("PO 1 (Hand Vendor)", {}).get("vendor_id") == "hand-vendor", json.dumps(by_po2.get("PO 1 (Hand Vendor)"))[:200])
+        # (review round 4) a vendor the operator RENAMED by hand: the sheet
+        # still says "Penco", the store says "Penco Storage"; a PO naming
+        # either matches the one id, as the backfill on the merged store does
+        xl4 = tmp / "vendors4.xlsx"
+        lt._build_workbook(xl4)
+        wb = openpyxl.load_workbook(xl4)
+        wb["Vendor Contacts"].append(["Penco", "Hamburg PA", "A Rep", None, None, "Shelving", None, None])
+        pt = wb["Project Tracker"]
+        target = next(row for row in pt.iter_rows(min_row=2) if str(row[0].value) == "5003")
+        target[6].value = "PO 1 (Penco Storage)"
+        target[8].value = "PO 2 (Penco)"
+        wb.save(xl4)
+        out4 = tmp / "store-vendors4"; out4.mkdir()
+        (out4 / "vendors.json").write_text(json.dumps([{"company_id": "penco", "display_name": "Penco Storage"}]))
+        (out4 / "companies.json").write_text(json.dumps([{"company_id": "penco", "display_name": "Penco Storage", "role": "vendor", "archived": False}]))
+        (out4 / "changelog.jsonl").write_text(json.dumps({"op": "update", "entity": "vendor", "key": "penco",
+                                                          "fields": {"display_name": "Penco Storage"}}) + "\n")
+        sys.path.insert(0, added); err = None
+        try:
+            nrm.run(str(xl4), str(out4), force=False, mode="merge")
+        except Exception as exc:                                   # noqa: BLE001
+            err = f"{type(exc).__name__}: {exc}"
+        finally:
+            sys.path.remove(added)
+        legs4 = json.loads((out4 / "shipments.json").read_text()) if (out4 / "shipments.json").exists() else []
+        by_po4 = {str(s.get("vendor_po_raw")): s for s in legs4}
+        r.check("a PO naming a vendor by the name the operator gave it matches at import, as does the sheet's name",
+                err is None and by_po4.get("PO 1 (Penco Storage)", {}).get("vendor_id") == "penco"
+                and by_po4.get("PO 2 (Penco)", {}).get("vendor_id") == "penco",
+                err or json.dumps({k: v.get("vendor_id") for k, v in by_po4.items()})[:200])
         r.check("a vendor whose company is archived in the store is not written at import, and is reviewed",
                 by_po2.get("PO 2 (Penco)", {}).get("vendor_id") is None
                 and any(x.get("token") == "Penco" and x.get("why") == "vendor_archived" for x in ent2),

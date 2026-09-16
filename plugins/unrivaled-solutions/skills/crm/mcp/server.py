@@ -857,7 +857,12 @@ def _validate(fields, allowed, entity):
         raise StoreError("next_action must be text or null")
     if "next_action_on" in fields and fields["next_action_on"] is not None:
         v = fields["next_action_on"]
-        if not isinstance(v, str) or not _parse_date_loose(v):
+        # the gate is the grammar the SCREEN reads, not strptime's: strptime
+        # takes a space-padded day and Unicode digits, which no page reader
+        # does, and a date that passes here and cannot be drawn is the class
+        # this gate exists to close
+        if not isinstance(v, str) or not _NEXT_ACTION_DATE_RE.fullmatch(v.strip()) \
+                or not _parse_date_loose(v):
             raise StoreError("next_action_on must be a date (YYYY-MM-DD or M/D/YYYY) or null")
     if "payment_status" in fields and fields["payment_status"] is not None \
             and not COLLECTION_RE.match(str(fields["payment_status"])):
@@ -1184,6 +1189,12 @@ def _shipment_project_nos(s):
     nos = _as_list(s.get("all_project_nos")) \
         or ([s.get("project_no")] if s.get("project_no") else [])
     return {_key(n) for n in nos if n}
+
+
+# ASCII digits only, the two shapes the page's isoDate reads: an ISO date
+# with 1-2 digit month and day, optionally followed by a time, or M/D/YYYY.
+_NEXT_ACTION_DATE_RE = re.compile(
+    r"[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[ T][0-9]{2}:[0-9]{2}:[0-9]{2})?|[0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}")
 
 
 def _parse_date_loose(s):
@@ -1822,7 +1833,8 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
         def _due(p):
             d = _parse_date_loose(p.get("next_action_on"))
             return bool(d) and d.date() <= today \
-                and p.get("status") != "lost" and not p.get("archived")
+                and str(p.get("status") or "").strip().lower() != "lost" \
+                and not p.get("archived")
         out = [p for p in out if _due(p)]
     return {"ok": True, "interface_version": VERSION,
             "count": len(out), "projects": _with_project_metrics(_MetricsCtx(), out)}

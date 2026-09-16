@@ -77,11 +77,20 @@ def load_aliases(store_dir, problems=None):
             problems.append(f"{ALIASES_FILE} is not an object of token -> vendor id; "
                             f"no aliases applied")
         return {}
-    out = {}
+    out, conflicts = {}, set()
     for k, v in raw.items():
         nk = norm_token(k)
         if nk and isinstance(v, str) and v.strip():
+            if nk in out and out[nk] != v.strip():
+                conflicts.add(nk)       # two spellings of one token, two vendors
             out[nk] = v.strip()
+    # a token the file answers twice, differently, is answered by NEITHER:
+    # "the last wins" is a guess about which line the operator meant
+    for nk in conflicts:
+        out.pop(nk, None)
+        if problems is not None:
+            problems.append(f"{ALIASES_FILE}: two spellings of '{nk}' name different "
+                            f"vendors; neither is used until one is removed")
     return out
 
 
@@ -124,6 +133,8 @@ def match_vendor(token, vendors, aliases, index=None, archived=()):
         if target:
             known = {cid for lst in idx.values() for cid in lst}
             vid, how = (target, "alias") if target in known else (None, "alias_unknown")
-    if vid is not None and vid in set(archived or ()):
+    # compared as keys -- trimmed -- as the tools compare them
+    arch = {str(a).strip() for a in (archived or ()) if a is not None}
+    if vid is not None and str(vid).strip() in arch:
         return None, "vendor_archived"
     return vid, how

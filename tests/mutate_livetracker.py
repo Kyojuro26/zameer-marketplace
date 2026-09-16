@@ -334,6 +334,10 @@ VIEW = [
  ("the screen's day is UTC again (inert on a machine at UTC)",
   "  const d = new Date();\n  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');\n",
   "  return new Date().toISOString().slice(0,10);\n"),
+ ("the 'due this week' horizon is UTC again (inert on a machine at UTC)",
+  "  const d=new Date(); d.setDate(d.getDate()+7);\n"
+  "  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');\n",
+  "  const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10);\n"),
  ("the drawer re-sends an untouched by-when date",
   "  dateIfChanged('f_nao', fields, 'next_action_on');   // same rule for \"by when\"",
   "  fields.next_action_on = document.getElementById('f_nao').value || null;"),

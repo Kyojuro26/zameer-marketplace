@@ -998,8 +998,11 @@ def run(workbook, outdir, force=False, mode="merge"):
         primary = pnos[0] if pnos else None
         sid = f"{sid_base}-L{_next_leg(sid_base)}"
         token = _vm.vendor_token(po_val)
-        pool = list(vendors.values()) + [v for v in _prior_vendors
-                                         if v.get("company_id") not in vendors]
+        # every record the store holds, whether or not the sheet also names
+        # its id: a vendor the operator renamed by hand keeps its name after
+        # merge, and the PO that names it must match at import as it does in
+        # the backfill (vendor_index keys one id under both names)
+        pool = list(vendors.values()) + _prior_vendors
         vid, how = _vm.match_vendor(token, pool, _aliases, None, _archived_vendor_ids)
         if token is not None and vid is None and not _prior_vendor_by_sid.get(sid):
             review.append({"type": "vendor_token_unmatched", "token": token, "why": how,

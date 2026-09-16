@@ -1845,7 +1845,9 @@ function isoDate(v){
     // legacy 19xx one. Mapping every one to the 2000s displayed '12/31/99'
     // as 2099 -- a century out, and it sorts to the wrong end.
     mo=+us[1]; d=+us[2];
-    y = us[3].length===2 ? (+us[3] >= 70 ? 1900 + +us[3] : 2000 + +us[3]) : +us[3];
+    // 69, as the server's strptime("%y") pivots: 1/1/69 is 1969 there, and
+    // the screen must not read the same date as 2069 and drop its flag
+    y = us[3].length===2 ? (+us[3] >= 69 ? 1900 + +us[3] : 2000 + +us[3]) : +us[3];
   }
   // Shape is not validity. "9/31/2025", "2/30/2026" and "2026-02-29" (2026 is
   // not a leap year) all match the patterns above and all produce a string an
@@ -1957,7 +1959,12 @@ function nextActionISO(p){
   if(sv(p && p.status).trim()==='lost') return null;
   return isoDate(p && p.next_action_on) || null;
 }
-function soonISO(){ const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10); }
+/* a week from the operator's LOCAL today, as todayISO is: on UTC the
+   "due this week" horizon was a day off every evening */
+function soonISO(){
+  const d=new Date(); d.setDate(d.getDate()+7);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
 
 const BUCKET_ORDER = ['Overdue','Due this week','Due later','No due date','Paid'];
 function invoiceBucket(v, today, soon){

@@ -21,11 +21,13 @@ SERVER = [
   "            return bool(d) and d.date() <= today \\\n",
   "            return bool(d) and d.date() < today \\\n"),
  ("a lost project's next action is due",
-  '                and p.get("status") != "lost" and not p.get("archived")',
+  '                and str(p.get("status") or "").strip().lower() != "lost" \\\n'
+  '                and not p.get("archived")',
   '                and not p.get("archived")'),
  ("an archived project's next action is due when archived ones are asked for",
-  '                and p.get("status") != "lost" and not p.get("archived")',
-  '                and p.get("status") != "lost"'),
+  '                and str(p.get("status") or "").strip().lower() != "lost" \\\n'
+  '                and not p.get("archived")',
+  '                and str(p.get("status") or "").strip().lower() != "lost"'),
  ("the flag is ignored, so every project is due",
   "    if next_action_due:\n", "    if False:\n"),
  ("next_action stops being a project field",
@@ -36,8 +38,16 @@ SERVER = [
   '            and not isinstance(fields["next_action"], str):\n'
   '        raise StoreError("next_action must be text or null")\n', ""),
  ("an unreadable date is stored, and never comes due",
-  '        if not isinstance(v, str) or not _parse_date_loose(v):',
-  '        if not isinstance(v, str):'),
+  '        if not isinstance(v, str) or not _NEXT_ACTION_DATE_RE.fullmatch(v.strip()) \\\n'
+  '                or not _parse_date_loose(v):',
+  '        if not isinstance(v, str) or not _NEXT_ACTION_DATE_RE.fullmatch(v.strip()):'),
+ ("status is compared raw, so a 'Lost' on disk is due",
+  '                and str(p.get("status") or "").strip().lower() != "lost" \\\n',
+  '                and p.get("status") != "lost" \\\n'),
+ ("the date gate accepts whatever strptime accepts",
+  '        if not isinstance(v, str) or not _NEXT_ACTION_DATE_RE.fullmatch(v.strip()) \\\n'
+  '                or not _parse_date_loose(v):',
+  '        if not isinstance(v, str) or not _parse_date_loose(v):'),
  ("the due test reads the wall clock instead of the hook",
   "        today = _today()\n        def _due(p):",
   "        today = datetime.now().date()\n        def _due(p):"),

@@ -33,17 +33,30 @@ from vendor_match import load_aliases, match_vendor, vendor_index, vendor_token 
 INTERFACE_VERSION = "0.1"
 
 
-def _read(store, name):
+def _read(store, name, problems=None):
+    """A store file as a list, or [] -- and a file that is present but cannot
+    be read is NAMED in `problems` rather than raised: a traceback tells the
+    operator nothing about which file, and a silent [] would report a store
+    of no legs."""
     p = os.path.join(store, name)
     if not os.path.exists(p):
         return []
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data if isinstance(data, list) else []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        if problems is not None:
+            problems.append(f"{name} could not be read ({e}); treated as empty")
+        return []
+    if not isinstance(data, list):
+        if problems is not None:
+            problems.append(f"{name} is not a list of records; treated as empty")
+        return []
+    return data
 
 
-def _archived_company_ids(store):
-    return {c.get("company_id") for c in _read(store, "companies.json")
+def _archived_company_ids(store, problems=None):
+    return {c.get("company_id") for c in _read(store, "companies.json", problems)
             if isinstance(c, dict) and c.get("archived") and c.get("company_id")}
 
 
@@ -52,11 +65,11 @@ def plan(store):
     rule makes of it. Pure: reads the store, writes nothing. Each row keeps
     the leg's POSITION in shipments.json, so two legs sharing a shipment_id
     are never confused with each other on a write."""
-    shipments = _read(store, "shipments.json")
-    vendors = _read(store, "vendors.json")
     problems = []
+    shipments = _read(store, "shipments.json", problems)
+    vendors = _read(store, "vendors.json", problems)
     aliases = load_aliases(store, problems)
-    archived = _archived_company_ids(store)
+    archived = _archived_company_ids(store, problems)
     idx = vendor_index(vendors)
     rows = []
     for i, s in enumerate(shipments):
@@ -138,6 +151,13 @@ def apply(store):
     Returns (legs written, before, after)."""
     with _store_lock(store):
         p = plan(store)
+        clog = os.path.join(store, "changelog.jsonl")
+        if os.path.exists(clog) and not os.path.isfile(clog):
+            # refused BEFORE anything is written: a write that lands and a
+            # log that then raises leaves the store changed and unlogged
+            return {"written": 0, "before": p["with_vendor"], "after": p["with_vendor"],
+                    "legs": p["legs"], "logged": False,
+                    "refused": "changelog.jsonl is not a file; nothing written"}
         shipments = _read(store, "shipments.json")
         entries, written = [], 0
         for r in p["rows"]:
@@ -167,13 +187,14 @@ def apply(store):
             # its un-logged edits protected by that absence, and one backfill
             # run must not take that protection away. Without a changelog the
             # add-only path keeps every record untouched, vendor included.
-            clog = os.path.join(store, "changelog.jsonl")
             if os.path.exists(clog):
                 with open(clog, "a", encoding="utf-8") as f:
                     for e in entries:
                         f.write(json.dumps(e, default=str) + "\n")
                 logged = True
-        return written, p["with_vendor"], p["with_vendor"] + written, p["legs"], logged
+        return {"written": written, "before": p["with_vendor"],
+                "after": p["with_vendor"] + written, "legs": p["legs"], "logged": logged,
+                "refused": None}
 
 
 def main(argv=None):
@@ -189,7 +210,11 @@ def main(argv=None):
     if not args.apply:
         print("Report mode: nothing was written.")
         return 0
-    written, before, after, legs, logged = apply(args.store)
+    a = apply(args.store)
+    if a["refused"]:
+        print(f"REFUSED: {a['refused']}")
+        return 1
+    written, before, after, legs, logged = a["written"], a["before"], a["after"], a["legs"], a["logged"]
     n_log = written if logged else 0
     print(f"APPLIED: vendor_id set on {written} leg(s); {before} of {legs} -> {after} of {legs} "
           f"legs carry a vendor_id. {n_log} changelog entr{'y' if n_log == 1 else 'ies'} written."

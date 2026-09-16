@@ -1557,6 +1557,8 @@ async function run(crmDir) {
   r.check("at 23:30 local the screen's day is still today, so the job due today is amber, not red",
     appN.eval('todayISO()') === '2026-08-09' && /badge b-pending">due today</.test(cardLate('N3')) && !/b-lost/.test(cardLate('N3')),
     `todayISO=${appN.eval('todayISO()')} offset=${late.getTimezoneOffset()}`);
+  r.check("and the 'due this week' horizon is a week from that same local day",
+    appN.eval('soonISO()') === '2026-08-16', `soonISO=${appN.eval('soonISO()')}`);
   freezeClock(appN, TODAY);
   // the drawer: both fields shown; an untouched date is never re-sent
   appN.fn('openProject')('N2', 'acme');
