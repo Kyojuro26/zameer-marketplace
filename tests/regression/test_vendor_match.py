@@ -72,7 +72,9 @@ def run(server, crm_dir=None):
                      ("PO # 1305 (Interlake) (30%)", "Interlake"),
                      ("PO # 1306 (100%)", None),
                      ("PO # 1304", None),
-                     ("", None), (None, None), (12345, None), (True, None)):
+                     ("", None), (None, None), (12345, None), (True, None),
+                     # a container holding a parenthetical is not a PO (review round 3)
+                     (["PO 1 (FS)"], None), ({"a": "(FS)"}, None)):
         got = vm.vendor_token(po)
         r.check(f"vendor_token({po!r}) == {want!r}", got == want, f"got {got!r}")
 
@@ -109,8 +111,22 @@ def run(server, crm_dir=None):
     r.check("aliases are normalised on load, and junk entries are dropped",
             al == {"fs": "fs-racking", "jnl": "j-and-l-wire"}, str(al))
     r.check("no aliases file means no aliases", vm.load_aliases(str(tmp / "nope")) == {})
+    probs = []
     (tmp / "vendor_aliases.json").write_text("[1,2]")
-    r.check("an aliases file that is not an object means no aliases", vm.load_aliases(str(tmp)) == {})
+    r.check("an aliases file that is not an object means no aliases, and says so",
+            vm.load_aliases(str(tmp), probs) == {} and len(probs) == 1 and "vendor_aliases.json" in probs[0], str(probs))
+    probs = []
+    (tmp / "vendor_aliases.json").write_text("{bad json")
+    r.check("an aliases file that cannot be parsed means no aliases, and says so",
+            vm.load_aliases(str(tmp), probs) == {} and len(probs) == 1, str(probs))
+    (tmp / "vendor_aliases.json").write_bytes(b"\xef\xbb\xbf" + json.dumps({"FS": "fs-racking"}).encode())
+    probs = []
+    r.check("a BOM does not void the alias file",
+            vm.load_aliases(str(tmp), probs) == {"fs": "fs-racking"} and probs == [], str(probs))
+    r.check("a vendor whose company is archived is refused by the rule itself, exact or aliased",
+            vm.match_vendor("Hallowell", vendors, {}, None, {"hallowell"}) == (None, "vendor_archived")
+            and vm.match_vendor("HW", vendors, {"hw": "hallowell"}, None, {"hallowell"}) == (None, "vendor_archived")
+            and vm.match_vendor("Hallowell", vendors, {}, None, {"penco"}) == ("hallowell", "exact"))
 
     # ---- 3. the report ---------------------------------------------------------------
     r.section("report mode lists every leg without a vendor, and writes nothing")
@@ -131,6 +147,9 @@ def run(server, crm_dir=None):
     # hallowell's company is archived: its name matches, and it must not be written
     w("companies.json", [{"company_id": "hallowell", "display_name": "Hallowell", "role": "vendor", "archived": True}])
     w("projects.json", []); w("invoices.json", [])
+    # a changelog exists on this store, as on any store with logged edits:
+    # --apply appends to one it finds and never creates one (store3 below)
+    (store / "changelog.jsonl").write_text("")
     before = {p.name: p.read_bytes() for p in store.iterdir()}
     script = crm / "pipeline" / "backfill_leg_vendors.py"
     if not r.check("pipeline/backfill_leg_vendors.py exists", script.exists()):
@@ -154,6 +173,13 @@ def run(server, crm_dir=None):
             out[-400:])
     after = {p.name: p.read_bytes() for p in store.iterdir()}
     r.check("nothing was written", after == before and "nothing was written" in out.lower())
+    store2 = tmp / "store2"; store2.mkdir()
+    (store2 / "vendors.json").write_text(json.dumps(vendors))
+    (store2 / "vendor_aliases.json").write_text("{bad json")
+    (store2 / "shipments.json").write_text(json.dumps([{"shipment_id": "Q1", "vendor_po_raw": "PO # 1 (FS)"}]))
+    proc = subprocess.run([sys.executable, str(script), "--store", str(store2)], capture_output=True, text=True)
+    r.check("an alias file that cannot be read is a WARNING at the top of the report, not silence",
+            proc.stdout.startswith("WARNING: vendor_aliases.json") and "UNMATCHED" in proc.stdout, proc.stdout[:200])
 
     # ---- 4. --apply ------------------------------------------------------------------
     r.section("--apply writes exactly the exact and aliased matches, once, with a changelog")
@@ -195,6 +221,25 @@ def run(server, crm_dir=None):
     r.check("run twice, the second run writes nothing and logs nothing",
             proc.returncode == 0 and "APPLIED: vendor_id set on 0 leg(s)" in proc.stdout
             and (store / "shipments.json").read_bytes() == snap and len(log2) == 2, proc.stdout[-200:])
+    # a store with NO changelog: the vendor is written, no changelog is created
+    # (its presence flips merge from add-only to full refresh), and the
+    # add-only re-import keeps the vendor
+    store3 = tmp / "store3"; store3.mkdir()
+    w3 = lambda n, v: (store3 / n).write_text(json.dumps(v))  # noqa: E731
+    w3("vendors.json", vendors); w3("companies.json", []); w3("projects.json", [])
+    w3("shipments.json", [{"shipment_id": "H1", "vendor_po_raw": "PO # 1 (FS Racking)"}])
+    proc = subprocess.run([sys.executable, str(script), "--store", str(store3), "--apply"], capture_output=True, text=True)
+    h1 = json.loads((store3 / "shipments.json").read_text())[0]
+    r.check("--apply on a store without a changelog writes the vendor and creates no changelog",
+            proc.returncode == 0 and h1.get("vendor_id") == "fs-racking" and not (store3 / "changelog.jsonl").exists()
+            and "0 changelog entries written" in proc.stdout and "No changelog.jsonl" in proc.stdout, proc.stdout[-300:])
+    merge = _load_test("test_livetracker")._load(crm, "merge.py")
+    merged, rep = merge.merge_all({"companies.json": [], "contacts.json": [], "vendors.json": vendors,
+                                   "invoices.json": [], "needs_review.json": [], "projects.json": [],
+                                   "shipments.json": [{"shipment_id": "H1", "vendor_po_raw": "PO # 1 (FS Racking)"}]},
+                                  str(store3))
+    r.check("and the add-only re-import keeps it",
+            [s.get("vendor_id") for s in merged["shipments.json"]] == ["fs-racking"], json.dumps(merged["shipments.json"])[:200])
 
     # ---- 5. the importer, by the same rule ----------------------------------------------
     r.section("the importer files a new leg under the vendor its PO names, and reviews the rest")
@@ -245,6 +290,65 @@ def run(server, crm_dir=None):
                 json.dumps(ent)[:300])
         r.check("a matched token raises no review entry", not any(x.get("token") in ("FS", "FS Racking") for x in ent))
 
+        # the store as it stands is part of the rule (review round 3): a vendor
+        # the operator created by hand matches; a vendor whose company is
+        # archived does not; a leg whose vendor is on file is not reviewed
+        # again; an unreadable alias file is a review entry
+        xl2 = tmp / "vendors2.xlsx"
+        lt._build_workbook(xl2)
+        wb = openpyxl.load_workbook(xl2)
+        wb["Vendor Contacts"].append(["Penco", "Hamburg PA", "A Rep", None, None, "Shelving", None, None])
+        pt = wb["Project Tracker"]
+        target = next(row for row in pt.iter_rows(min_row=2) if str(row[0].value) == "5003")
+        target[6].value = "PO 1 (Hand Vendor)"       # a vendor only the store knows
+        target[8].value = "PO 2 (Penco)"             # on the sheet, but archived in the store
+        target[10].value = "PO 3 (Nobody)"           # unmatched, but its leg already has a vendor on file
+        wb.save(xl2)
+        out2 = tmp / "store-vendors2"; out2.mkdir()
+        w2 = lambda n, v: (out2 / n).write_text(json.dumps(v))  # noqa: E731
+        w2("companies.json", [{"company_id": "hand-vendor", "display_name": "Hand Vendor", "role": "vendor", "archived": False},
+                              {"company_id": "penco", "display_name": "Penco", "role": "vendor", "archived": True}])
+        w2("vendors.json", [{"company_id": "hand-vendor", "display_name": "Hand Vendor"},
+                            {"company_id": "penco", "display_name": "Penco"}])
+        w2("shipments.json", [{"shipment_id": "5003-L3", "vendor_po_raw": "PO 3 (Nobody)", "vendor_id": "hand-vendor",
+                               "project_no": "5003", "company_id": "ironvale-supply"}])
+        (out2 / "changelog.jsonl").write_text(json.dumps({"op": "update", "entity": "shipment", "key": "5003-L3",
+                                                          "fields": {"vendor_id": "hand-vendor"}}) + "\n")
+        w2("vendor_aliases.json", {})
+        sys.path.insert(0, added); err = None
+        try:
+            nrm.run(str(xl2), str(out2), force=False, mode="merge")
+        except Exception as exc:                                   # noqa: BLE001
+            err = f"{type(exc).__name__}: {exc}"
+        finally:
+            sys.path.remove(added)
+        r.check("the import over a populated store runs", err is None, err or "")
+        legs2 = json.loads((out2 / "shipments.json").read_text()) if (out2 / "shipments.json").exists() else []
+        by_po2 = {str(s.get("vendor_po_raw")): s for s in legs2}
+        review2 = json.loads((out2 / "needs_review.json").read_text()) if (out2 / "needs_review.json").exists() else []
+        ent2 = [x for x in review2 if x.get("type") == "vendor_token_unmatched"]
+        r.check("a vendor the operator created by hand, absent from the sheet, still matches at import",
+                by_po2.get("PO 1 (Hand Vendor)", {}).get("vendor_id") == "hand-vendor", json.dumps(by_po2.get("PO 1 (Hand Vendor)"))[:200])
+        r.check("a vendor whose company is archived in the store is not written at import, and is reviewed",
+                by_po2.get("PO 2 (Penco)", {}).get("vendor_id") is None
+                and any(x.get("token") == "Penco" and x.get("why") == "vendor_archived" for x in ent2),
+                json.dumps(ent2)[:300])
+        r.check("a leg whose vendor is already on file is not reviewed again on a re-import",
+                not any(x.get("token") == "Nobody" for x in ent2)
+                and by_po2.get("PO 3 (Nobody)", {}).get("vendor_id") == "hand-vendor", json.dumps(ent2)[:300])
+        out3 = tmp / "store-vendors3"; out3.mkdir()
+        (out3 / "vendor_aliases.json").write_text("{bad json")
+        sys.path.insert(0, added); err = None
+        try:
+            nrm.run(str(xl), str(out3), force=False, mode="merge")
+        except Exception as exc:                                   # noqa: BLE001
+            err = f"{type(exc).__name__}: {exc}"
+        finally:
+            sys.path.remove(added)
+        review3 = json.loads((out3 / "needs_review.json").read_text()) if (out3 / "needs_review.json").exists() else []
+        r.check("an alias file the importer cannot read is a needs_review entry, not silence",
+                err is None and any(x.get("type") == "vendor_aliases_unreadable" for x in review3), (err or json.dumps(review3)[:200]))
+
     # ---- 6. the server ----------------------------------------------------------------
     r.section("the server: legs by vendor, a vendor's open POs, and no vendor that is not one")
     srv = server
@@ -281,6 +385,12 @@ def run(server, crm_dir=None):
     r.check("a real vendor is accepted", res.get("ok") and res["shipment"]["vendor_id"] == "fs-racking", json.dumps(res)[:200])
     res = s.call("update_shipment", shipment_id="4521-L3", fields={"vendor_id": None})
     r.check("and null clears it", res.get("ok") and res["shipment"]["vendor_id"] is None, json.dumps(res)[:200])
+    res = s.call("update_shipment", shipment_id="4521-L3", fields={"vendor_id": " fs-racking "})
+    r.check("a padded vendor id is stored as validated -- trimmed -- so the page reads it as the server does",
+            res.get("ok") and res["shipment"]["vendor_id"] == "fs-racking"
+            and next(x for x in s.read("shipments") if x["shipment_id"] == "4521-L3")["vendor_id"] == "fs-racking",
+            json.dumps(res)[:200])
+    s.call("update_shipment", shipment_id="4521-L3", fields={"vendor_id": None})
     res = s.call("create_shipment", project_no="4521", fields={"vendor_po_raw": "X", "vendor_id": "nobody"}, company_id="acme")
     r.check("create_shipment refuses an unknown vendor too",
             res.get("ok") is False and "no vendor record" in str(res.get("error")) and len(s.read("shipments")) == 3,

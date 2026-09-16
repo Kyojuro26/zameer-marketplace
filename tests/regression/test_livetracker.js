@@ -217,7 +217,7 @@ function seedStore(dir) {
 function freezeClock(app, iso) {
   app.eval(`
     (function(){
-      const Real = Date, fixed = Real.parse(${JSON.stringify(iso + 'T12:00:00Z')});
+      const Real = Date, fixed = Real.parse(${JSON.stringify(iso.includes('T') ? iso : iso + 'T12:00:00Z')});
       function Frozen(...a){
         return a.length === 0 ? new Real(fixed) : new Real(...a);
       }
@@ -1503,7 +1503,11 @@ async function run(crmDir) {
     np('N3', { next_action: 'Call about drawings', next_action_on: '2026-08-09' }),
     np('N4', { next_action: 'Confirm install crew', next_action_on: '2026-08-10' }),
     np('N5', {}),
-    np('N6', { next_action: 'Text only' })]);
+    np('N6', { next_action: 'Text only' }),
+    // review round 3: a lost job is never late, as the server has it; and a
+    // date the server accepts unpadded ("2026-8-8") must read on the screen
+    np('N7', { status: 'lost', next_action: 'Never mind', next_action_on: '2026-08-01' }),
+    np('N8', { next_action: 'Unpadded', next_action_on: '2026-8-8' })]);
   wN('shipments', [{ shipment_id: 'N1-L1', company_id: 'acme', project_no: 'N1',
     all_project_nos: ['N1'], vendor_po_raw: 'VPO-N1', ship_date: '2026-07-01', stage: 'Ordered',
     linked_to_project: true }]);
@@ -1526,12 +1530,34 @@ async function run(crmDir) {
     /badge b-pending">due today</.test(cardN('N3')) && !/b-lost/.test(cardN('N3')),
     cardN('N3').replace(/<[^>]+>/g, ' ').slice(0, 160));
   r.check('one due tomorrow flags nothing', !/badge/.test(cardN('N4')));
-  r.check('"need a look" counts the overdue next action, and not the one due today',
-    /2 need a look/.test(mainN), (/(\d+) need a look/.exec(mainN) || ['none'])[0]);
+  r.check('"need a look" counts the overdue next actions, and not the one due today',
+    /3 need a look/.test(mainN), (/(\d+) need a look/.exec(mainN) || ['none'])[0]);
   const orderN = [...mainN.matchAll(/<div class="lt-card" id="lt-([^"]*)">/g)].map(m => m[1]);
   r.check('within the bucket: red first, then by next action date with none last, then amber, then number',
-    JSON.stringify(orderN) === JSON.stringify(['acme::N2', 'acme::N1', 'acme::N3', 'acme::N4', 'acme::N5', 'acme::N6']),
+    JSON.stringify(orderN) === JSON.stringify(['acme::N2', 'acme::N8', 'acme::N1', 'acme::N3', 'acme::N4', 'acme::N5', 'acme::N6', 'acme::N7']),
     JSON.stringify(orderN));
+  r.check("a lost project's past next action is neither red nor counted, and sorts with the undated",
+    !/badge/.test(cardN('N7')) && /class="lt-next">Next: Never mind/.test(cardN('N7')),
+    cardN('N7').replace(/<[^>]+>/g, ' ').slice(0, 160));
+  r.check('an unpadded date the server accepted is read by the screen: red, counted, sorted by its date',
+    /badge b-lost">next action overdue</.test(cardN('N8')), cardN('N8').replace(/<[^>]+>/g, ' ').slice(0, 160));
+  appN.fn('openProject')('N8', 'acme');
+  r.check('and its drawer shows a date control holding it, not a text box',
+    /<input id="f_nao" type="date"/.test((appN.el('dbody') || {}).innerHTML || ''),
+    ((appN.el('dbody') || {}).innerHTML || '').split('f_nao')[1] ? ((appN.el('dbody') || {}).innerHTML || '').split('id="f_nao"')[1].slice(0, 60) : 'no f_nao');
+  appN.fn('closeDrawer')();
+  // the screen's day is the operator's LOCAL day, as the server's is. Frozen
+  // at 23:30 local on the 9th, which is already the 10th in UTC anywhere west
+  // of Greenwich; on a machine at UTC the two agree and this check is inert.
+  const late = new Date(2026, 7, 9, 23, 30);
+  freezeClock(appN, late.toISOString());
+  appN.eval("renderMain();");
+  const mainLate = appN.doc.getElementById('main').innerHTML;
+  const cardLate = (no) => (mainLate.split(/<div class="lt-card"[^>]*>/).find(c => c.includes('>' + no + '<')) || '');
+  r.check("at 23:30 local the screen's day is still today, so the job due today is amber, not red",
+    appN.eval('todayISO()') === '2026-08-09' && /badge b-pending">due today</.test(cardLate('N3')) && !/b-lost/.test(cardLate('N3')),
+    `todayISO=${appN.eval('todayISO()')} offset=${late.getTimezoneOffset()}`);
+  freezeClock(appN, TODAY);
   // the drawer: both fields shown; an untouched date is never re-sent
   appN.fn('openProject')('N2', 'acme');
   r.check('the drawer shows the next action and its date',

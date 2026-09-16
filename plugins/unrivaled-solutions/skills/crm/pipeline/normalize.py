@@ -955,7 +955,28 @@ def run(workbook, outdir, force=False, mode="merge"):
         from . import vendor_match as _vm      # packaged
     except ImportError:
         import vendor_match as _vm             # run as a script
-    _aliases = _vm.load_aliases(str(outdir))
+    _alias_problems = []
+    _aliases = _vm.load_aliases(str(outdir), _alias_problems)
+    for _msg in _alias_problems:
+        review.append({"type": "vendor_aliases_unreadable", "detail": _msg})
+    # The store as it stands, for three things the sheet cannot tell us: a
+    # vendor the operator created by hand (kept by merge, absent from the
+    # sheet's Vendor Contacts) is still a vendor to match; a vendor whose
+    # company is archived is one the tools refuse, so the rule refuses it
+    # too; and a leg whose vendor is already on file needs no review entry
+    # on every re-import. One rule, over the vendors the store will hold.
+    def _prior(name):
+        p = pathlib.Path(outdir) / name
+        try:
+            data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+        except (OSError, ValueError):
+            data = []
+        return [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+    _prior_vendors = _prior("vendors.json")
+    _archived_vendor_ids = {c.get("company_id") for c in _prior("companies.json")
+                            if c.get("archived") and c.get("company_id")}
+    _prior_vendor_by_sid = {str(s.get("shipment_id")): s.get("vendor_id")
+                            for s in _prior("shipments.json") if s.get("vendor_id")}
 
     # A running counter PER sid_base, not per row. It used to restart at 1 on
     # every row, so "4521" appearing on two open-order rows (phase 2, a
@@ -977,8 +998,10 @@ def run(workbook, outdir, force=False, mode="merge"):
         primary = pnos[0] if pnos else None
         sid = f"{sid_base}-L{_next_leg(sid_base)}"
         token = _vm.vendor_token(po_val)
-        vid, how = _vm.match_vendor(token, list(vendors.values()), _aliases)
-        if token is not None and vid is None:
+        pool = list(vendors.values()) + [v for v in _prior_vendors
+                                         if v.get("company_id") not in vendors]
+        vid, how = _vm.match_vendor(token, pool, _aliases, None, _archived_vendor_ids)
+        if token is not None and vid is None and not _prior_vendor_by_sid.get(sid):
             review.append({"type": "vendor_token_unmatched", "token": token, "why": how,
                            "shipment_id": sid, "vendor_po_raw": po_val,
                            "project_no": primary, "company_id": company_id})

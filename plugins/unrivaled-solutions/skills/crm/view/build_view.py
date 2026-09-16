@@ -1112,7 +1112,7 @@ function liveFlags(p, legs){
   if(/^tbd$/i.test(start)) red.push('start TBD');
   // the operator's own "by when": before today is late now, today is worth
   // a look; a date isoDate cannot read flags nothing
-  const nao = isoDate(p.next_action_on), today = todayISO();
+  const nao = nextActionISO(p), today = todayISO();
   if(nao && nao < today) red.push('next action overdue');
   else if(nao && nao === today) amber.push('due today');
   legs.forEach(l=>{
@@ -1184,7 +1184,7 @@ function liveRows(){
   // red count desc, then the next action's date ascending with none last,
   // then amber count desc, then the number -- so within a bucket the job
   // that is late now comes first, and among those the one due soonest
-  const naoKey = r => isoDate(r.p.next_action_on) || '';
+  const naoKey = r => nextActionISO(r.p) || '';
   rows.sort((a,b)=>{
     if(a.flags.red.length !== b.flags.red.length) return b.flags.red.length - a.flags.red.length;
     const na = naoKey(a), nb = naoKey(b);
@@ -1834,7 +1834,9 @@ function isoDate(v){
   const t = st(v).trim();
   if(!t) return '';
   let y, mo, d;
-  const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  // 1-2 digits, as the server's strptime("%Y-%m-%d") reads them: a date the
+  // server accepted ("2026-9-1") must be one the screen can read too
+  const iso = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if(iso){ y=+iso[1]; mo=+iso[2]; d=+iso[3]; }
   else {
     const us = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);   // M/D/YYYY, M/D/YY
@@ -1941,7 +1943,20 @@ function shapeCaveat(sh){
    late it is. The company page and the Receivables view both read these: a
    cross-company total that disagreed with the per-company page about the same
    invoice would be worse than having no total at all. */
-function todayISO(){ return new Date().toISOString().slice(0,10); }
+/* Today as the operator's LOCAL date, as the server's _today() is -- not
+   the UTC date, which from 20:00 EDT is already tomorrow and made a job due
+   today read as overdue every evening. */
+function todayISO(){
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+/* The next action's date as the screen reads it, or null -- null for a lost
+   project, as the server's due rule has it: a lost job is never late. One
+   reader for the flag and the sort. */
+function nextActionISO(p){
+  if(sv(p && p.status).trim()==='lost') return null;
+  return isoDate(p && p.next_action_on) || null;
+}
 function soonISO(){ const d=new Date(); d.setDate(d.getDate()+7); return d.toISOString().slice(0,10); }
 
 const BUCKET_ORDER = ['Overdue','Due this week','Due later','No due date','Paid'];

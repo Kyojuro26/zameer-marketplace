@@ -54,7 +54,8 @@ def plan(store):
     are never confused with each other on a write."""
     shipments = _read(store, "shipments.json")
     vendors = _read(store, "vendors.json")
-    aliases = load_aliases(store)
+    problems = []
+    aliases = load_aliases(store, problems)
     archived = _archived_company_ids(store)
     idx = vendor_index(vendors)
     rows = []
@@ -64,15 +65,13 @@ def plan(store):
         if s.get("vendor_id"):
             continue                       # never second-guessed
         token = vendor_token(s.get("vendor_po_raw"))
-        vid, how = match_vendor(token, vendors, aliases, idx)
-        if vid is not None and vid in archived:
-            vid, how = None, "vendor_archived"
+        vid, how = match_vendor(token, vendors, aliases, idx, archived)
         rows.append({"i": i, "shipment_id": s.get("shipment_id"), "po": s.get("vendor_po_raw"),
                      "token": token, "vendor_id": vid, "how": how})
     return {"legs": len([s for s in shipments if isinstance(s, dict)]),
             "with_vendor": len([s for s in shipments
                                 if isinstance(s, dict) and s.get("vendor_id")]),
-            "rows": rows}
+            "rows": rows, "problems": problems}
 
 
 VERDICT = {"no_token": "NO TOKEN", "unmatched": "UNMATCHED",
@@ -84,6 +83,8 @@ VERDICT = {"no_token": "NO TOKEN", "unmatched": "UNMATCHED",
 def format_report(p):
     L = []
     rows = p["rows"]
+    for msg in p.get("problems", []):
+        L.append(f"WARNING: {msg}")
     L.append(f"{p['legs']} legs; {p['with_vendor']} already carry a vendor_id "
              f"(left alone); {len(rows)} without one.\n")
     for r in rows:
@@ -153,16 +154,26 @@ def apply(store):
                             "fields": {"vendor_id": r["vendor_id"]},
                             "interface_version": INTERFACE_VERSION,
                             "source": f"backfill_leg_vendors:{r['how']}"})
+        logged = False
         if written:
             target = os.path.join(store, "shipments.json")
             tmp = target + ".backfill.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(shipments, f, indent=2, ensure_ascii=False)
             os.replace(tmp, target)
-            with open(os.path.join(store, "changelog.jsonl"), "a", encoding="utf-8") as f:
-                for e in entries:
-                    f.write(json.dumps(e, default=str) + "\n")
-        return written, p["with_vendor"], p["with_vendor"] + written, p["legs"]
+            # The changelog is appended to, never CREATED. merge.py reads the
+            # file's mere presence as "every operator edit is logged" and
+            # switches from add-only to full refresh; a store without one had
+            # its un-logged edits protected by that absence, and one backfill
+            # run must not take that protection away. Without a changelog the
+            # add-only path keeps every record untouched, vendor included.
+            clog = os.path.join(store, "changelog.jsonl")
+            if os.path.exists(clog):
+                with open(clog, "a", encoding="utf-8") as f:
+                    for e in entries:
+                        f.write(json.dumps(e, default=str) + "\n")
+                logged = True
+        return written, p["with_vendor"], p["with_vendor"] + written, p["legs"], logged
 
 
 def main(argv=None):
@@ -178,9 +189,13 @@ def main(argv=None):
     if not args.apply:
         print("Report mode: nothing was written.")
         return 0
-    written, before, after, legs = apply(args.store)
+    written, before, after, legs, logged = apply(args.store)
+    n_log = written if logged else 0
     print(f"APPLIED: vendor_id set on {written} leg(s); {before} of {legs} -> {after} of {legs} "
-          f"legs carry a vendor_id. {written} changelog entr{'y' if written == 1 else 'ies'} written.")
+          f"legs carry a vendor_id. {n_log} changelog entr{'y' if n_log == 1 else 'ies'} written."
+          + ("" if logged or not written else
+             " No changelog.jsonl on this store, so none was created: a re-import stays "
+             "add-only and keeps every record, vendor included."))
     return 0
 
 

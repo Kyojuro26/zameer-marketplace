@@ -35,9 +35,11 @@ def vendor_token(po_raw):
     and "(Paid)" are skipped, an empty "( )" is skipped, and of two vendor-
     looking parentheticals the last wins. Anything that is not text -- None, a
     bool, a number the sheet stored -- names no vendor."""
-    if po_raw is None or isinstance(po_raw, bool):
+    # text only: a list or a dict holding "(FS)" is not a PO, and str() of one
+    # would hand its parenthetical to the rule as though it were
+    if not isinstance(po_raw, str):
         return None
-    s = str(po_raw)
+    s = po_raw
     cands = [m.group(1).strip() for m in PAREN_RE.finditer(s)]
     cands = [c for c in cands if c and not PAYMENT_RE.search(c)]
     return cands[-1] if cands else None
@@ -52,19 +54,28 @@ def norm_token(s):
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
-def load_aliases(store_dir):
+def load_aliases(store_dir, problems=None):
     """vendor_aliases.json as {normalised token: vendor_id}. Keys are
     normalised on load so the operator may write "FS" or "fs" and mean the
-    same thing. Absent file, or a file that is not an object: no aliases."""
+    same thing. An absent file is no aliases. A file that is PRESENT but
+    cannot be read -- a JSON slip, or not an object -- is no aliases too,
+    and is NAMED in `problems` when a list is given: read silently as empty
+    it told the operator every answered token was still unmatched. Opened as
+    utf-8-sig, so a BOM (Notepad's default) does not void the file."""
     path = os.path.join(store_dir, ALIASES_FILE)
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        if problems is not None:
+            problems.append(f"{ALIASES_FILE} could not be read ({e}); no aliases applied")
         return {}
     if not isinstance(raw, dict):
+        if problems is not None:
+            problems.append(f"{ALIASES_FILE} is not an object of token -> vendor id; "
+                            f"no aliases applied")
         return {}
     out = {}
     for k, v in raw.items():
@@ -90,23 +101,29 @@ def vendor_index(vendors):
     return idx
 
 
-def match_vendor(token, vendors, aliases, index=None):
+def match_vendor(token, vendors, aliases, index=None, archived=()):
     """(vendor_id, how) for a token, or (None, why).
 
     how: "exact" (normalised display_name equals the normalised token) or
     "alias" (the operator's file names it). why: "no_token", "unmatched",
     "ambiguous" (two vendors' names normalise to the token), "alias_unknown"
-    (the alias names a company_id no vendor record has). Exact wins over an
-    alias; nothing else matches."""
+    (the alias names a company_id no vendor record has), "vendor_archived"
+    (the vendor's company is archived: the tools refuse it, so the rule does
+    too, whichever caller asks). Exact wins over an alias; nothing else
+    matches."""
     n = norm_token(token)
     if not n:
         return None, "no_token"
     idx = index if index is not None else vendor_index(vendors)
     ids = idx.get(n)
+    vid, how = None, "unmatched"
     if ids:
-        return (ids[0], "exact") if len(ids) == 1 else (None, "ambiguous")
-    target = (aliases or {}).get(n)
-    if target:
-        known = {cid for lst in idx.values() for cid in lst}
-        return (target, "alias") if target in known else (None, "alias_unknown")
-    return None, "unmatched"
+        vid, how = (ids[0], "exact") if len(ids) == 1 else (None, "ambiguous")
+    else:
+        target = (aliases or {}).get(n)
+        if target:
+            known = {cid for lst in idx.values() for cid in lst}
+            vid, how = (target, "alias") if target in known else (None, "alias_unknown")
+    if vid is not None and vid in set(archived or ()):
+        return None, "vendor_archived"
+    return vid, how

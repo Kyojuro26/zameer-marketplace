@@ -1043,6 +1043,11 @@ def _require_vendor(vendor_id):
                          f"create_vendor first, or pass null to clear it")
     if vid in {_key(c) for c in _archived_ids()}:
         raise StoreError(f"vendor '{vendor_id}' is archived -- restore it first")
+    # the id as validated -- trimmed -- is the id stored: a padded id passed
+    # every server read (they compare through _key) and failed every page
+    # read (they compare the raw string), so one leg was filed under FS
+    # Racking in chat and under "no vendor record" on the screen
+    return vid
 
 
 def _require_company(company_id):
@@ -2246,7 +2251,7 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
             _validate(fields, SHIPMENT_FIELDS - {"shipment_id"} - link_fields,
                       "shipment")
             if fields.get("vendor_id") is not None:
-                _require_vendor(fields["vendor_id"])
+                fields["vendor_id"] = _require_vendor(fields["vendor_id"])
             if "company_id" in fields:
                 # unvalidated, this parked the leg on a company that does not
                 # exist and it vanished from every customer page with ok:true
@@ -2491,7 +2496,7 @@ def create_shipment(project_no: str, fields: dict,
         with STORE.write_lock():
             _validate(fields, SHIPMENT_FIELDS, "shipment")
             if fields.get("vendor_id") is not None:
-                _require_vendor(fields["vendor_id"])
+                fields["vendor_id"] = _require_vendor(fields["vendor_id"])
             projects = STORE.load("projects")
             pr = _live_project(project_no, company_id)
             if not pr:

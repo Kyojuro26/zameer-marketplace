@@ -215,8 +215,8 @@ M = [
   '    STORE.save("projects", STORE.load("projects")[:0] + projects)\n'
   '    return projects'),
  ("metrics becomes a writable project field",
-  '    "tracker_key",\n}',
-  '    "tracker_key", "metrics",\n}'),
+  '    "next_action", "next_action_on",\n}',
+  '    "next_action", "next_action_on", "metrics",\n}'),
  ("an unknown report is served as all three instead of refused",
   '    if report is not None and report not in METRIC_REPORTS:\n'
   '        return _err(f"report must be one of {list(METRIC_REPORTS)} or omitted")\n',

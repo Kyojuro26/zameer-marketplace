@@ -31,17 +31,23 @@ RULE = [
   "    ids = idx.get(n)\n",
   "    ids = next((v for k, v in idx.items() if k.startswith(n)), None)\n"),
  ("a name two vendors share is matched to the first",
-  '        return (ids[0], "exact") if len(ids) == 1 else (None, "ambiguous")',
-  '        return (ids[0], "exact")'),
+  '        vid, how = (ids[0], "exact") if len(ids) == 1 else (None, "ambiguous")',
+  '        vid, how = (ids[0], "exact")'),
  ("an alias naming no vendor record is used anyway",
-  '        return (target, "alias") if target in known else (None, "alias_unknown")',
-  '        return (target, "alias")'),
+  '            vid, how = (target, "alias") if target in known else (None, "alias_unknown")',
+  '            vid, how = (target, "alias")'),
  ("normalisation keeps punctuation, so Save-ty and SaveTy are two vendors",
   '    return re.sub(r"[^a-z0-9]", "", str(s).lower())',
   '    return str(s).lower().replace(" ", "")'),
- ("a numeric PO cell is stringified into a token",
-  "    if po_raw is None or isinstance(po_raw, bool):\n        return None\n    s = str(po_raw)",
-  "    if po_raw is None:\n        return None\n    s = str(po_raw) + ' (' + str(po_raw) + ')'"),
+ ("a container holding a parenthetical is stringified into a token",
+  "    if not isinstance(po_raw, str):\n        return None\n    s = po_raw",
+  "    if po_raw is None or isinstance(po_raw, bool):\n        return None\n    s = str(po_raw)"),
+ ("an archived vendor is matched anyway",
+  '    if vid is not None and vid in set(archived or ()):\n        return None, "vendor_archived"\n', ""),
+ ("a BOM voids the alias file",
+  '        with open(path, "r", encoding="utf-8-sig") as f:', '        with open(path, "r", encoding="utf-8") as f:'),
+ ("an unreadable alias file is silently empty",
+  '        if problems is not None:\n            problems.append(f"{ALIASES_FILE} could not be read ({e}); no aliases applied")\n', ""),
 ]
 
 SCRIPT = [
@@ -55,15 +61,20 @@ SCRIPT = [
  # plan-side guard is graded above ("a leg that already carries a vendor_id is
  # reported too"), against a leg whose PO names an aliased vendor.
  ("--apply skips the changelog, so a re-import reverts every vendor it set",
-  '            with open(os.path.join(store, "changelog.jsonl"), "a", encoding="utf-8") as f:\n'
-  '                for e in entries:\n'
-  '                    f.write(json.dumps(e, default=str) + "\\n")\n', ""),
+  '                with open(clog, "a", encoding="utf-8") as f:\n'
+  '                    for e in entries:\n'
+  '                        f.write(json.dumps(e, default=str) + "\\n")\n', ""),
  ("--apply writes the token itself when nothing matched",
   '        for r in p["rows"]:\n            if not r["vendor_id"]:\n                continue\n',
   '        for r in p["rows"]:\n            if r["token"] is None:\n                continue\n'
   '            r = dict(r, vendor_id=r["vendor_id"] or r["token"])\n'),
  ("--apply writes a vendor whose company is archived",
-  '        if vid is not None and vid in archived:\n            vid, how = None, "vendor_archived"\n', ""),
+  '        vid, how = match_vendor(token, vendors, aliases, idx, archived)',
+  '        vid, how = match_vendor(token, vendors, aliases, idx)'),
+ ("--apply creates the changelog on a store that has none",
+  "            if os.path.exists(clog):\n", "            if True:\n"),
+ ("the alias warning is dropped from the report",
+  '    for msg in p.get("problems", []):\n        L.append(f"WARNING: {msg}")\n', ""),
  ("report mode writes the plan back to the store",
   "    print(format_report(plan(args.store)))\n",
   "    p = plan(args.store)\n"
@@ -75,23 +86,38 @@ SCRIPT = [
 
 IMPORTER = [
  ("the importer writes no review entry for an unmatched token",
-  '        if token is not None and vid is None:\n'
+  '        if token is not None and vid is None and not _prior_vendor_by_sid.get(sid):\n'
   '            review.append({"type": "vendor_token_unmatched", "token": token, "why": how,\n'
   '                           "shipment_id": sid, "vendor_po_raw": po_val,\n'
   '                           "project_no": primary, "company_id": company_id})\n', ""),
  ("the importer files the leg under the token when nothing matched",
   '            "vendor_id": vid,\n', '            "vendor_id": vid or token,\n'),
  ("the importer ignores the operator's aliases",
-  "    _aliases = _vm.load_aliases(str(outdir))\n", "    _aliases = {}\n"),
+  "    _aliases = _vm.load_aliases(str(outdir), _alias_problems)\n", "    _aliases = {}\n"),
+ ("the importer ignores the store's archived vendors",
+  "        vid, how = _vm.match_vendor(token, pool, _aliases, None, _archived_vendor_ids)",
+  "        vid, how = _vm.match_vendor(token, pool, _aliases, None, set())"),
+ ("the importer matches the sheet's vendors only",
+  "        pool = list(vendors.values()) + [v for v in _prior_vendors\n"
+  "                                         if v.get(\"company_id\") not in vendors]\n",
+  "        pool = list(vendors.values())\n"),
+ ("a leg whose vendor is on file is reviewed again on every import",
+  "        if token is not None and vid is None and not _prior_vendor_by_sid.get(sid):",
+  "        if token is not None and vid is None:"),
+ ("an unreadable alias file raises no review entry",
+  '    for _msg in _alias_problems:\n        review.append({"type": "vendor_aliases_unreadable", "detail": _msg})\n', ""),
 ]
 
 SERVER = [
  ("update_shipment accepts a vendor no record carries",
-  '                      "shipment")\n            if fields.get("vendor_id") is not None:\n                _require_vendor(fields["vendor_id"])\n',
+  '                      "shipment")\n            if fields.get("vendor_id") is not None:\n                fields["vendor_id"] = _require_vendor(fields["vendor_id"])\n',
   '                      "shipment")\n'),
  ("create_shipment accepts a vendor no record carries",
-  '            _validate(fields, SHIPMENT_FIELDS, "shipment")\n            if fields.get("vendor_id") is not None:\n                _require_vendor(fields["vendor_id"])\n',
+  '            _validate(fields, SHIPMENT_FIELDS, "shipment")\n            if fields.get("vendor_id") is not None:\n                fields["vendor_id"] = _require_vendor(fields["vendor_id"])\n',
   '            _validate(fields, SHIPMENT_FIELDS, "shipment")\n'),
+ ("a padded vendor id is stored as given",
+  '                fields["vendor_id"] = _require_vendor(fields["vendor_id"])\n            if "company_id" in fields:',
+  '                _require_vendor(fields["vendor_id"])\n            if "company_id" in fields:'),
  ("a vendor at an archived company is accepted",
   '    if vid in {_key(c) for c in _archived_ids()}:\n'
   '        raise StoreError(f"vendor \'{vendor_id}\' is archived -- restore it first")\n', ""),
