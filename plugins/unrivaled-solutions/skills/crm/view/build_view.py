@@ -2086,6 +2086,20 @@ function renderMain(){
   h += companySummary(c);
 
   if(c.role==='vendor'){
+    // this vendor's open POs -- the legs filed under it that are not
+    // Delivered, Installed or Cancelled -- above the details; omitted when
+    // there are none rather than shown as an empty table
+    const openLegs=(DATA.shipments||[]).filter(s=>st(s.vendor_id)===st(selected) && !legSettled(s));
+    if(openLegs.length){
+      h+=`<div class="section"><h2>Open POs (${openLegs.length})</h2>
+        <table><thead><tr><th>Vendor PO</th><th>Project #</th><th>Customer</th><th>Stage</th><th class="num">Ship date</th></tr></thead><tbody>`+
+        openLegs.map(s=>`<tr class="click" onclick="openShipment('${jesc(s.shipment_id||'')}')">
+          <td>${esc(s.vendor_po_raw||'\u2014')}</td><td>${esc(st(s.project_no)||'\u2014')}</td>
+          <td>${esc((companyById[s.company_id]||{}).display_name||st(s.company_id)||'\u2014')}</td>
+          <td><span class="badge b-stage">${esc(s.stage||'\u2014')}</span></td>
+          <td class="muted num">${esc(fmtDate(s.ship_date))}</td></tr>`).join('')+
+        `</tbody></table></div>`;
+    }
     const v=vendorById[selected]||{};
     h+=`<div class="section"><h2>Vendor details</h2>
       <div class="kv"><span class="k">Rep</span><span>${esc(v.rep||'—')}</span></div>
@@ -3008,6 +3022,7 @@ function openShipment(sid){
     <div class="field"><label>Project #</label><input id="s_pno" value="${esc(s.project_no||'')}" placeholder="leave blank to unlink"/>
       <p class="muted" style="margin:4px 0 0;font-size:11px">${s.linked_to_project?'':'Currently unlinked — vendor-PO keyed. '}Changing this moves the shipment to a different project; the new project # must already exist.</p></div>
     <div class="field"><label>Vendor PO</label><input id="s_po" value="${esc(s.vendor_po_raw||'')}"/></div>
+    <div class="field"><label>Vendor</label><select id="s_vendor">${vendorOpts(s.vendor_id)}</select></div>
     <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
     <div class="row2">
       <div class="field"><label>Stage</label><select id="s_stage">
@@ -3026,6 +3041,24 @@ function openShipment(sid){
       : 'Stage changes persist to your CRM records (Ordered → Shipped → Delivered → Installed).'}</p>`;
   openDrawer();
   snapDates(['s_date','s_start','s_eta']);
+  // the vendor select's baseline, read from the control after the markup was
+  // parsed (the f_tracker rule), so an untouched vendor is never re-sent
+  const _sv = document.getElementById('s_vendor');
+  if(_sv) _sv.setAttribute('data-orig', _sv.value);
+}
+
+/* Vendors by name, "— none —" first. The stored id is always an option even
+   when no vendor record carries it (the opts() rule), so a save cannot
+   silently drop a vendor the page does not know; it is sent only when
+   changed. */
+function vendorOpts(current){
+  const cur = st(current);
+  const vs = (DATA.vendors||[]).slice().sort((a,b)=>st(a.display_name).localeCompare(st(b.display_name)));
+  const ids = vs.map(v=>st(v.company_id));
+  let h = `<option value="" ${cur===''?'selected':''}>\u2014 none \u2014</option>`;
+  if(cur && !ids.includes(cur)) h += `<option value="${esc(cur)}" selected>${esc(cur)} (no vendor record)</option>`;
+  h += vs.map(v=>`<option value="${esc(st(v.company_id))}" ${st(v.company_id)===cur?'selected':''}>${esc(v.display_name||v.company_id)}</option>`).join('');
+  return h;
 }
 
 async function saveShipment(sid){
@@ -3063,6 +3096,10 @@ async function saveShipment(sid){
   // a field the operator never touched.
   const stageNow = document.getElementById('s_stage').value;
   if(stageNow) fields.stage = stageNow;
+  // the vendor, sent only when he changed it; "" clears it
+  const sv = document.getElementById('s_vendor');
+  if(sv && sv.getAttribute('data-orig') !== null && sv.value !== sv.getAttribute('data-orig'))
+    fields.vendor_id = sv.value || null;
   dateIfChanged('s_date', fields, 'ship_date');
   dateIfChanged('s_start', fields, 'start_date');
   dateIfChanged('s_eta', fields, 'eta');

@@ -947,6 +947,16 @@ def run(workbook, outdir, force=False, mode="merge"):
         s = clean(v)
         return bool(s and not _is_dateish(v) and PO_TOKEN_RE.search(s))
 
+    # The vendor a leg's PO text names, by the ONE rule vendor_match.py holds
+    # (the backfill script uses the same one): an exact vendor name, or an
+    # alias the operator wrote in <store>/vendor_aliases.json. A token that
+    # matches nothing is a review entry, never a guess written to the leg.
+    try:
+        from . import vendor_match as _vm      # packaged
+    except ImportError:
+        import vendor_match as _vm             # run as a script
+    _aliases = _vm.load_aliases(str(outdir))
+
     # A running counter PER sid_base, not per row. It used to restart at 1 on
     # every row, so "4521" appearing on two open-order rows (phase 2, a
     # multi-project key, a continuation) minted 4521-L1 twice. Duplicate
@@ -965,9 +975,17 @@ def run(workbook, outdir, force=False, mode="merge"):
         if re.search(r"\bhold\b", notes or "", re.IGNORECASE):
             stage = "On Hold"
         primary = pnos[0] if pnos else None
+        sid = f"{sid_base}-L{_next_leg(sid_base)}"
+        token = _vm.vendor_token(po_val)
+        vid, how = _vm.match_vendor(token, list(vendors.values()), _aliases)
+        if token is not None and vid is None:
+            review.append({"type": "vendor_token_unmatched", "token": token, "why": how,
+                           "shipment_id": sid, "vendor_po_raw": po_val,
+                           "project_no": primary, "company_id": company_id})
         shipments.append({
             # leg_no is ignored in favour of the running counter
-            "shipment_id": f"{sid_base}-L{_next_leg(sid_base)}",
+            "shipment_id": sid,
+            "vendor_id": vid,
             "project_no": primary, "all_project_nos": [p for p in pnos if p],
             "invoice_no": invoice_no,
             "vendor_po_raw": po_val,

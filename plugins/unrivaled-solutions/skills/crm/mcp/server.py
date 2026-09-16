@@ -1030,6 +1030,21 @@ def _same_invoice(rec, company_id, invoice_key):
             and _key(rec.get("invoice_no")) == invoice_key)
 
 
+def _require_vendor(vendor_id):
+    """The vendor a leg may be filed under: a vendor record that exists, at a
+    company that is not archived -- the vendor-side twin of _require_company.
+    vendor_id was in SHIPMENT_FIELDS with no check at all, so a leg could be
+    filed under a vendor no page could show and vendor_on_time would judge a
+    name that did not exist."""
+    vid = _key(vendor_id)
+    if not vid or not any(_key(v.get("company_id")) == vid
+                          for v in STORE.load("vendors") if isinstance(v, dict)):
+        raise StoreError(f"vendor '{vendor_id}' names no vendor record -- "
+                         f"create_vendor first, or pass null to clear it")
+    if vid in {_key(c) for c in _archived_ids()}:
+        raise StoreError(f"vendor '{vendor_id}' is archived -- restore it first")
+
+
 def _require_company(company_id):
     """The company a new record may be attached to.
 
@@ -1811,12 +1826,14 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
 @mcp.tool()
 @_store_errors
 def list_shipments(stage: str = None, company: str = None, vendor_po: str = None,
-                   overdue: bool = None, include_archived: bool = False) -> dict:
+                   overdue: bool = None, include_archived: bool = False,
+                   vendor_id: str = None) -> dict:
     """Shipment legs, filtered by stage, company (id or name), vendor_po
     (exact or substring match against vendor_po_raw -- use this to find
-    which project a vendor's PO number belongs to), and/or overdue (ship_date
-    past but not Delivered/Installed). Legs of archived companies are
-    excluded unless include_archived=True."""
+    which project a vendor's PO number belongs to), vendor_id (the vendor
+    the leg is filed under, exact), and/or overdue (ship_date past but not
+    Delivered/Installed). Legs of archived companies are excluded unless
+    include_archived=True."""
     out = STORE.load("shipments")
     if not include_archived:
         arch = _archived_ids()
@@ -1833,6 +1850,8 @@ def list_shipments(stage: str = None, company: str = None, vendor_po: str = None
     if vendor_po:
         q = str(vendor_po).strip().lower()
         out = [s for s in out if q in str(s.get("vendor_po_raw") or "").lower()]
+    if vendor_id:
+        out = [s for s in out if _key(s.get("vendor_id")) == _key(vendor_id)]
     if overdue:
         today = datetime.now().strftime("%Y-%m-%d")
         out = [s for s in out
@@ -1855,7 +1874,16 @@ def get_vendor(ref: str) -> dict:
         v = matches[0] if len(matches) == 1 else None
     if not v:
         return _err(f"no unique vendor match for '{ref}'")
-    return {"ok": True, "interface_version": VERSION, "vendor": v}
+    # the vendor's open legs: filed under it, not yet Delivered/Installed and
+    # not Cancelled, and visible by the same rules list_shipments applies
+    arch, arch_p = _archived_ids(), _archived_projects()
+    vid = _key(v.get("company_id"))
+    open_legs = [s for s in STORE.load("shipments")
+                 if isinstance(s, dict) and _key(s.get("vendor_id")) == vid
+                 and s.get("stage") not in ("Delivered", "Installed", "Cancelled")
+                 and _hk(s.get("company_id")) not in arch
+                 and not _shipment_hidden(s, arch_p)]
+    return {"ok": True, "interface_version": VERSION, "vendor": v, "open_legs": open_legs}
 
 
 @mcp.tool()
@@ -2217,6 +2245,8 @@ def update_shipment(shipment_id: str, fields: dict) -> dict:
                     f"exists and keeps the leg's links consistent")
             _validate(fields, SHIPMENT_FIELDS - {"shipment_id"} - link_fields,
                       "shipment")
+            if fields.get("vendor_id") is not None:
+                _require_vendor(fields["vendor_id"])
             if "company_id" in fields:
                 # unvalidated, this parked the leg on a company that does not
                 # exist and it vanished from every customer page with ok:true
@@ -2460,6 +2490,8 @@ def create_shipment(project_no: str, fields: dict,
     try:
         with STORE.write_lock():
             _validate(fields, SHIPMENT_FIELDS, "shipment")
+            if fields.get("vendor_id") is not None:
+                _require_vendor(fields["vendor_id"])
             projects = STORE.load("projects")
             pr = _live_project(project_no, company_id)
             if not pr:

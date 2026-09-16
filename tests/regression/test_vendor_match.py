@@ -28,7 +28,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib.harness import Result  # noqa: E402
+from lib.harness import Result, Store, company, shipment  # noqa: E402
 
 
 def _load(crm, name):
@@ -126,8 +126,11 @@ def run(server, crm_dir=None):
         {"shipment_id": "4521-L4", "vendor_po_raw": "PO # 4 (JnL) (70% Paid)"},
         {"shipment_id": "4521-L5", "vendor_po_raw": "PO # 5 (Welter)"},
         {"shipment_id": "4521-L6", "vendor_po_raw": "PO # 6", "vendor_id": None},
-        {"shipment_id": "4521-L7", "vendor_po_raw": "PO # 7 (Hallowell)", "vendor_id": "penco"}])
-    w("companies.json", []); w("projects.json", []); w("invoices.json", [])
+        {"shipment_id": "4521-L7", "vendor_po_raw": "PO # 7 (FS)", "vendor_id": "penco"},
+        {"shipment_id": "4521-L8", "vendor_po_raw": "PO # 8 (Hallowell)"}])
+    # hallowell's company is archived: its name matches, and it must not be written
+    w("companies.json", [{"company_id": "hallowell", "display_name": "Hallowell", "role": "vendor", "archived": True}])
+    w("projects.json", []); w("invoices.json", [])
     before = {p.name: p.read_bytes() for p in store.iterdir()}
     script = crm / "pipeline" / "backfill_leg_vendors.py"
     if not r.check("pipeline/backfill_leg_vendors.py exists", script.exists()):
@@ -142,11 +145,174 @@ def run(server, crm_dir=None):
             "4521-L3" in out and "4521-L4" in out and out.count("UNMATCHED") >= 3, out[:600])
     r.check("a leg with no parenthetical is reported as having no token", "4521-L6" in out and "NO TOKEN" in out)
     r.check("a leg that already carries a vendor_id is not listed", "4521-L7" not in out and "penco" not in out)
+    r.check("a name that matches an ARCHIVED vendor is reported, not planned",
+            "4521-L8" in out and "VENDOR IS ARCHIVED" in out, out[:800])
     r.check("the unmatched tokens are tabled by count, most first",
             out.find("   2  JnL") > 0 and out.find("   1  Welter") > out.find("   2  JnL"), out[out.find("UNMATCHED TOKENS"):][:300])
     r.check("the before/after counts say what a write would do",
-            "Would set vendor_id on 2 leg(s) (1 exact, 1 by alias)" in out and "1 of 7 now -> 3 of 7" in out,
+            "Would set vendor_id on 2 leg(s) (1 exact, 1 by alias)" in out and "1 of 8 now -> 3 of 8" in out,
             out[-400:])
     after = {p.name: p.read_bytes() for p in store.iterdir()}
     r.check("nothing was written", after == before and "nothing was written" in out.lower())
+
+    # ---- 4. --apply ------------------------------------------------------------------
+    r.section("--apply writes exactly the exact and aliased matches, once, with a changelog")
+    proc = subprocess.run([sys.executable, str(script), "--store", str(store), "--apply"],
+                          capture_output=True, text=True)
+    r.check("--apply runs", proc.returncode == 0, proc.stderr[-300:])
+    # tolerant reads throughout: a script that wrote the wrong thing, or no
+    # changelog at all, must read as red checks, not a crash the runner
+    # cannot score
+    def read_legs():
+        try:
+            data = json.loads((store / "shipments.json").read_text())
+        except (OSError, ValueError):
+            return {}
+        return {str((s or {}).get("shipment_id")): s for s in data if isinstance(s, dict)}
+    def read_log():
+        p = store / "changelog.jsonl"
+        return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+    legs = read_legs()
+    L = lambda k: legs.get(k) or {}  # noqa: E731
+    r.check("the aliased and the exact leg now carry the vendor",
+            L("4521-L1").get("vendor_id") == "fs-racking" and L("4521-L2").get("vendor_id") == "fs-racking",
+            json.dumps({k: (v or {}).get("vendor_id") for k, v in legs.items()}))
+    r.check("the unmatched legs, the no-token leg and the archived-vendor leg are untouched",
+            all(L(k).get("vendor_id") is None for k in ("4521-L3", "4521-L4", "4521-L5", "4521-L6", "4521-L8"))
+            and all(k in legs for k in ("4521-L3", "4521-L4", "4521-L5", "4521-L6", "4521-L8")),
+            json.dumps({k: (v or {}).get("vendor_id") for k, v in legs.items()}))
+    r.check("a vendor already on a leg is never overwritten", L("4521-L7").get("vendor_id") == "penco")
+    log = read_log()
+    r.check("one changelog entry per leg written, in Store.log's shape, so a re-import preserves it",
+            len(log) == 2 and all(e["op"] == "update" and e["entity"] == "shipment"
+                                  and e["fields"] == {"vendor_id": "fs-racking"} for e in log)
+            and sorted(e["key"] for e in log) == ["4521-L1", "4521-L2"], json.dumps(log)[:300])
+    r.check("and it says what it did", "APPLIED: vendor_id set on 2 leg(s); 1 of 8 -> 3 of 8" in proc.stdout, proc.stdout[-300:])
+    snap = (store / "shipments.json").read_bytes()
+    proc = subprocess.run([sys.executable, str(script), "--store", str(store), "--apply"],
+                          capture_output=True, text=True)
+    log2 = read_log()
+    r.check("run twice, the second run writes nothing and logs nothing",
+            proc.returncode == 0 and "APPLIED: vendor_id set on 0 leg(s)" in proc.stdout
+            and (store / "shipments.json").read_bytes() == snap and len(log2) == 2, proc.stdout[-200:])
+
+    # ---- 5. the importer, by the same rule ----------------------------------------------
+    r.section("the importer files a new leg under the vendor its PO names, and reviews the rest")
+    lt = _load_test("test_livetracker")
+    nrm = lt._load(crm, "normalize.py") if lt else None
+    if r.check("the Live fixture builder and normalize are loadable", bool(lt and nrm)):
+        import openpyxl
+        xl = tmp / "vendors.xlsx"
+        lt._build_workbook(xl)
+        wb = openpyxl.load_workbook(xl)
+        vc = wb["Vendor Contacts"]
+        vc.append(["FS Racking", "Dayton OH", "A Rep", None, None, "Racking", None, None])
+        pt = wb["Project Tracker"]
+        # row 4 of the fixture (key 5003) carries five legs in G/H, I/J, K/L ...;
+        # three of its POs are rewritten to the three cases
+        target = next(row for row in pt.iter_rows(min_row=2) if str(row[0].value) == "5003")
+        target[6].value = "PO 1 (FS Racking)"       # exact
+        target[8].value = "PO 2 (FS)"               # alias
+        target[10].value = "PO 3 (Nobody) (PAID)"   # unmatched, payment note skipped
+        wb.save(xl)
+        out = tmp / "store-vendors"
+        out.mkdir()
+        (out / "vendor_aliases.json").write_text(json.dumps({"FS": "fs-racking"}))
+        added = str(crm / "pipeline")
+        sys.path.insert(0, added)
+        err = None
+        try:
+            nrm.run(str(xl), str(out), force=False, mode="merge")
+        except Exception as exc:                                   # noqa: BLE001
+            err = f"{type(exc).__name__}: {exc}"
+        finally:
+            sys.path.remove(added)
+        r.check("the import runs", err is None, err or "")
+        legs = json.loads((out / "shipments.json").read_text()) if (out / "shipments.json").exists() else []
+        by_po = {str(s.get("vendor_po_raw")): s for s in legs}
+        r.check("a PO naming a vendor exactly files the leg under it",
+                by_po.get("PO 1 (FS Racking)", {}).get("vendor_id") == "fs-racking", json.dumps(by_po.get("PO 1 (FS Racking)"))[:200])
+        r.check("a PO naming an alias files the leg under the aliased vendor",
+                by_po.get("PO 2 (FS)", {}).get("vendor_id") == "fs-racking", json.dumps(by_po.get("PO 2 (FS)"))[:200])
+        r.check("a PO naming nobody leaves the leg with no vendor",
+                "PO 3 (Nobody) (PAID)" in by_po and by_po["PO 3 (Nobody) (PAID)"].get("vendor_id") is None,
+                json.dumps(by_po.get("PO 3 (Nobody) (PAID)"))[:200])
+        review = json.loads((out / "needs_review.json").read_text()) if (out / "needs_review.json").exists() else []
+        ent = [x for x in review if x.get("type") == "vendor_token_unmatched"]
+        r.check("and goes to needs_review as vendor_token_unmatched with the token and the leg",
+                len(ent) == 1 and ent[0].get("token") == "Nobody"
+                and ent[0].get("shipment_id") == by_po["PO 3 (Nobody) (PAID)"].get("shipment_id"),
+                json.dumps(ent)[:300])
+        r.check("a matched token raises no review entry", not any(x.get("token") in ("FS", "FS Racking") for x in ent))
+
+    # ---- 6. the server ----------------------------------------------------------------
+    r.section("the server: legs by vendor, a vendor's open POs, and no vendor that is not one")
+    srv = server
+    if srv is None:
+        from lib.harness import load_server
+        srv = load_server(str(crm))
+    s = Store(srv)
+    s.reset(companies=[company("acme", "Ace Manufacturing"),
+                       company("fs-racking", "FS Racking", role="vendor"),
+                       company("penco", "Penco", role="vendor", archived=True)],
+            vendors=[{"company_id": "fs-racking", "display_name": "FS Racking"},
+                     {"company_id": "penco", "display_name": "Penco"}],
+            projects=[{"project_no": "4521", "company_id": "acme", "status": "won", "archived": False}],
+            shipments=[shipment("4521-L1", "4521", "acme", vendor_id="fs-racking", stage="Ordered"),
+                       shipment("4521-L2", "4521", "acme", vendor_id="fs-racking", stage="Delivered"),
+                       shipment("4521-L3", "4521", "acme", vendor_id=None, stage="Ordered")])
+    res = s.call("list_shipments", vendor_id="fs-racking")
+    r.check("list_shipments(vendor_id=) keeps the legs filed under that vendor",
+            res.get("ok") and sorted(x["shipment_id"] for x in res["shipments"]) == ["4521-L1", "4521-L2"], json.dumps(res)[:200])
+    res = s.call("get_vendor", ref="fs-racking")
+    r.check("get_vendor returns the vendor's OPEN legs -- not the delivered one",
+            res.get("ok") and [x["shipment_id"] for x in res.get("open_legs", [])] == ["4521-L1"], json.dumps(res.get("open_legs"))[:200])
+    res = s.call("get_vendor", ref="FS Racking")
+    r.check("by name too", res.get("ok") and [x["shipment_id"] for x in res.get("open_legs", [])] == ["4521-L1"])
+    before = json.dumps(s.read("shipments"), sort_keys=True)
+    res = s.call("update_shipment", shipment_id="4521-L3", fields={"vendor_id": "nobody"})
+    r.check("update_shipment refuses a vendor_id that names no vendor record",
+            res.get("ok") is False and "no vendor record" in str(res.get("error")), json.dumps(res)[:200])
+    res = s.call("update_shipment", shipment_id="4521-L3", fields={"vendor_id": "penco"})
+    r.check("and one whose company is archived",
+            res.get("ok") is False and "archived" in str(res.get("error")), json.dumps(res)[:200])
+    r.check("nothing changed on either refusal", json.dumps(s.read("shipments"), sort_keys=True) == before)
+    res = s.call("update_shipment", shipment_id="4521-L3", fields={"vendor_id": "fs-racking"})
+    r.check("a real vendor is accepted", res.get("ok") and res["shipment"]["vendor_id"] == "fs-racking", json.dumps(res)[:200])
+    res = s.call("update_shipment", shipment_id="4521-L3", fields={"vendor_id": None})
+    r.check("and null clears it", res.get("ok") and res["shipment"]["vendor_id"] is None, json.dumps(res)[:200])
+    res = s.call("create_shipment", project_no="4521", fields={"vendor_po_raw": "X", "vendor_id": "nobody"}, company_id="acme")
+    r.check("create_shipment refuses an unknown vendor too",
+            res.get("ok") is False and "no vendor record" in str(res.get("error")) and len(s.read("shipments")) == 3,
+            json.dumps(res)[:200])
+    # vendor_on_time: legs without a vendor are excluded as no_vendor_on_leg;
+    # once they carry one, that exclusion goes and the population is unchanged
+    s.write("shipments", [shipment("4521-L1", "4521", "acme", stage="Delivered", eta="2026-02-01", ship_date="2026-02-01"),
+                          shipment("4521-L2", "4521", "acme", stage="Delivered", eta="2026-02-01", ship_date="2026-02-03")])
+    def vot():
+        res = s.call("crm_metrics", report="vendor_on_time")
+        rep = (res.get("reports") or {}).get("vendor_on_time") or res.get("vendor_on_time") or {}
+        return res, rep
+    res, rep = vot()
+    r.check("vendor_on_time excludes vendor-less legs as no_vendor_on_leg",
+            res.get("ok") and rep.get("population") == 2 and (rep.get("excluded") or {}).get("no_vendor_on_leg") == 2
+            and rep.get("counted") == 0, json.dumps(rep)[:300])
+    for sid in ("4521-L1", "4521-L2"):
+        s.call("update_shipment", shipment_id=sid, fields={"vendor_id": "fs-racking"})
+    res, rep = vot()
+    r.check("once the legs carry a vendor, counted moves and the population does not",
+            res.get("ok") and rep.get("population") == 2 and rep.get("counted") == 2
+            and not (rep.get("excluded") or {}).get("no_vendor_on_leg"), json.dumps(rep)[:300])
     return r
+
+
+def _load_test(name):
+    """Another regression module, for its fixture builders."""
+    import importlib.util
+    p = Path(__file__).resolve().parent / f"{name}.py"
+    if not p.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(f"_{name}_fixtures", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m

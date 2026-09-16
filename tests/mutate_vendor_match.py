@@ -47,6 +47,23 @@ RULE = [
 SCRIPT = [
  ("a leg that already carries a vendor_id is reported too",
   '        if s.get("vendor_id"):\n            continue                       # never second-guessed\n', ""),
+ # RETIRED, deliberately: "--apply overwrites a vendor already on the leg",
+ # dropping apply()'s own `if s.get("vendor_id"): continue`. plan() is
+ # re-computed under the same lock and never lists a leg that carries a
+ # vendor, so apply's guard is a second line of defence with no reachable
+ # effect of its own; the mutant survived, and that is the information. The
+ # plan-side guard is graded above ("a leg that already carries a vendor_id is
+ # reported too"), against a leg whose PO names an aliased vendor.
+ ("--apply skips the changelog, so a re-import reverts every vendor it set",
+  '            with open(os.path.join(store, "changelog.jsonl"), "a", encoding="utf-8") as f:\n'
+  '                for e in entries:\n'
+  '                    f.write(json.dumps(e, default=str) + "\\n")\n', ""),
+ ("--apply writes the token itself when nothing matched",
+  '        for r in p["rows"]:\n            if not r["vendor_id"]:\n                continue\n',
+  '        for r in p["rows"]:\n            if r["token"] is None:\n                continue\n'
+  '            r = dict(r, vendor_id=r["vendor_id"] or r["token"])\n'),
+ ("--apply writes a vendor whose company is archived",
+  '        if vid is not None and vid in archived:\n            vid, how = None, "vendor_archived"\n', ""),
  ("report mode writes the plan back to the store",
   "    print(format_report(plan(args.store)))\n",
   "    p = plan(args.store)\n"
@@ -56,11 +73,42 @@ SCRIPT = [
 ]
 
 
+IMPORTER = [
+ ("the importer writes no review entry for an unmatched token",
+  '        if token is not None and vid is None:\n'
+  '            review.append({"type": "vendor_token_unmatched", "token": token, "why": how,\n'
+  '                           "shipment_id": sid, "vendor_po_raw": po_val,\n'
+  '                           "project_no": primary, "company_id": company_id})\n', ""),
+ ("the importer files the leg under the token when nothing matched",
+  '            "vendor_id": vid,\n', '            "vendor_id": vid or token,\n'),
+ ("the importer ignores the operator's aliases",
+  "    _aliases = _vm.load_aliases(str(outdir))\n", "    _aliases = {}\n"),
+]
+
+SERVER = [
+ ("update_shipment accepts a vendor no record carries",
+  '                      "shipment")\n            if fields.get("vendor_id") is not None:\n                _require_vendor(fields["vendor_id"])\n',
+  '                      "shipment")\n'),
+ ("create_shipment accepts a vendor no record carries",
+  '            _validate(fields, SHIPMENT_FIELDS, "shipment")\n            if fields.get("vendor_id") is not None:\n                _require_vendor(fields["vendor_id"])\n',
+  '            _validate(fields, SHIPMENT_FIELDS, "shipment")\n'),
+ ("a vendor at an archived company is accepted",
+  '    if vid in {_key(c) for c in _archived_ids()}:\n'
+  '        raise StoreError(f"vendor \'{vendor_id}\' is archived -- restore it first")\n', ""),
+ ("list_shipments ignores vendor_id",
+  '    if vendor_id:\n        out = [s for s in out if _key(s.get("vendor_id")) == _key(vendor_id)]\n', ""),
+ ("get_vendor lists delivered legs as open",
+  '                 and s.get("stage") not in ("Delivered", "Installed", "Cancelled")\n', ""),
+]
+
+
 def main():
     worst = 0
     for title, target, mutants in (("RULE -- pipeline/vendor_match.py", "pipeline/vendor_match.py", RULE),
                                    ("SCRIPT -- pipeline/backfill_leg_vendors.py",
-                                    "pipeline/backfill_leg_vendors.py", SCRIPT)):
+                                    "pipeline/backfill_leg_vendors.py", SCRIPT),
+                                   ("IMPORTER -- pipeline/normalize.py", "pipeline/normalize.py", IMPORTER),
+                                   ("SERVER -- mcp/server.py", "mcp/server.py", SERVER)):
         print(f"\n=== {title}  ({len(mutants)} mutants) ===")
         worst = max(worst, mutate(SRC, TEST, target, mutants))
     return worst

@@ -69,7 +69,12 @@ Use the read tools; they are side-effect-free:
   Every invoice reports `effective_due_on`: a manual `due_on` override if
   one was set, else `invoice_date` + Net 30 — never guess a due date when
   `invoice_date` itself is missing/unparseable, it just comes back `null`.
-- People → `find_contacts`; vendor routing → `get_vendor`.
+- People → `find_contacts`; vendor routing → `get_vendor`, which also returns
+  the vendor's open POs as `open_legs`; a vendor's legs → `list_shipments(vendor_id=)`.
+  A leg's vendor comes from the PO text at import ("(FS)" → the vendor named
+  FS in `<store>/vendor_aliases.json`, or an exact vendor name); an unmatched
+  token is a `vendor_token_unmatched` entry in needs_review, and the answer is
+  an alias line, never a guess.
 - "How concentrated is our revenue", "age our receivables", "which vendors
   ship late" → `crm_metrics` (`report=` one of `customer_concentration`,
   `receivables_ageing`, `vendor_on_time`, or omit for all; `year=` applies

@@ -35,7 +35,11 @@ function seedStore(dir) {
   w('companies', [{ company_id: 'acme', display_name: 'Ace Manufacturing',
     role: 'customer', domains: [], locations: [], archived: false },
     { company_id: 'beta', display_name: 'Beta Works',
-      role: 'customer', domains: [], locations: [], archived: false }]);
+      role: 'customer', domains: [], locations: [], archived: false },
+    { company_id: 'fs-racking', display_name: 'FS Racking',
+      role: 'vendor', domains: [], locations: [], archived: false },
+    { company_id: 'penco', display_name: 'Penco',
+      role: 'vendor', domains: [], locations: [], archived: false }]);
   // every field below carries a type the render path did not expect
   w('contacts', [{ company_id: 'acme', name: 'A Person', email: FIXTURE_EMAIL,
     last_action: 45731 }]);
@@ -63,13 +67,17 @@ function seedStore(dir) {
       description: 'acme only', archived: false }]);
   w('shipments', [
     { shipment_id: '4521-L1', company_id: 'acme', project_no: '4521',
-      all_project_nos: '4521', stage: null, ship_date: 45731 },
+      all_project_nos: '4521', stage: null, ship_date: 45731, vendor_id: 'fs-racking' },
     { shipment_id: '4521-L2', company_id: 'acme', project_no: '4521',
       all_project_nos: ['4521'], stage: 'Shipped', ship_date: '3/14/2026' },
     { shipment_id: '4521-L3', company_id: 'acme', project_no: 4521,
-      all_project_nos: [4521], stage: 'Ordered', ship_date: '2026-03-14 00:00:00' },
+      all_project_nos: [4521], stage: 'Ordered', ship_date: '2026-03-14 00:00:00',
+      vendor_id: 'ghost' },   // a vendor no record carries
     { shipment_id: '4600-L1', company_id: null, project_no: '4600',
       all_project_nos: ['4600'], stage: 'Ordered' },
+    // a DELIVERED leg at the same vendor: on the vendor page it is not an open PO
+    { shipment_id: '4521-L6', company_id: 'acme', project_no: '4521',
+      all_project_nos: ['4521'], stage: 'Delivered', vendor_id: 'fs-racking' },
     // on the SHARED number: a leg with no company, and Acme's leg with its
     // company id padded (review round 2)
     { shipment_id: '4521-L4', company_id: null, project_no: '4521',
@@ -80,7 +88,9 @@ function seedStore(dir) {
     payment_status: 'partial:30%', payment_notes: 45731, invoice_date: 45731 },
     { company_id: 'beta', invoice_no: '9002', project_no: '4600',
       payment_status: 'open', invoice_date: '2026-01-01' }]);
-  w('vendors', []); w('needs_review', []);
+  w('vendors', [{ company_id: 'fs-racking', display_name: 'FS Racking' },
+    { company_id: 'penco', display_name: 'Penco' }]);
+  w('needs_review', []);
   return dir;
 }
 
@@ -397,6 +407,49 @@ async function run(crmDir) {
   r.check('and its Edit button stops the click reaching the row, so the drawer opens once',
     /onclick="event\.stopPropagation\(\);openEditInvoice\('acme','9001'\)">Edit</.test(invRow)
       && !/style="padding:2px 8px;font-size:11px"/.test(invRow), invRow.slice(-200));
+
+  // ---- vendors on legs: the drawer's select, and the vendor page ----------------
+  // the page first: the saves below change L1's vendor in the local mirror
+  safe('closeDrawer'); safe('setFilter', 'all'); safe('select', 'fs-racking');
+  const vendMain = (app.el('main') || EMPTY).innerHTML || '';
+  // jesc() writes the id's hyphen as \x2d inside the onclick, as every id is
+  r.check('a vendor page opens with its Open POs above the details -- the open leg, not the delivered one',
+    /Open POs \(1\)/.test(vendMain) && vendMain.includes("openShipment('4521\\x2dL1')")
+      && !vendMain.includes("openShipment('4521\\x2dL6')")
+      && vendMain.indexOf('Open POs') < vendMain.indexOf('Vendor details'),
+    'h2=' + JSON.stringify((/<h2>Open POs[^<]*<\/h2>/.exec(vendMain) || ['none'])[0]));
+  safe('select', 'penco');
+  r.check('a vendor with no open legs has no Open POs section', !/Open POs/.test((app.el('main') || EMPTY).innerHTML || ''));
+  safe('select', 'acme');
+  safe('closeDrawer'); safe('openShipment', '4521-L1');
+  const selHtml = (app.el('dbody') || EMPTY).innerHTML || '';
+  const selBlock = (selHtml.split('<select id="s_vendor">')[1] || '').split('</select>')[0];
+  r.check('the shipment drawer has a Vendor select with "— none —" first and the stored vendor selected',
+    /^<option value="" >\u2014 none \u2014<\/option>/.test(selBlock)
+      && /<option value="fs-racking" selected>FS Racking<\/option>/.test(selBlock)
+      && selBlock.indexOf('FS Racking') < selBlock.indexOf('Penco'),
+    selBlock.slice(0, 300));
+  app.resetCalls();
+  await app.fn('saveShipment')('4521-L1');
+  const shV = app.calls().find(c => c.tool === 'update_shipment');
+  r.check('a save that did not touch the vendor does not send it',
+    shV && !('vendor_id' in shV.args.fields), shV && JSON.stringify(Object.keys(shV.args.fields)));
+  safe('openShipment', '4521-L1');
+  app.el('s_vendor').value = 'penco';
+  app.resetCalls();
+  await app.fn('saveShipment')('4521-L1');
+  const shV2 = app.calls().find(c => c.tool === 'update_shipment');
+  r.check('a changed vendor is sent', shV2 && shV2.args.fields.vendor_id === 'penco', shV2 && JSON.stringify(shV2.args.fields));
+  safe('openShipment', '4521-L1');
+  app.el('s_vendor').value = '';
+  app.resetCalls();
+  await app.fn('saveShipment')('4521-L1');
+  const shV3 = app.calls().find(c => c.tool === 'update_shipment');
+  r.check('clearing it sends null', shV3 && shV3.args.fields.vendor_id === null, shV3 && JSON.stringify(shV3.args.fields));
+  safe('openShipment', '4521-L3');
+  const ghost = ((app.el('dbody') || EMPTY).innerHTML || '').split('<select id="s_vendor">')[1] || '';
+  r.check('a stored vendor no record carries is still an option, selected, and says so',
+    /<option value="ghost" selected>ghost \(no vendor record\)<\/option>/.test(ghost), ghost.slice(0, 200));
 
   // ---- review round 1: the customer is a guess on the Receivables screen ------
   // Invoice 9002 is filed under Beta but linked to 4600, which only Acme
