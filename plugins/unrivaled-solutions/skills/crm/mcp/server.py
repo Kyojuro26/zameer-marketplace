@@ -2860,51 +2860,145 @@ def lookup_number(n: str) -> dict:
     return out
 
 
-@mcp.tool()
-@_store_errors
-def suggest_entity_links() -> dict:
-    """Candidate customer/vendor pairs that may be the SAME business, from
-    their names, each with the reason. Read-only: it never links anything --
-    the operator confirms a link with update_company(linked_vendor_id=...).
-    A pair is suggested when the normalised names are equal, equal apart from
-    a trailing legal suffix (LLC, Inc, Co, ...), or one's qbo_name is the
-    other's name. Companies or vendors already linked, and archived ones, are
-    left out. A plant or division named differently from the group is not
-    paired -- they stay separate companies."""
+def _names_match(a, b):
+    """The reason two names are one business, or None: equal after
+    normalising, or equal apart from a trailing legal suffix. Never looser --
+    "Norvale Plant A" is not "Norvale"."""
+    if _name_key(a) and _name_key(a) == _name_key(b):
+        return "the same name"
+    (ab, acut), (bb, bcut) = _name_base(a), _name_base(b)
+    if ab and ab == bb:
+        extra = " ".join(w.upper() if len(w) <= 4 else w.title() for w in acut + bcut)
+        return f"the same name apart from the legal suffix {extra}"
+    return None
+
+
+def _entity_suggestions():
+    """Everything suggest_entity_links reports; link_qbo_vendor acts only on
+    what this returns. Read-only."""
     companies = STORE.load("companies")
     live = [c for c in companies if not c.get("archived")]
     held = {_key(c.get("linked_vendor_id")) for c in live if c.get("linked_vendor_id")}
     arch = {c.get("company_id") for c in companies if c.get("archived")}
-    cos = [c for c in live if c.get("role") in ("customer", "lead")
-           and not c.get("linked_vendor_id")]
-    vens = [v for v in STORE.load("vendors") if isinstance(v, dict)
-            and not v.get("archived") and v.get("company_id") not in arch
-            and _key(v.get("company_id")) not in held]
+    sellers = [c for c in live if c.get("role") in ("customer", "lead")]
+    cos = [c for c in sellers if not c.get("linked_vendor_id")]
+    live_vendors = [v for v in STORE.load("vendors") if isinstance(v, dict)
+                    and not v.get("archived") and v.get("company_id") not in arch]
+    vens = [v for v in live_vendors if _key(v.get("company_id")) not in held]
     pairs = []
     for c in cos:
-        cname, cbase = c.get("display_name"), _name_base(c.get("display_name"))
+        cname = c.get("display_name")
         for v in vens:
             if v.get("company_id") == c.get("company_id"):
                 continue
-            vname, vbase = v.get("display_name"), _name_base(v.get("display_name"))
-            reason = None
-            if _name_key(cname) and _name_key(cname) == _name_key(vname):
-                reason = "the same name"
-            elif cbase[0] and cbase[0] == vbase[0]:
-                extra = " ".join(w.upper() if len(w) <= 4 else w.title()
-                                 for w in (cbase[1] + vbase[1]))
-                reason = f"the same name apart from the legal suffix {extra}"
-            elif any(isinstance(q, str) and q.strip() and _name_key(q) == _name_key(o)
-                     for q, o in ((c.get("qbo_name"), vname), (v.get("qbo_name"), cname))):
+            vname = v.get("display_name")
+            reason = _names_match(cname, vname)
+            if not reason and any(
+                    isinstance(q, str) and q.strip() and _name_key(q) == _name_key(o)
+                    for q, o in ((c.get("qbo_name"), vname), (v.get("qbo_name"), cname))):
                 reason = "one's QuickBooks name is the other's name"
             if reason:
                 pairs.append({"company_id": c.get("company_id"), "company_name": cname,
                               "vendor_id": v.get("company_id"), "vendor_name": vname,
                               "reason": f"{cname!s} / {vname!s}: {reason}"})
     pairs.sort(key=lambda p: (str(p["company_name"]), str(p["vendor_name"])))
-    return {"ok": True, "interface_version": VERSION, "pairs": pairs,
-            "basis": "names compared after lower-casing and dropping punctuation; "
-                     "suggestions only -- nothing is linked"}
+
+    # C2: customers that appear in QuickBooks as VENDORS. The CRM usually
+    # holds only the customer side, so the vendor side is found in the loaded
+    # Transaction List by Vendor, by the same name rules. A QuickBooks name
+    # that fits two customers is listed apart, never given to one.
+    out = {"pairs": pairs, "qbo_vendor_names": [], "qbo_vendor_ambiguous": []}
+    try:
+        vt = _load_qbo_snapshot("vendor_transactions")
+    except StoreError as e:
+        vt = None
+        out["qbo_vendor_snapshot_error"] = str(e)
+    if vt:
+        vres = _qbo_name_resolver(live_vendors)
+        qnames = sorted({r_.get("vendor").strip() for r_ in vt["rows"]
+                         if isinstance(r_.get("vendor"), str) and r_.get("vendor").strip()})
+        for qn in qnames:
+            fits = [(c, _names_match(c.get("display_name"), qn)) for c in sellers]
+            fits = [(c, why) for c, why in fits if why]
+            if len(fits) > 1:
+                out["qbo_vendor_ambiguous"].append(
+                    {"qbo_vendor_name": qn,
+                     "candidates": sorted(str(c.get("company_id")) for c, _ in fits)})
+                continue
+            if not fits or fits[0][0].get("linked_vendor_id"):
+                continue
+            c, why = fits[0]
+            vid, _miss = vres(qn)
+            out["qbo_vendor_names"].append({
+                "company_id": c.get("company_id"), "company_name": c.get("display_name"),
+                "qbo_vendor_name": qn, "vendor_record_exists": vid is not None,
+                "vendor_id": vid,
+                "reason": f"{c.get('display_name')!s} also appears as a QuickBooks "
+                          f"vendor, '{qn}': {why}"})
+    return out
+
+
+@mcp.tool()
+@_store_errors
+def suggest_entity_links() -> dict:
+    """Candidate customer/vendor pairs that may be the SAME business, each
+    with its reason. Read-only: it never creates or links anything -- the
+    operator confirms each (update_company(linked_vendor_id=...), or
+    link_qbo_vendor for a QuickBooks-only vendor).
+
+    pairs: a CRM customer (or lead) and a CRM vendor record whose names are
+    equal, equal apart from a trailing legal suffix (LLC, Inc, Co, ...), or
+    where one's qbo_name is the other's name.
+    qbo_vendor_names: a CRM customer whose name, by the same rules, is a
+    vendor in the loaded QuickBooks Transaction List by Vendor -- with the
+    QuickBooks name and whether a CRM vendor record for it exists.
+    qbo_vendor_ambiguous: QuickBooks vendor names that fit more than one
+    customer, never given to either. Linked and archived records are left out;
+    a plant or division named differently from its group is never paired."""
+    out = _entity_suggestions()
+    out.update({"ok": True, "interface_version": VERSION,
+                "basis": "names compared after lower-casing and dropping "
+                         "punctuation, and apart from a trailing legal suffix; "
+                         "suggestions only -- nothing is created or linked"})
+    return out
+
+
+@mcp.tool()
+def link_qbo_vendor(company_id: str, qbo_vendor_name: str) -> dict:
+    """Confirm one qbo_vendor_names suggestion in a single step: create the
+    vendor record for that QuickBooks name (create_vendor, with qbo_name set
+    to it) unless one exists, then link the customer to it (update_company).
+    A thin wrapper over those two tools -- no write of its own -- and it acts
+    only on a CURRENT suggestion for that customer."""
+    try:
+        hit = next((x for x in _entity_suggestions()["qbo_vendor_names"]
+                    if x["company_id"] == company_id
+                    and x["qbo_vendor_name"] == qbo_vendor_name), None)
+    except StoreError as e:
+        return _err(e)
+    if not hit:
+        return _err(f"'{qbo_vendor_name}' is not a current QuickBooks-vendor "
+                    f"suggestion for '{company_id}' -- see suggest_entity_links")
+    vid, created = hit["vendor_id"], False
+    if not vid:
+        taken = {str(c.get("company_id")) for c in STORE.load("companies")} | \
+                {str(v.get("company_id")) for v in STORE.load("vendors")}
+        base = _slug(qbo_vendor_name) or "vendor"
+        vid, n = base, 1
+        while vid in taken:
+            n += 1
+            vid = f"{base}-vendor" if n == 2 else f"{base}-vendor-{n - 1}"
+        res = create_vendor({"company_id": vid, "display_name": qbo_vendor_name,
+                             "qbo_name": qbo_vendor_name})
+        if not res.get("ok"):
+            return res
+        created = True
+    res = update_company(company_id, {"linked_vendor_id": vid})
+    if not res.get("ok"):
+        return dict(res, created_vendor=created, vendor_id=vid)
+    return {"ok": True, "interface_version": VERSION, "created_vendor": created,
+            "company": res["company"],
+            "vendor": get_vendor(vid).get("vendor")}
 
 
 # --------- writes (validated, atomic, logged) ---------

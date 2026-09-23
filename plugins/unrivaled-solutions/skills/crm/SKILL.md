@@ -76,6 +76,12 @@ Use the read tools; they are side-effect-free:
   quoted `exposure_open_receivable_usd` — name each for what it is, never add
   them together. `crm_metrics(report="qbo_drift")` lists what QuickBooks and
   the CRM disagree on.
+- "Which customers are also vendors?" → `suggest_entity_links`. It lists
+  customers whose name is also a QuickBooks vendor's (from the loaded vendor
+  export) and says whether a CRM vendor record exists. It changes nothing: to
+  act on one, ask the operator, then `link_qbo_vendor(company_id=,
+  qbo_vendor_name=)` creates the vendor record and links it. Linking never
+  merges the two records.
 - Invoices by number, or what's coming due → `list_invoices` (`invoice_no=`
   for exact/substring match; `overdue=true` for past-due, unpaid invoices).
   Every invoice reports `effective_due_on`: a manual `due_on` override if

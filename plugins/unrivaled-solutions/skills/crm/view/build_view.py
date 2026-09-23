@@ -3003,6 +3003,7 @@ function openEditCompany(cid){
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Customer/vendor type isn't editable here — ask Claude in chat if a company needs to be reclassified.</p>`;
   openDrawer();
+  fillQboVendorSuggestions();
 }
 
 /* ------------------------------------------------ customer <-> vendor link --
@@ -3026,7 +3027,51 @@ function vendorLinkField(c){
       ${opts.map(v => `<option value="${esc(st(v.company_id))}"${st(v.company_id)===cur?' selected':''}>${esc(v.display_name||v.company_id)}</option>`).join('')}
     </select>
     ${cur?`<p class="muted" style="margin:4px 0 0;font-size:11px"><a href="#" id="e_co_vendor_open" onclick="closeDrawer();select('${jesc(cur)}');return false">Open ${esc(vendorName(cur))}</a></p>`:''}
-    <p class="muted" style="margin:4px 0 0;font-size:11px">Links the two records; it never merges them. A vendor links to one company.</p></div>`;
+    <p class="muted" style="margin:4px 0 0;font-size:11px">Links the two records; it never merges them. A vendor links to one company.</p>
+    ${cur ? '' : `<div id="e_co_qbo_sugg" data-cid="${esc(st(c.company_id))}"></div>`}</div>`;
+}
+/* QuickBooks vendors that are this customer (0.1.39): the server's
+   suggest_entity_links reads the loaded vendor export by the same name rules;
+   the page only lists what it returns. Confirming calls link_qbo_vendor --
+   create the vendor record, then the link, through the existing writes. */
+async function fillQboVendorSuggestions(){
+  const el = document.getElementById('e_co_qbo_sugg'); if(!el) return;
+  const cid = el.getAttribute('data-cid');
+  let r;
+  try{ r = await CRM.call('suggest_entity_links', {}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
+  if(!document.body.contains(el)) return;           // the drawer moved on
+  if(!(r && r.ok)){
+    el.innerHTML = `<p class="muted" style="font-size:11px">QuickBooks vendor suggestions need the server.</p>`;
+    return;
+  }
+  const mine = (r.qbo_vendor_names || []).filter(x => st(x.company_id) === cid);
+  el.innerHTML = mine.map((x, i) => `<div class="kv" style="margin-top:6px">
+      <span>Appears in QuickBooks as vendor <b>${esc(x.qbo_vendor_name)}</b> \u2014
+        ${x.vendor_record_exists ? `CRM vendor record: ${esc(vendorName(x.vendor_id))}` : 'no CRM vendor record yet'}</span>
+      <button class="pill-btn" id="e_co_qbo_link_${i}"
+        onclick="confirmQboVendor('${jesc(cid)}','${jesc(x.qbo_vendor_name)}')">${
+          x.vendor_record_exists ? 'Link it' : 'Create vendor record and link'}</button></div>`).join('');
+}
+async function confirmQboVendor(cid, qn){
+  const msg = document.getElementById('savedMsg');
+  let r;
+  try{ r = await CRM.call('link_qbo_vendor', {company_id:cid, qbo_vendor_name:qn}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
+  if(!(r && r.ok)){
+    if(msg){ msg.textContent = '\u2717 ' + ((r && r.error) || 'could not link'); msg.className = 'saved show errc'; }
+    return;
+  }
+  const i = DATA.companies.findIndex(x => x.company_id === cid);
+  if(i >= 0 && r.company) DATA.companies[i] = r.company;
+  const v = r.vendor;
+  if(v && v.company_id != null){
+    if(!(DATA.vendors||[]).some(x => st(x.company_id) === st(v.company_id))) (DATA.vendors = DATA.vendors || []).push(v);
+    if(!DATA.companies.some(x => st(x.company_id) === st(v.company_id)))
+      DATA.companies.push({company_id:v.company_id, display_name:v.display_name, role:'vendor',
+                           domains:[], locations:[], archived:false});
+  }
+  reindex(); closeDrawer(); renderList(); renderMain(); refreshMetrics();
 }
 function linkedCompanyOf(vid){
   return (DATA.companies||[]).find(x => !x.archived && st(x.linked_vendor_id) && st(x.linked_vendor_id) === st(vid)) || null;
