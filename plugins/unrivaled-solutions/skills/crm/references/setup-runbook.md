@@ -48,10 +48,10 @@ python3 --version
 **Expect:** `Python 3.12.10`. Then install the server's dependency:
 
 ```powershell
-python3 -m pip install "mcp<2" msal requests
+python3 -m pip install "mcp<2" msal requests openpyxl
 ```
 
-(Only `mcp` is needed to connect; `msal`/`requests` are for Outlook features.)
+(Only `mcp` is needed to connect; `msal`/`requests` are for Outlook features; `openpyxl` reads QuickBooks exports and the sales-tracker workbook.)
 
 ## STEP 3 — Move the store to a plain local folder + pointer file
 
@@ -228,6 +228,7 @@ Get-Content "$env:TEMP\unrivaled-crm-launch.log" -Tail 10
 
 - **File doesn't exist** → the server never started: plugin not on v0.1.4, or `python3` still unresolvable (re-run Step 2's `where.exe python3`).
 - **`FATAL: mcp import failed`** → wrong Python answered, or the wrong `mcp`: run `python3 -m pip install "mcp<2" --force-reinstall` and retry. The pin matters — mcp 2.x renamed `FastMCP`, so an unpinned install reproduces exactly this crash.
+- **Loading a QuickBooks export fails with `openpyxl is not installed`** → the export reader needs the `openpyxl` package, which installs before 0.1.38 did not include: run `python3 -m pip install openpyxl`, then load the export again. Nothing is loaded partly — the previous export stays as it was.
 - **`FATAL: no store configured`** → pointer file missing or empty (Step 3).
 - **`FATAL: store at ... is missing [...]`** → store path wrong or files missing; the message names exactly which.
 - **Ends with `store ok`** → server is healthy; the problem is on Claude's side — full quit, relaunch, new chat, and if it persists send Zeeshan the log lines.
