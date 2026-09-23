@@ -253,8 +253,9 @@ M = [
   '    STORE.save("projects", STORE.load("projects")[:0] + projects)\n'
   '    return projects'),
  ("metrics becomes a writable project field",
-  '    "next_action", "next_action_on",\n}',
-  '    "next_action", "next_action_on", "metrics",\n}'),
+  # re-anchored 0.1.41: the quote fields now close PROJECT_FIELDS
+  '    "quote_requested_on", "quote_sent_on", "quote_revisions",\n}',
+  '    "quote_requested_on", "quote_sent_on", "quote_revisions", "metrics",\n}'),
  ("an unknown report is served as all three instead of refused",
   '    if report is not None and report not in METRIC_REPORTS:\n'
   '        return _err(f"report must be one of {list(METRIC_REPORTS)} or omitted")\n',

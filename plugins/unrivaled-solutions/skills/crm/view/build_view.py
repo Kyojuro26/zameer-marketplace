@@ -282,6 +282,7 @@ TEMPLATE = r"""<!DOCTYPE html>
         <button data-f="lead">Leads<span class="fcount" id="fc_lead"></span></button>
         <button data-f="project">Projects<span class="fcount" id="fc_project"></span></button>
           <button data-f="receivable">Receivables<span class="fcount" id="fc_receivable"></span></button>
+          <button data-f="quotes">Quotes</button>
           <button data-f="cfo">CFO</button>
       </div>
       <div class="subfilters" id="subfilters">
@@ -786,7 +787,7 @@ function opts(list, current){
 }
 
 function companyMatches(c){
-  if(filter!=='all' && filter!=='cfo' && c.role!==filter) return false;
+  if(filter!=='all' && filter!=='cfo' && filter!=='quotes' && c.role!==filter) return false;
   if(!query) return true;
   const q=query.toLowerCase();
   if(sv(c.display_name).includes(q)) return true;
@@ -2043,6 +2044,84 @@ function showWarnings(r){
   const w = (r && r.warnings) || [];
   if(w.length) noticeToast(w.map(x => x.message || x.code).join(' \u00b7 '));
 }
+/* ---------------------------------------------------------- Quotes page --
+   crm_metrics(report="quotes") is the SERVER's list; the page renders it and
+   acts on a row only through update_project, then re-reads the list. */
+async function loadQuotes(){
+  if(CRM.mode === 'embedded') return;
+  let r;
+  try{ r = await CRM.call('crm_metrics', {report:'quotes'}); }
+  catch(e){ r = null; }
+  if(r && r.ok && r.reports && r.reports.quotes) DATA.quotes = r.reports.quotes;
+  if(filter === 'quotes') renderMain();
+}
+function quoteProject(pno, cid){
+  return (DATA.projects||[]).find(p => st(p.project_no) === st(pno) && st(p.company_id) === st(cid)) || null;
+}
+async function quoteAct(act, rowKey, pno, cid, kind, idx){
+  const row = document.querySelector(`tr[data-key="${rowKey}"]`);
+  const msg = document.getElementById('q-msg');
+  const rec = quoteProject(pno, cid) || {};
+  const today = todayISO();
+  const revs = (Array.isArray(rec.quote_revisions) ? rec.quote_revisions : []).map(x => Object.assign({}, x));
+  let fields;
+  if(act === 'sent'){
+    if(kind === 'revision'){ revs[idx] = Object.assign({}, revs[idx], {sent_on: today}); fields = {quote_revisions: revs}; }
+    else fields = {quote_sent_on: today};
+  } else if(act === 'revision'){
+    const note = ((row && row.querySelector('input[data-note]')) || {}).value || '';
+    const rv = {requested_on: today}; if(note.trim()) rv.note = note.trim();
+    revs.push(rv); fields = {quote_revisions: revs};
+  } else {
+    const when = ((row && row.querySelector('input[data-follow]')) || {}).value || '';
+    if(!when){ if(msg) msg.textContent = '\u2717 pick a follow-up date first'; return; }
+    fields = {next_action_on: when, next_action: rec.next_action || 'Follow up on the quote'};
+  }
+  let r;
+  try{ r = await CRM.call('update_project', {project_no: pno, company_id: cid, fields}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
+  if(!(r && r.ok)){ if(msg) msg.textContent = '\u2717 ' + ((r && r.error) || 'not saved'); return; }
+  const i = (DATA.projects||[]).findIndex(p => st(p.project_no) === st(pno) && st(p.company_id) === st(cid));
+  if(i >= 0 && r.project) DATA.projects[i] = r.project;
+  if(msg) msg.textContent = '\u2713 saved';
+  await loadQuotes();
+}
+function renderQuotes(){
+  const q = DATA.quotes;
+  if(!q) return `<div class="co-head"><h1>Quotes</h1></div><div class="empty">The quote list needs the server.</div>`;
+  const cfg = q.settings || {}, t = q.quote_turnaround_days || {}, w = q.win_rate || {};
+  const name = (x) => esc(x.company_name || st(x.company_id));
+  const proj = (x) => `<a href="#" onclick="openProject('${jesc(st(x.project_no))}','${jesc(st(x.company_id))}');return false">${esc(st(x.project_no))}</a>`;
+  const acts = (key, x, withSent) => {
+    const a = (act) => `quoteAct('${act}','${jesc(key)}','${jesc(st(x.project_no))}','${jesc(st(x.company_id))}','${jesc(st(x.kind||''))}',${x.revision_index == null ? 'null' : Number(x.revision_index)})`;
+    return `<td style="white-space:nowrap">`
+      + (withSent ? `<button class="pill-btn" data-act="sent" onclick="${a('sent')}">Mark sent</button> ` : '')
+      + `<input data-note placeholder="what was asked for" style="width:130px"/> <button class="pill-btn" data-act="revision" onclick="${a('revision')}">Log revision request</button> `
+      + `<input type="date" data-follow/> <button class="pill-btn" data-act="follow" onclick="${a('follow')}">Set follow-up</button></td>`;
+  };
+  const flag = (on, text) => on ? ` <b class="badge q-flag" style="color:var(--red)">${esc(text)}</b>` : '';
+  let h = `<div class="co-head"><h1>Quotes</h1><span class="muted">as of ${esc(fmtDate(q.as_of))} \u00b7 SLA ${cfg.quote_sla_business_days} business days \u00b7 stale after ${cfg.stale_pending_days} days</span></div>`;
+  h += `<p>Turnaround: ${t.value == null ? '<span class="muted">nothing measured</span>' : `<b>${esc(String(t.value))}</b> business days (median)`} <span class="muted" style="font-size:12px">\u2014 ${esc(t.basis||'')}</span></p>`;
+  h += `<p>Win rate: ${w.value == null ? '<span class="muted">no decided projects</span>' : `<b>${Math.round(w.value * 100)}%</b>`} <span class="muted" style="font-size:12px">\u2014 ${esc(w.basis||'')}</span></p>`;
+  h += `<p id="q-msg" class="muted"></p>`;
+  const W = (q.waiting_to_send||{}).rows || [];
+  h += `<div class="section"><h2>Waiting to send (${W.length})</h2><table id="q-waiting"><thead><tr><th>Project</th><th>Customer</th><th>What</th><th>Requested</th><th class="num">Business days</th><th></th></tr></thead><tbody>`
+    + W.map(x => { const key = `${st(x.project_no)}|${st(x.company_id)}|${st(x.kind)}|${x.revision_index == null ? '' : x.revision_index}`;
+        return `<tr data-key="${esc(key)}"><td>${proj(x)}</td><td>${name(x)}</td><td>${x.kind === 'revision' ? `Revision${x.note ? ': ' + esc(x.note) : ''}` : 'Quote'}</td><td>${esc(fmtDate(x.requested_on))}</td><td class="num">${x.date_unreadable ? 'date unreadable' : x.age_business_days}${flag(x.past_sla || x.date_unreadable, x.date_unreadable ? 'fix the date' : 'past SLA')}</td>${acts(key, x, true)}</tr>`; }).join('')
+    + `</tbody></table></div>`;
+  const S = (q.sent_awaiting_decision||{}).rows || [];
+  h += `<div class="section"><h2>Sent, awaiting decision (${S.length})</h2><table id="q-sent"><thead><tr><th>Project</th><th>Customer</th><th>Last sent</th><th class="num">Business days</th><th>Follow-up</th><th></th></tr></thead><tbody>`
+    + S.map(x => { const key = `${st(x.project_no)}|${st(x.company_id)}`;
+        return `<tr data-key="${esc(key)}"><td>${proj(x)}</td><td>${name(x)}</td><td>${esc(fmtDate(x.last_sent_on))}</td><td class="num">${x.age_business_days}</td><td>${esc(fmtDate(x.next_action_on)||'\u2014')}${flag(x.no_follow_up, 'no follow-up set')}</td>${acts(key, x, false)}</tr>`; }).join('')
+    + `</tbody></table></div>`;
+  const P = (q.stale_pending||{}).rows || [];
+  h += `<div class="section"><h2>Stale pending (${P.length})</h2><p class="muted" style="font-size:12px">No activity for more than ${cfg.stale_pending_days} days. Follow up, or mark them lost yourself \u2014 nothing here changes on its own.</p><table id="q-stale"><thead><tr><th>Project</th><th>Customer</th><th>Last activity</th><th class="num">Days</th><th></th></tr></thead><tbody>`
+    + P.map(x => { const key = `${st(x.project_no)}|${st(x.company_id)}`;
+        return `<tr data-key="${esc(key)}"><td>${proj(x)}</td><td>${name(x)}</td><td>${esc(fmtDate(x.last_activity_on)||'no dated activity')}</td><td class="num">${x.days_since_activity == null ? '\u2014' : x.days_since_activity}</td>${acts(key, x, false)}</tr>`; }).join('')
+    + `</tbody></table></div>`;
+  return h;
+}
+
 /* ------------------------------------------------------------- CFO page --
    crm_metrics(report="cfo") -- cash, receivables, margin, expenses -- is the
    SERVER's report; this page only renders it. Every figure is a shape: a null
@@ -2368,6 +2447,10 @@ function renderMain(){
   }
   if(filter === 'cfo'){
     document.getElementById('main').innerHTML = renderCfo();
+    return;
+  }
+  if(filter === 'quotes'){
+    document.getElementById('main').innerHTML = renderQuotes();
     return;
   }
   if(filter === 'receivable'){
@@ -3820,15 +3903,16 @@ function setFilter(f){
   const isProj = (f === 'project');
   const isRecv = (f === 'receivable');
   const isLive = (f === 'live');
-  const isCfo = (f === 'cfo');
+  const isCfo = (f === 'cfo'), isQuotes = (f === 'quotes');
   // both cross-company views own the sub-filter row and neither wants the
   // "+ Add customer/vendor/lead" buttons, which act on the company list
   if(sf) sf.style.display = (isProj || isRecv) ? 'flex' : 'none';
-  if(add) add.style.display = (isProj || isRecv || isLive || isCfo) ? 'none' : 'flex';
+  if(add) add.style.display = (isProj || isRecv || isLive || isCfo || isQuotes) ? 'none' : 'flex';
   if(isProj || isRecv) renderSubfilters();
   renderList();
   if(isCfo) loadCfo();
-  if(isProj || isRecv || isLive || isCfo) renderMain();
+  if(isQuotes) loadQuotes();
+  if(isProj || isRecv || isLive || isCfo || isQuotes) renderMain();
   else if(selected) renderMain();
   else document.getElementById('main').innerHTML =
     '<div class="empty">Select a company to begin. <button class="pill-btn" onclick="setFilter(\'live\')">Show Live projects</button></div>';
@@ -3933,8 +4017,17 @@ def _attach_metrics(data, store_dir):
         ctx = _srv._MetricsCtx()
         data["companies"] = [dict(c, metrics=ctx.company_metrics(c))
                              for c in data["companies"]]
-        # the CFO report, from the same builder -- re-read live when the tab opens
-        data["cfo"] = ctx.cfo()
+        # The CFO and Quotes pages, from the same builder -- each re-read live
+        # when its tab opens. Each in its own guard: a bad settings.json costs
+        # the Quotes page, not the company figures, and the warning says which.
+        for key, build in (("cfo", ctx.cfo), ("quotes", ctx.quotes)):
+            try:
+                data[key] = build()
+            except Exception as ex:                           # noqa: BLE001
+                data[key] = None
+                print(f"WARNING: the {key} page is not embedded "
+                      f"({type(ex).__name__}: {ex}) -- it will say it needs the "
+                      f"server", file=sys.stderr)
     except Exception as ex:                                       # noqa: BLE001
         print(f"WARNING: metrics not embedded ({type(ex).__name__}: {ex}) -- "
               f"the receivables tile will say it needs the server", file=sys.stderr)

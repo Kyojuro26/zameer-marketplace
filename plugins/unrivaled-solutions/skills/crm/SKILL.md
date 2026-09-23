@@ -76,6 +76,25 @@ Use the read tools; they are side-effect-free:
   quoted `exposure_open_receivable_usd` — name each for what it is, never add
   them together. `crm_metrics(report="qbo_drift")` lists what QuickBooks and
   the CRM disagree on.
+- **Quotes** (0.1.41). Dates are today's unless the operator says otherwise;
+  never copy a project's `date` into a quote date -- it is not a request date.
+  - "Log a quote request from X for Y": find X's project for Y (`get_company`).
+    If it has no request yet, `update_project(quote_requested_on=)`. If a quote
+    already went out, this is a revision: read its `quote_revisions`, append
+    `{"requested_on": ..., "note": what they asked for}` and send the whole list
+    back. If there is no project yet, ask the operator for the quote number and
+    `create_project(status="pending", quote_requested_on=...)`.
+  - "Mark quote 1234 sent": if 1234 has an open revision (a `quote_revisions`
+    entry with no `sent_on`), set that entry's `sent_on` and send the list back;
+    otherwise `update_project(quote_sent_on=)`. A sent date before its request
+    is refused -- say which dates clash.
+  - "What quotes are waiting": `crm_metrics(report="quotes")`. Lead with
+    `waiting_to_send` -- oldest first, age in business days, and which are past
+    the SLA -- then sent quotes with no follow-up set, then stale pending
+    projects as a prompt to follow up or mark lost (never change them
+    yourself). Quote the turnaround and win rate WITH their bases.
+  - The SLA (2 business days) and the stale threshold (60 days) are the
+    operator's: `update_store_settings`.
 - **The weekly CFO review** ("how are we doing", "cash position", "the CFO
   numbers"):
   1. Get a current snapshot. With the Intuit QuickBooks connector available

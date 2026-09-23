@@ -31,8 +31,9 @@ SERVER = [
  ("the flag is ignored, so every project is due",
   "    if next_action_due:\n", "    if False:\n"),
  ("next_action stops being a project field",
-  '    "next_action", "next_action_on",\n}\nSHIPMENT_FIELDS = {',
-  '}\nSHIPMENT_FIELDS = {'),
+  # re-anchored 0.1.41: the quote fields now follow on the next line
+  '    "next_action", "next_action_on",\n    # The quote pipeline (0.1.41).',
+  '    # The quote pipeline (0.1.41).'),
  ("a number is stored as a next action",
   '    if "next_action" in fields and fields["next_action"] is not None \\\n'
   '            and not isinstance(fields["next_action"], str):\n'

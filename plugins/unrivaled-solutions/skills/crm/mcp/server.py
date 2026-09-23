@@ -105,6 +105,11 @@ PROJECT_FIELDS = {
     # changelog on a re-import. next_action_on is stored as given and read
     # with _parse_date_loose, like every other date.
     "next_action", "next_action_on",
+    # The quote pipeline (0.1.41). When a quote was asked for and when it went
+    # out, and every "can we see two more options" after it. Operator-owned
+    # like next_action: never in merge's IMPORTER_OWNED, never backfilled -- a
+    # project's `date` is NOT a request date.
+    "quote_requested_on", "quote_sent_on", "quote_revisions",
 }
 SHIPMENT_FIELDS = {
     "shipment_id", "project_no", "all_project_nos", "vendor_po_raw", "ship_date",
@@ -591,12 +596,17 @@ class Store:
     def save_enrichment(self, data):
         self._write(ENRICHMENT_FILE, data)
 
-    def log(self, op, entity, key, fields):
+    def log(self, op, entity, key, fields, company_id=None):
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "op": op, "entity": entity, "key": key, "fields": fields,
             "interface_version": VERSION,
         }
+        # A project number is unique per customer, not store-wide; the key
+        # stays the number (merge replays it), and the customer rides along so
+        # a reader can tell two customers' 4521s apart (0.1.41).
+        if company_id is not None:
+            entry["company_id"] = company_id
         # Best-effort: the data write already succeeded and is the source of
         # truth. A locked changelog (OneDrive/AV) must not fail the operation
         # or double-raise after a successful save.
@@ -1098,9 +1108,58 @@ def _validate(fields, allowed, entity):
         if not isinstance(v, str) or not _NEXT_ACTION_DATE_RE.fullmatch(v.strip()) \
                 or not _parse_date_loose(v):
             raise StoreError("next_action_on must be a date (YYYY-MM-DD or M/D/YYYY) or null")
+    for k in ("quote_requested_on", "quote_sent_on"):
+        if k in fields and fields[k] is not None:
+            _check_date_text(fields[k], k)
+    if "quote_revisions" in fields and fields["quote_revisions"] is not None:
+        revs = fields["quote_revisions"]
+        if not isinstance(revs, list):
+            raise StoreError("quote_revisions must be a list of "
+                             "{requested_on, sent_on, note}")
+        for n, rv in enumerate(revs):
+            if not isinstance(rv, dict):
+                raise StoreError(f"quote_revisions[{n}] must be an object")
+            unknown = sorted(set(rv) - {"requested_on", "sent_on", "note"})
+            if unknown:
+                raise StoreError(f"quote_revisions[{n}]: unknown field(s) {unknown}; "
+                                 f"a revision takes requested_on, sent_on, note")
+            if not rv.get("requested_on"):
+                raise StoreError(f"quote_revisions[{n}] has no requested_on -- a "
+                                 f"revision is dated by when it was asked for")
+            _check_date_text(rv["requested_on"], f"quote_revisions[{n}].requested_on")
+            if rv.get("sent_on") is not None:
+                _check_date_text(rv["sent_on"], f"quote_revisions[{n}].sent_on")
+                _check_sent_after(rv["requested_on"], rv["sent_on"],
+                                  f"quote_revisions[{n}]")
+            if rv.get("note") is not None and not isinstance(rv["note"], str):
+                raise StoreError(f"quote_revisions[{n}].note must be text")
     if "payment_status" in fields and fields["payment_status"] is not None \
             and not COLLECTION_RE.match(str(fields["payment_status"])):
         raise StoreError("payment_status must be paid | open | partial[:detail]")
+
+
+def _check_date_text(v, name):
+    """A stored date must be one the screen can read: the grammar
+    next_action_on uses, and a real calendar date."""
+    if not isinstance(v, str) or not _NEXT_ACTION_DATE_RE.fullmatch(v.strip()) \
+            or not _parse_date_loose(v):
+        raise StoreError(f"{name} must be a date (YYYY-MM-DD or M/D/YYYY) or null")
+
+
+def _check_sent_after(requested, sent, what):
+    rq, se = _parse_date_loose(requested), _parse_date_loose(sent)
+    if rq and se and se.date() < rq.date():
+        raise StoreError(f"{what}: sent on {sent} is before it was requested on "
+                         f"{requested}")
+
+
+def _check_quote_order(record):
+    """The record as it will be saved: a quote cannot go out before it was
+    asked for. Checked on the merged record, so an edit that moves either
+    date is judged against the other one already stored."""
+    if record.get("quote_requested_on") and record.get("quote_sent_on"):
+        _check_sent_after(record["quote_requested_on"], record["quote_sent_on"],
+                          "the quote")
 
 
 def _key(v):
@@ -1812,16 +1871,19 @@ EXCLUSION_REASONS = (
     "no_qbo_invoice", "cost_incomplete", "cost_not_billed_yet",
     "bills_not_linkable_from_export", "po_status_unknown", "po_not_resolved",
     "no_po_on_job",
+    # the quote pipeline (0.1.41)
+    "no_request_date", "not_decided",
 )
 # A leg in one of these stages has left the vendor. The importer sets Shipped
 # exactly when a ship date exists; Delivered and Installed are later states of
 # the same fact. Ordered and On Hold have not shipped; Cancelled never will.
 SHIPPED_STAGES = {"Shipped", "Delivered", "Installed"}
 METRIC_REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time",
-                  "qbo_drift", "cfo")
-# "cfo" composes the QuickBooks figures into one report and repeats qbo_drift;
-# it is returned only when named
-DEFAULT_METRIC_REPORTS = tuple(r_ for r_ in METRIC_REPORTS if r_ != "cfo")
+                  "qbo_drift", "cfo", "quotes")
+# "cfo" composes the QuickBooks figures into one report and repeats qbo_drift,
+# and "quotes" is a working list rather than a metric: both are returned only
+# when named
+DEFAULT_METRIC_REPORTS = tuple(r_ for r_ in METRIC_REPORTS if r_ not in ("cfo", "quotes"))
 AGE_BUCKETS = ("not_yet_due", "0-30", "31-60", "61-90", "90+")
 
 
@@ -1975,6 +2037,54 @@ def _snap_meta(doc, today):
             "snapshot_as_of": doc["as_of"], "window_start": doc["window_start"],
             "window_end": doc["window_end"], "age_days": age,
             "stale": age > QBO_STALE_DAYS}
+
+
+# ------------------------------------------------------ store settings (0.1.41)
+SETTINGS_FILE = "settings.json"
+STORE_SETTINGS = {
+    # name: (default, lowest, highest)
+    "quote_sla_business_days": (2, 1, 30),
+    "stale_pending_days": (60, 1, 3650),
+}
+
+
+def _store_settings():
+    """The operator's store-level settings, over the defaults. The file is
+    optional; a value in it that is not a whole number in range is a
+    StoreError in words, never silently replaced."""
+    try:
+        stored = STORE._read_json(STORE.root / SETTINGS_FILE, {})
+    except StoreError:
+        raise
+    if not isinstance(stored, dict):
+        raise StoreError(f"{SETTINGS_FILE} is not a settings object; fix or delete it")
+    out = {}
+    for k, (default, lo, hi) in STORE_SETTINGS.items():
+        v = stored.get(k, default)
+        if type(v) is not int or not lo <= v <= hi:
+            raise StoreError(f"{SETTINGS_FILE}: {k} must be a whole number from "
+                             f"{lo} to {hi}, not {v!r}")
+        out[k] = v
+    return out
+
+
+def _business_days(start, end):
+    """Weekdays after `start` up to and including `end` (Mon-Fri; no holiday
+    calendar). A request on Monday answered on Wednesday took 2."""
+    from datetime import timedelta
+    if end <= start:
+        return 0
+    days, d = 0, start
+    while d < end:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            days += 1
+    return days
+
+
+def _as_date(v):
+    d = _parse_date_loose(v) if v else None
+    return d.date() if d else None
 
 
 class _MetricsCtx:
@@ -2203,6 +2313,161 @@ class _MetricsCtx:
              if len(v) > 1), key=lambda x: x["num"])
         sh["invoiced_usd"], sh["qbo_open_receivable_usd"] = invoiced, qbo_open
         return sh
+
+    # ---- the quote pipeline (0.1.41) ----
+    def _project_activity(self):
+        """{(project number key, company id): latest date the operator touched
+        it} from changelog.jsonl -- imports never write there, so every line is
+        an edit through a tool. A line that names no customer (written before
+        0.1.41) counts only where ONE live project holds the number: two
+        customers' 4521s must not share an edit."""
+        holders = {}
+        for p in self.projects:
+            holders.setdefault(_key(p.get("project_no")), []).append(_hk(p.get("company_id")))
+        out = {}
+        path = STORE.root / "changelog.jsonl"
+        if not path.exists():
+            return out
+        try:
+            lines = path.read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            return out
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(e, dict) or e.get("entity") != "project":
+                continue
+            d = _iso_date(str(e.get("ts") or "")[:10])
+            k = _key(e.get("key"))
+            if not (d and k):
+                continue
+            if e.get("company_id") is not None:
+                ck = (k, _hk(e.get("company_id")))
+            elif len(holders.get(k, ())) == 1:
+                ck = (k, holders[k][0])
+            else:
+                continue
+            if ck not in out or d > out[ck]:
+                out[ck] = d
+        return out
+
+    def quotes(self):
+        cfg = _store_settings()
+        sla, n_stale = cfg["quote_sla_business_days"], cfg["stale_pending_days"]
+        today = self.today
+        names = {_hk(c.get("company_id")): c.get("display_name") for c in self.companies}
+
+        def base(p):
+            return {"project_no": p.get("project_no"), "company_id": p.get("company_id"),
+                    "company_name": names.get(_hk(p.get("company_id"))),
+                    "status": p.get("status"), "description": p.get("description")}
+        waiting, sent_rows, stale, pairs = [], [], [], []
+        activity = self._project_activity()
+        for p in self.projects:
+            revs = [rv for rv in (p.get("quote_revisions") or []) if isinstance(rv, dict)]
+            req, sent = _as_date(p.get("quote_requested_on")), _as_date(p.get("quote_sent_on"))
+            # waiting to send: the first request, and each open revision
+            # a request whose date nobody can read is still waiting: listed
+            # first, flagged, never dropped out of sight
+            def wait_row(kind, idx, requested, note):
+                rq = _as_date(requested)
+                age = _business_days(rq, today) if rq else None
+                return dict(base(p), kind=kind, revision_index=idx,
+                            requested_on=requested, age_business_days=age,
+                            past_sla=(age > sla) if age is not None else None,
+                            date_unreadable=rq is None, note=note)
+            if p.get("quote_requested_on") and not p.get("quote_sent_on"):
+                waiting.append(wait_row("quote", None, p.get("quote_requested_on"), None))
+            for i, rv in enumerate(revs):
+                if rv.get("requested_on") and not rv.get("sent_on"):
+                    waiting.append(wait_row("revision", i, rv.get("requested_on"),
+                                            rv.get("note")))
+            # turnaround: every send, first and revisions
+            if p.get("quote_sent_on"):
+                pairs.append((req, sent, bool(p.get("quote_requested_on"))))
+            for rv in revs:
+                if rv.get("sent_on"):
+                    pairs.append((_as_date(rv.get("requested_on")),
+                                  _as_date(rv.get("sent_on")), True))
+            if p.get("status") != "pending":
+                continue
+            # sent, awaiting a decision
+            sends = [d for d in [sent] + [_as_date(rv.get("sent_on")) for rv in revs] if d]
+            if sends:
+                last = max(sends)
+                follow = _as_date(p.get("next_action_on"))
+                sent_rows.append(dict(base(p), last_sent_on=last.isoformat(),
+                                      age_business_days=_business_days(last, today),
+                                      next_action_on=p.get("next_action_on"),
+                                      no_follow_up=not (follow and follow > today)))
+            # stale: no activity for more than N days
+            dates = [_as_date(p.get("date")), req, sent] + \
+                [_as_date(rv.get(k)) for rv in revs for k in ("requested_on", "sent_on")]
+            touched = activity.get((_key(p.get("project_no")), _hk(p.get("company_id"))))
+            dates = [d for d in dates + [touched] if d]
+            last = max(dates) if dates else None
+            days = (today - last).days if last else None
+            if days is None or days > n_stale:
+                stale.append(dict(base(p), last_activity_on=last.isoformat() if last else None,
+                                  days_since_activity=days))
+        from datetime import date as _date
+        waiting.sort(key=lambda x: (not x["date_unreadable"],
+                                    _as_date(x["requested_on"]) or _date.min,
+                                    str(x["project_no"]), x["kind"] != "quote",
+                                    x["revision_index"] or 0))
+        sent_rows.sort(key=lambda x: (x["last_sent_on"], str(x["project_no"])))
+        stale.sort(key=lambda x: (x["days_since_activity"] is not None,
+                                  -(x["days_since_activity"] or 0), str(x["project_no"])))
+
+        def listed(rows, unit, basis):
+            sh = _shape(len(rows), unit, len(rows), {}, basis)
+            sh["rows"] = rows
+            return sh
+        w = listed(waiting, "quotes",
+                   f"quote requests and open revisions with no sent date, oldest "
+                   f"first; age in business days (Mon-Fri, no holidays); past the "
+                   f"SLA of {sla} business days is flagged")
+        w["past_sla"] = sum(1 for x in waiting if x["past_sla"])
+        s_ = listed(sent_rows, "projects",
+                    "pending projects with a quote sent, oldest last send first; "
+                    "flagged when no next_action_on lies in the future")
+        s_["no_follow_up"] = sum(1 for x in sent_rows if x["no_follow_up"])
+        st_ = listed(stale, "projects",
+                     f"pending projects with no activity (project date, quote dates, "
+                     f"or an edit) for more than {n_stale} days, or none dated at "
+                     f"all; a prompt to follow up or mark lost -- never changed here")
+        measured = sorted(_business_days(rq, se) for rq, se, has in pairs
+                          if has and rq and se)
+        no_req = sum(1 for rq, se, has in pairs if not has)
+        unread = sum(1 for rq, se, has in pairs if has and not (rq and se))
+        import statistics
+        exc = {}
+        if no_req:
+            exc["no_request_date"] = no_req
+        if unread:
+            exc["unparseable_date"] = unread
+        total = len(pairs)
+        turnaround = _shape(statistics.median(measured) if measured else None,
+                            "business_days", len(measured), exc,
+                            f"median business days from request to sent, over the "
+                            f"first send and every revision; measured on "
+                            f"{len(measured)} of {total} quotes; {no_req} "
+                            f"{'has' if no_req == 1 else 'have'} no request date")
+        won = sum(1 for p in self.projects if p.get("status") == "won")
+        lost = sum(1 for p in self.projects if p.get("status") == "lost")
+        undecided = len(self.projects) - won - lost
+        pending = sum(1 for p in self.projects if p.get("status") == "pending")
+        win = _shape(won / (won + lost) if won + lost else None, "ratio", won + lost,
+                     {"not_decided": undecided} if undecided else {},
+                     f"won / (won + lost) over decided projects only; {pending} "
+                     f"pending are undecided and many may be dead; lost projects "
+                     f"are rarely recorded ({lost} of {len(self.projects)})")
+        return {"as_of": today.isoformat(), "settings": cfg,
+                "waiting_to_send": w, "sent_awaiting_decision": s_,
+                "stale_pending": st_, "quote_turnaround_days": turnaround,
+                "win_rate": win}
 
     # ---- the CFO report (0.1.40) ----
     def cfo(self):
@@ -3246,7 +3511,11 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
     returned only when named -- is the weekly CFO report: cash, receivables,
     margin (quoted, realized and PO-costed, never merged) and expenses, each
     stating its snapshot as_of and window. Name one report or omit for the
-    rest. Read-only; nothing is persisted."""
+    rest. "quotes" -- also only when named -- is the quote pipeline: requests
+    waiting to be sent (flagged past the SLA), quotes sent and awaiting a
+    decision (flagged with no follow-up set), stale pending projects (listed,
+    never changed), the median turnaround in business days and the win rate
+    over decided projects. Read-only; nothing is persisted."""
     if report is not None and report not in METRIC_REPORTS:
         return _err(f"report must be one of {list(METRIC_REPORTS)} or omitted")
     ctx = _MetricsCtx()
@@ -3261,6 +3530,8 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
             reports[name] = ctx.qbo_drift()
         elif name == "cfo":
             reports[name] = ctx.cfo()
+        elif name == "quotes":
+            reports[name] = ctx.quotes()
         else:
             reports[name] = ctx.vendor_on_time()
     return {"ok": True, "interface_version": VERSION,
@@ -3508,6 +3779,34 @@ def link_qbo_vendor(company_id: str, qbo_vendor_name: str) -> dict:
             "vendor": get_vendor(vid).get("vendor")}
 
 
+@mcp.tool()
+def update_store_settings(fields: dict) -> dict:
+    """Change the store's own settings (settings.json in the store):
+    quote_sla_business_days (default 2) -- a quote request older than this is
+    flagged as past the SLA -- and stale_pending_days (default 60) -- a
+    pending project with no activity for longer is listed as stale. Whole
+    numbers in range only; logged like any other edit."""
+    try:
+        with STORE.write_lock():
+            if not isinstance(fields, dict) or not fields:
+                raise StoreError("fields must name at least one setting")
+            unknown = sorted(set(fields) - set(STORE_SETTINGS))
+            if unknown:
+                raise StoreError(f"unknown setting(s) {unknown}; the settings are "
+                                 f"{sorted(STORE_SETTINGS)}")
+            for k, v in fields.items():
+                _d, lo, hi = STORE_SETTINGS[k]
+                if type(v) is not int or not lo <= v <= hi:
+                    raise StoreError(f"{k} must be a whole number from {lo} to {hi}")
+            current = _store_settings()
+            current.update(fields)
+            STORE.save_side(SETTINGS_FILE, current)
+            STORE.log("update", "settings", "store", fields)
+            return {"ok": True, "interface_version": VERSION, "settings": current}
+    except StoreError as e:
+        return _err(e)
+
+
 # --------- writes (validated, atomic, logged) ---------
 
 
@@ -3560,6 +3859,7 @@ def update_project(project_no: str, fields: dict,
                     f"'{fields['company_id']}' -- moving this one there would "
                     f"give that customer the number twice, and nothing could "
                     f"then tell them apart. Rename one of them first.")
+            _check_quote_order(dict(target[0], **fields))
             target[0].update(fields)
             updates = {"projects": projects}
             moved_ship = moved_inv = 0
@@ -3585,7 +3885,8 @@ def update_project(project_no: str, fields: dict,
                 if moved_inv:
                     updates["invoices"] = invoices
             STORE.save_many(updates)
-            STORE.log("update", "project", want, fields)
+            STORE.log("update", "project", want, fields,
+                      company_id=target[0].get("company_id"))
             out = {"ok": True, "interface_version": VERSION, "project": target[0]}
             if new_cid != old_cid:
                 out["shipments_moved"] = moved_ship
@@ -4013,9 +4314,11 @@ def create_project(fields: dict) -> dict:
             record = {k: None for k in PROJECT_FIELDS}
             record.update({"owner": [], "annotations": [], "po_flag": False, "archived": False})
             record.update(fields)
+            _check_quote_order(record)
             projects.append(record)
             STORE.save("projects", projects)
-            STORE.log("create", "project", str(pn), fields)
+            STORE.log("create", "project", str(pn), fields,
+                      company_id=fields.get("company_id"))
             return {"ok": True, "interface_version": VERSION, "project": record}
     except StoreError as e:
         return _err(e)
