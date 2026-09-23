@@ -377,11 +377,17 @@ def run(server, crm_dir=None):
                 for p in plist),
             "a second margin definition invites the two-definitions defect")
     exp = cm.get("exposure_open_receivable_usd") or {}
-    r.check("acme exposure == 420000: 6 of 9 invoices, paid counted as 0",
-            exp.get("value") == 420000 and exp.get("counted") == 6
+    # 4521 carries five invoices (7001, 7002, 7006, 7008, 7009); before 0.1.37
+    # each open one was priced at the project's full $100,000 and the four of
+    # them read 370,000 -- the figure here was 420000 over 6. 4522's single
+    # invoice prices; the paid 7006 is a real 0.
+    r.check("acme exposure == 50000: 2 of 9 invoices, four excluded as split-billed, "
+            "paid counted as 0",
+            exp.get("value") == 50000 and exp.get("counted") == 2
             and exp.get("population") == 9
-            and exp.get("excluded") == {"no_project_link": 2, "no_revenue_on_project": 1},
-            str(exp)[:220])
+            and exp.get("excluded") == {"no_project_link": 2, "no_revenue_on_project": 1,
+                                        "multiple_invoices_on_project": 4},
+            str(exp)[:260])
     r.check("exposure basis says quoted and net of part-payments",
             "quoted" in str(exp.get("basis", "")).lower()
             and "part" in str(exp.get("basis", "")).lower(), str(exp.get("basis")))
@@ -400,12 +406,16 @@ def run(server, crm_dir=None):
     r.check("beta quoted_gross_profit_usd == 16000",
             _m(bc, "quoted_gross_profit_usd", "value") == 16000,
             str(bc.get("quoted_gross_profit_usd"))[:200])
-    r.check("beta exposure == 45000 with partial:50% read as half RECEIVED; a link "
-            "to ANOTHER customer's project is no link",
-            _m(bc, "exposure_open_receivable_usd", "value") == 45000
-            and _m(bc, "exposure_open_receivable_usd", "counted") == 4
-            and _m(bc, "exposure_open_receivable_usd", "excluded") == {"no_project_link": 2},
-            str(bc.get("exposure_open_receivable_usd"))[:200])
+    # 4523 carries 8001 and the paid 8003; 4526 carries 8002 and 8006. Only the
+    # paid one prices, as 0. (Was 45000 over 4 before 0.1.37; the part-payment
+    # arithmetic that figure carried is asserted on a one-invoice project below.)
+    r.check("beta exposure == 0 over 1 of 6: a link to ANOTHER customer's project is "
+            "no link, and both split-billed projects are excluded",
+            _m(bc, "exposure_open_receivable_usd", "value") == 0
+            and _m(bc, "exposure_open_receivable_usd", "counted") == 1
+            and _m(bc, "exposure_open_receivable_usd", "excluded")
+                == {"no_project_link": 2, "multiple_invoices_on_project": 3},
+            str(bc.get("exposure_open_receivable_usd"))[:240])
     r.check("beta oldest_overdue_days == 93",
             _m(bc, "oldest_overdue_days", "value") == 93,
             str(bc.get("oldest_overdue_days"))[:200])
@@ -465,6 +475,8 @@ def run(server, crm_dir=None):
         r.check(f"empty store: bucket {b} count 0 and amount null",
                 bk.get("count") == 0 and _m(bk, "amount_usd", "value") is None
                 and _m(bk, "amount_usd", "population") == 0, str(bk)[:160])
+    r.check("empty store: multiple_invoices == []",
+            _m(empty, "reports", "receivables_ageing", "multiple_invoices") == [])
     check_invariants(r, "crm_metrics(empty)", empty)
     s.rebind()
 
@@ -504,12 +516,18 @@ def run(server, crm_dir=None):
             age.get("population") == 15 and age.get("counted") == 11
             and age.get("excluded") == {"paid": 2, "no_date": 1, "unparseable_date": 1}
             and age.get("as_of") == "2026-09-01", str(age)[:260])
+    # Bucket COUNTS are invoice counts and did not move in 0.1.37. The amounts
+    # did: every invoice on 4521, 4523 and 4526 is on a split-billed project.
+    # Only 7003 (4522, not yet due) prices.
     bexp = {
-        "not_yet_due": (2, 80000, 2, {}),
-        "0-30": (4, 170000, 2, {"no_project_link": 2}),      # incl. due TODAY
-        "31-60": (2, 10000, 1, {"no_project_link": 1}),        # incl. exactly 60
-        "61-90": (1, 100000, 1, {}),
-        "90+": (2, 5000, 1, {"no_revenue_on_project": 1}),
+        "not_yet_due": (2, 50000, 1, {"multiple_invoices_on_project": 1}),
+        "0-30": (4, None, 0, {"no_project_link": 2,
+                              "multiple_invoices_on_project": 2}),   # incl. due TODAY
+        "31-60": (2, None, 0, {"no_project_link": 1,
+                               "multiple_invoices_on_project": 1}),  # incl. exactly 60
+        "61-90": (1, None, 0, {"multiple_invoices_on_project": 1}),
+        "90+": (2, None, 0, {"no_revenue_on_project": 1,
+                             "multiple_invoices_on_project": 1}),
     }
     for b, (cnt, amt, counted, exc) in bexp.items():
         bk = _m(age, "buckets", b) or {}
@@ -523,6 +541,13 @@ def run(server, crm_dir=None):
             sum((_m(age, "buckets", b) or {}).get("count", -99) for b in bexp) == 11)
     r.check("the top-level ageing value is the count aged (unit invoices)",
             age.get("value") == 11 and age.get("unit") == "invoices", str(age)[:120])
+    r.check("receivables_ageing lists the split-billed projects, per customer, and not "
+            "beta's dangling 4521",
+            age.get("multiple_invoices") == [
+                {"project_no": "4521", "company_id": "acme", "invoices": 5},
+                {"project_no": "4523", "company_id": "beta", "invoices": 2},
+                {"project_no": "4526", "company_id": "beta", "invoices": 2}],
+            str(age.get("multiple_invoices")))
 
     # ---- aggregate: vendor on-time ------------------------------------------
     r.section("crm_metrics: vendor_on_time")
@@ -741,6 +766,137 @@ def run(server, crm_dir=None):
             str(_m(bk, "amount_usd", "basis")))
     check_invariants(r, "get_company(split)", sp_co)
     check_invariants(r, "crm_metrics(split ageing)", sp_age)
+    r.check("receivables_ageing names the project: multiple_invoices == [5001 @ split, 2]",
+            _m(sp_age, "reports", "receivables_ageing", "multiple_invoices")
+            == [{"project_no": "5001", "company_id": "split", "invoices": 2}],
+            str(_m(sp_age, "reports", "receivables_ageing", "multiple_invoices")))
+
+    def expo(store, cid):
+        return _m(store.call("get_company", ref=cid), "company", "metrics",
+                  "exposure_open_receivable_usd") or {}
+    def is_(sh, value, counted, excluded):
+        return (sh.get("value") == value and sh.get("counted") == counted
+                and sh.get("excluded") == excluded)
+    P = lambda **kw: project("5001", "split", status="won", revenue=10000, **kw)  # noqa: E731
+    I = lambda no, **kw: invoice(no, "split", project_no="5001", invoice_date="2026-06-01", **kw)  # noqa: E731
+
+    sp.reset(companies=[company("split", "Split Co")], projects=[P()],
+             invoices=[I("6001", payment_status="open")])
+    r.check("one project, one invoice: priced at 10000, counted 1 (unchanged)",
+            is_(expo(sp, "split"), 10000, 1, {}), str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")], projects=[P()],
+             invoices=[I("6001", payment_status="partial:30%")])
+    r.check("one project, one invoice at partial:30%: 30% RECEIVED, 7000 outstanding",
+            is_(expo(sp, "split"), 7000, 1, {}), str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")], projects=[P()],
+             invoices=[I("6001", payment_status="paid"), I("6002", payment_status="paid")])
+    r.check("two invoices, both PAID: value 0, counted 2, no exclusion (the zero rule; "
+            "the check must run AFTER paid)",
+            is_(expo(sp, "split"), 0, 2, {}), str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")], projects=[P()],
+             invoices=[I("6001", payment_status="paid"), I("6002", payment_status="open")])
+    r.check("one paid, one open: the paid one counts as 0 (counted 1), the open one "
+            "is excluded multiple_invoices_on_project",
+            is_(expo(sp, "split"), 0, 1, {"multiple_invoices_on_project": 1}),
+            str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")], projects=[P()],
+             invoices=[I("6001", payment_status="open"), I("6002", payment_status="open"),
+                       I("6003", payment_status="open")])
+    r.check("three open invoices on one project: all three excluded (more than one, not "
+            "more than two)",
+            is_(expo(sp, "split"), None, 0, {"multiple_invoices_on_project": 3}),
+            str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")], projects=[P()],
+             invoices=[I("6001", payment_status="partial:50%"), I("6002", payment_status="open")])
+    r.check("partial:50% on one of two: it is not paid, so it is excluded like the other",
+            is_(expo(sp, "split"), None, 0, {"multiple_invoices_on_project": 2}),
+            str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co"), company("other", "Other Co")],
+             projects=[P(), project("5001", "other", status="won", revenue=2000)],
+             invoices=[I("6001", payment_status="open"),
+                       invoice("6002", "other", project_no="5001", payment_status="open",
+                               invoice_date="2026-06-01")])
+    r.check("same project_no at two DIFFERENT companies, one invoice each: neither excluded "
+            "(grouping is per company)",
+            is_(expo(sp, "split"), 10000, 1, {}) and is_(expo(sp, "other"), 2000, 1, {}),
+            f"split={expo(sp, 'split')} other={expo(sp, 'other')}"[:300])
+    sp.reset(companies=[company("split", "Split Co"), company("other", "Other Co")],
+             projects=[P(), project("5001", "other", status="won", revenue=2000)],
+             invoices=[I("6001", payment_status="open"),
+                       invoice("6001", "other", project_no="5001", payment_status="open",
+                               invoice_date="2026-06-01")])
+    r.check("same invoice_no at two companies on the same project_no string: neither excluded",
+            is_(expo(sp, "split"), 10000, 1, {}) and is_(expo(sp, "other"), 2000, 1, {}),
+            f"split={expo(sp, 'split')} other={expo(sp, 'other')}"[:300])
+    # _key() folds a FLOAT 1234.0 to "1234" (an integer emitted as a float by a
+    # JSON-RPC caller); the STRING "1234.0" is a different key by design
+    # (0.1.28: folding both sides merged an archived twin into a live one).
+    sp.reset(companies=[company("split", "Split Co")],
+             projects=[project("1234", "split", status="won", revenue=10000)],
+             invoices=[invoice("6001", "split", project_no=1234.0, payment_status="open",
+                               invoice_date="2026-06-01"),
+                       invoice("6002", "split", project_no="1234", payment_status="open",
+                               invoice_date="2026-06-01")])
+    r.check("project_no 1234.0 (float) on one invoice and \"1234\" on the other: the same "
+            "project, BOTH excluded",
+            is_(expo(sp, "split"), None, 0, {"multiple_invoices_on_project": 2}),
+            str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")],
+             projects=[project("1234", "split", status="won", revenue=10000)],
+             invoices=[invoice("6001", "split", project_no="1234.0", payment_status="open",
+                               invoice_date="2026-06-01"),
+                       invoice("6002", "split", project_no="1234", payment_status="open",
+                               invoice_date="2026-06-01")])
+    r.check("the STRING \"1234.0\" is not \"1234\": that invoice is no_project_link and the "
+            "other prices alone (0.1.28's asymmetry, kept)",
+            is_(expo(sp, "split"), 10000, 1, {"no_project_link": 1}),
+            str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")],
+             projects=[P()],
+             invoices=[invoice("6001", "split", project_no=" 5001 ", payment_status="open",
+                               invoice_date="2026-06-01"),
+                       I("6002", payment_status="open")])
+    r.check("a whitespace-padded \" 5001 \" is the same project: both excluded",
+            is_(expo(sp, "split"), None, 0, {"multiple_invoices_on_project": 2}),
+            str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")], projects=[P()],
+             invoices=[invoice("6001", "split", project_no=["5001"], payment_status="open",
+                               invoice_date="2026-06-01"),
+                       invoice("6002", "split", project_no={"n": "5001"}, payment_status="open",
+                               invoice_date="2026-06-01"),
+                       I("6003", payment_status="open")])
+    r.check("a list or dict project_no is no_project_link, never split, and nothing raises",
+            is_(expo(sp, "split"), 10000, 1, {"no_project_link": 2}),
+            str(expo(sp, "split"))[:200])
+    sp.reset(companies=[company("split", "Split Co")],
+             projects=[project("5001", "split", status="won", revenue=10000, archived=True)],
+             invoices=[I("6001", payment_status="open"), I("6002", payment_status="open")])
+    arch_co = sp.call("get_company", ref="split")
+    arch_age = sp.call("crm_metrics", report="receivables_ageing")
+    r.check("an archived project with two invoices: absent from every shape, no crash",
+            arch_co.get("ok") is True and arch_age.get("ok") is True
+            and is_(_m(arch_co, "company", "metrics", "exposure_open_receivable_usd") or {},
+                    None, 0, {})
+            and _m(arch_age, "reports", "receivables_ageing", "population") == 0
+            and _m(arch_age, "reports", "receivables_ageing", "multiple_invoices") == [],
+            f"co={_m(arch_co, 'company', 'metrics', 'exposure_open_receivable_usd')} "
+            f"age={str(_m(arch_age, 'reports', 'receivables_ageing'))[:120]}")
+    # A vendor PO number typed into project_no. PO and project numbers share
+    # one numeric range, so a mistyped PO can resolve to a real, unrelated
+    # project and make it look split-billed. It fails safe: excluded, not
+    # doubled, and the other project's own invoice is excluded with it.
+    sp.reset(companies=[company("split", "Split Co")],
+             projects=[P(), project("7770", "split", status="won", revenue=50000)],
+             shipments=[shipment("5001-L1", "5001", "split", vendor_po_raw="7770")],
+             invoices=[I("6001", payment_status="open"),
+                       invoice("6002", "split", project_no="7770", payment_status="open",
+                               invoice_date="2026-06-01"),
+                       invoice("6003", "split", project_no="7770", payment_status="open",
+                               invoice_date="2026-06-01")])
+    r.check("a vendor PO number typed as project_no resolves to the unrelated project 7770: "
+            "both its invoices are excluded, not priced at 50000 each",
+            is_(expo(sp, "split"), 10000, 1, {"multiple_invoices_on_project": 2}),
+            str(expo(sp, "split"))[:200])
     s.rebind()
 
     # ---- the vocabulary is closed and exported --------------------------------

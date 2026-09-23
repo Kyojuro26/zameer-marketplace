@@ -1270,7 +1270,7 @@ def _with_due_on(invoices):
 EXCLUSION_REASONS = (
     # money
     "no_project_link", "no_revenue_on_project", "no_cost_on_project", "paid",
-    "not_won", "no_won_revenue",
+    "not_won", "no_won_revenue", "multiple_invoices_on_project",
     # dates
     "no_date", "unparseable_date", "ship_before_project_date",
     # legs
@@ -1410,6 +1410,18 @@ class _MetricsCtx:
         self.inv_by_cid = {}
         for i in self.invoices:
             self.inv_by_cid.setdefault(_hk(i.get("company_id")), []).append(i)
+        # Live invoices per (project_no, company_id), keyed like proj_by_key.
+        # An invoice carries no amount of its own, so a project that carries
+        # more than one invoice has no per-invoice figure anywhere in the
+        # store; pricing each at the project's full revenue counted that
+        # revenue once per invoice (0.1.37). Counted once, here, over the same
+        # invoices every shape sums.
+        self.inv_count_by_proj = {}
+        for i in self.invoices:
+            pno = _key(i.get("project_no"))
+            if pno:
+                k = (pno, _hk(i.get("company_id")))
+                self.inv_count_by_proj[k] = self.inv_count_by_proj.get(k, 0) + 1
         self.today = _today()
 
     # ---- per-invoice ----
@@ -1427,15 +1439,33 @@ class _MetricsCtx:
             return None, "no_revenue_on_project"
         return amt, None
 
+    def split_billed(self, inv):
+        """True when the invoice's project carries more than one live invoice.
+        Keyed on (project_no, company_id) exactly as proj_by_key is, because
+        two customers can share a number and receivables_ageing() iterates
+        the whole store. An invoice that resolves to no project is not split
+        -- it is no_project_link, and invoice_amount() says so first."""
+        return self.inv_count_by_proj.get((_key(inv.get("project_no")),
+                                           _hk(inv.get("company_id"))), 0) > 1
+
     def outstanding(self, inv):
         """(usd, reason). "partial:30%" means 30% RECEIVED; the outstanding
         share is the remainder. A paid invoice owes 0 whether or not it is
-        priced -- that is a real zero, not a missing amount."""
+        priced -- that is a real zero, not a missing amount.
+
+        The checks run in this order, and each earlier one is a real answer
+        the later ones must not mask: paid is 0 even on a split-billed
+        project (excluding it would turn a fully paid customer's 0 into
+        null); then invoice_amount()'s own reasons; then a project carrying
+        more than one invoice is excluded rather than priced at the full
+        project revenue once per invoice. The split is never guessed."""
         if str(inv.get("payment_status") or "").startswith("paid"):
             return 0, None
         amt, why = self.invoice_amount(inv)
         if why:
             return None, why
+        if self.split_billed(inv):
+            return None, "multiple_invoices_on_project"
         pct = _pct_paid(inv.get("payment_status"))
         return (round(amt * (1 - pct)) if pct is not None else round(amt)), None
 
@@ -1529,7 +1559,9 @@ class _MetricsCtx:
             owed += v; owed_n += 1
         exposure = _shape(owed, "usd", owed_n, _tally(owed_exc),
                           "quoted revenue of the linked project, net of recorded "
-                          "part-payments; a paid invoice counts as 0")
+                          "part-payments; a paid invoice counts as 0; an invoice "
+                          "on a project that carries more than one invoice is "
+                          "excluded rather than priced at the full project revenue")
         oldest, old_n, old_exc = None, 0, []
         for i in invoices:
             d, why = self.days_late(i)
@@ -1603,13 +1635,24 @@ class _MetricsCtx:
             out[b] = {"count": len(buckets[b]),
                       "amount_usd": _shape(amt, "usd", n, _tally(a_exc),
                                            "outstanding on the invoices in this "
-                                           "bucket that can be priced",
+                                           "bucket that can be priced; an invoice "
+                                           "on a project that carries more than "
+                                           "one invoice is excluded rather than "
+                                           "priced at the full project revenue",
                                            as_of=as_of)}
         aged = sum(len(v) for v in buckets.values())
         sh = _shape(aged, "invoices", aged, _tally(exc),
                     "unpaid invoices with a readable effective due date, "
                     "bucketed by whole days past it", as_of=as_of)
         sh["buckets"] = out
+        # The projects behind every multiple_invoices_on_project exclusion, so
+        # the operator can find them without reading the tally. Read-only;
+        # never persisted, like everything else here.
+        sh["multiple_invoices"] = sorted(
+            ({"project_no": k[0], "company_id": k[1], "invoices": n}
+             for k, n in self.inv_count_by_proj.items()
+             if n > 1 and k in self.proj_by_key),
+            key=lambda x: (str(x["company_id"]), x["project_no"]))
         return sh
 
     def vendor_on_time(self):

@@ -77,6 +77,44 @@ M = [
   '            return 0, None\n'
   '        amt, why = self.invoice_amount(inv)',
   '        amt, why = self.invoice_amount(inv)'),
+ # ---- split-billed projects (0.1.37) -------------------------------------------
+ ("the multi-invoice check is removed: revenue priced once per invoice again",
+  '        if self.split_billed(inv):\n'
+  '            return None, "multiple_invoices_on_project"\n', ''),
+ ("more than one invoice is read as more than two (off by one)",
+  '                                           _hk(inv.get("company_id"))), 0) > 1',
+  '                                           _hk(inv.get("company_id"))), 0) > 2'),
+ ("the multi-invoice check runs BEFORE the paid short-circuit, nulling a paid customer",
+  '        if str(inv.get("payment_status") or "").startswith("paid"):\n'
+  '            return 0, None\n'
+  '        amt, why = self.invoice_amount(inv)\n'
+  '        if why:\n'
+  '            return None, why\n'
+  '        if self.split_billed(inv):\n'
+  '            return None, "multiple_invoices_on_project"\n',
+  '        if self.split_billed(inv):\n'
+  '            return None, "multiple_invoices_on_project"\n'
+  '        if str(inv.get("payment_status") or "").startswith("paid"):\n'
+  '            return 0, None\n'
+  '        amt, why = self.invoice_amount(inv)\n'
+  '        if why:\n'
+  '            return None, why\n'),
+ ("invoices are counted per project number alone, across customers",
+  '        return self.inv_count_by_proj.get((_key(inv.get("project_no")),\n'
+  '                                           _hk(inv.get("company_id"))), 0) > 1',
+  '        return sum(n for (k, _c), n in self.inv_count_by_proj.items()\n'
+  '                   if k == _key(inv.get("project_no"))) > 1'),
+ ("invoices are counted on the raw project_no, so 1234.0 and \"1234\" are two projects",
+  '            pno = _key(i.get("project_no"))\n'
+  '            if pno:\n'
+  '                k = (pno, _hk(i.get("company_id")))',
+  '            pno = _key(i.get("project_no"))\n'
+  '            if pno:\n'
+  '                k = (str(i.get("project_no")), _hk(i.get("company_id")))'),
+ ("the split-billed projects list is dropped from receivables_ageing",
+  '        sh["multiple_invoices"] = sorted(',
+  '        sh["multiple_invoices"] = []; _unused = sorted('),
+
  ("pending projects count toward won revenue",
   '            if p.get("status") != "won":\n'
   '                exc.append("not_won"); continue\n'
