@@ -16,4 +16,13 @@ function drive(htmlPath, steps) {
   return JSON.parse(out);
 }
 
-module.exports = { drive };
+/** The same, against a live URL (a local_server.py started by the test). */
+function driveUrl(url, steps) {
+  const out = execFileSync('python3', [path.join(__dirname, 'browser_drive.py')], {
+    input: JSON.stringify({ url, steps }),
+    encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 180000,
+  });
+  return JSON.parse(out);
+}
+
+module.exports = { drive, driveUrl };
