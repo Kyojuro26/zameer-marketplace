@@ -39,7 +39,11 @@ function seedStore(dir) {
       revenue: 2000, archived: false },
     // exactly TWO invoices, both open: "more than one" must not mean "more than two"
     { company_id: 'split', project_no: '5003', status: 'won', year: 2026,
-      revenue: 4000, archived: false }]);
+      revenue: 4000, archived: false },
+    // two invoices AND no revenue: the server says no_revenue_on_project, which
+    // comes before the split check -- the rows and footer must say the same
+    { company_id: 'split', project_no: '5004', status: 'won', year: 2026,
+      revenue: null, archived: false }]);
   // every invoice_date is 2026-06-01: due 2026-07-01, overdue on any day this
   // suite will run, so the Overdue bucket the view opens on holds them all
   w('invoices', [
@@ -56,6 +60,10 @@ function seedStore(dir) {
     { company_id: 'split', invoice_no: '6006', project_no: '5003',
       payment_status: 'open', invoice_date: '2026-06-01' },
     { company_id: 'split', invoice_no: '6007', project_no: '5003',
+      payment_status: 'open', invoice_date: '2026-06-01' },
+    { company_id: 'split', invoice_no: '6008', project_no: '5004',
+      payment_status: 'open', invoice_date: '2026-06-01' },
+    { company_id: 'split', invoice_no: '6009', project_no: '5004',
       payment_status: 'open', invoice_date: '2026-06-01' }]);
   w('contacts', []); w('shipments', []); w('vendors', []); w('needs_review', []);
   return dir;
@@ -98,10 +106,17 @@ async function run(crmDir) {
 
   const rows = got.rows || [];
   const byInv = Object.fromEntries(rows.map(x => [x.inv, x]));
-  r.check('the Overdue bucket shows the six open invoices',
+  r.check('the Overdue bucket shows the eight open invoices',
     JSON.stringify(rows.map(x => x.inv).sort())
-      === JSON.stringify(['6001', '6002', '6004', '6005', '6006', '6007']),
+      === JSON.stringify(['6001', '6002', '6004', '6005', '6006', '6007', '6008', '6009']),
     JSON.stringify(rows.map(x => x.inv)));
+  const noRev = ['6008', '6009'].map(k => byInv[k] || {});
+  r.check("two invoices on a project with NO revenue are 'no amount', not split-billed, as the "
+          + "server orders its reasons",
+    noRev.every(x => dollars(x.owed) === null && !/more than one invoice/.test(x.owed)
+                     && /no revenue/.test(x.title)),
+    noRev.map(x => JSON.stringify(x.owed + ' | ' + x.title)).join(' / ')
+    + ' -- the header counts them under no revenue on project; the rows must not count them under split');
   const splitRows = ['6001', '6002', '6006', '6007'].map(k => byInv[k] || {});
   r.check('the four rows on the two split-billed projects render NO dollar figure',
     splitRows.every(x => x.owed && dollars(x.owed) === null),
@@ -127,18 +142,20 @@ async function run(crmDir) {
     headerValue !== null && rowSum === headerValue,
     `rows sum to ${rowSum}; header reads ${JSON.stringify(got.header)}`);
   const led = JSON.parse(got.ledger || 'null') || {};
-  r.check("the header figure is the server's shape: 5000 over 3 of 7, four excluded as split-billed",
-    headerValue === 5000 && led.value === 5000 && led.counted === 3 && led.population === 7
-      && JSON.stringify(led.excluded) === JSON.stringify({ multiple_invoices_on_project: 4 }),
+  r.check("the header figure is the server's shape: 5000 over 3 of 9, four split-billed, two no revenue",
+    headerValue === 5000 && led.value === 5000 && led.counted === 3 && led.population === 9
+      && led.excluded.multiple_invoices_on_project === 4 && led.excluded.no_revenue_on_project === 2,
     JSON.stringify(led));
-  r.check('the header names the exclusion in words',
-    /3 of 7 invoices priced/.test(got.header) && /4 on a project with more than one invoice/.test(got.header),
+  r.check('the header names the exclusions in words',
+    /3 of 9 invoices priced/.test(got.header) && /4 on a project with more than one invoice/.test(got.header)
+      && /2 no revenue on project/.test(got.header),
     JSON.stringify(got.header));
-  r.check('the tile carries the same figure and denominator', /5,000/.test(got.tile) && /3 of 7 invoices priced/i.test(got.tile),
+  r.check('the tile carries the same figure and denominator', /5,000/.test(got.tile) && /3 of 9 invoices priced/i.test(got.tile),
     JSON.stringify((got.tile || '').replace(/\s+/g, ' ').slice(0, 240)));
-  r.check('the table footer totals $5,000 and names the four split-billed rows it excludes',
+  r.check('the table footer totals $5,000 and names its exclusions BY REASON as the header does: '
+          + '4 split-billed, 2 with no amount',
     dollars(got.footer) === 5000 && /excludes 4 invoices on a project with more than one invoice/.test(got.footer)
-      && !/no amount on file/.test(got.footer),
+      && /excludes 2 invoices with no amount on file/.test(got.footer),
     JSON.stringify(got.footer));
 
   // The paid invoice on the split-billed project is a real $0, as the server

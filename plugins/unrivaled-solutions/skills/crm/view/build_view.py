@@ -964,7 +964,7 @@ function renderReceivables(){
   const known = rows.filter(r => r.owed != null);
   // two reasons a row has no figure, named apart: an invoice on a split-billed
   // project is linked and priced by nobody; an unlinked one has no amount at all
-  const split = rows.filter(r => r.owed == null && splitBilled(r.v)).length;
+  const split = rows.filter(r => r.owed == null && noAmountKey(r.v) === 'split').length;
   const unknown = rows.length - known.length - split;
   const total = known.reduce((a,r)=>a+r.owed,0);
 
@@ -1011,7 +1011,7 @@ function renderReceivables(){
         : r.late > 0 ? `<b style="color:var(--amber)">${r.late}d</b>`
         : '<span class="muted">—</span>');
     const owedCell = r.owed == null
-      ? `<span class="muted" title="${esc(noAmountReason(v))}">—${splitBilled(v)
+      ? `<span class="muted" title="${esc(noAmountReason(v))}">—${noAmountKey(v) === 'split'
           ? ' <span style="font-size:11px">more than one invoice on this project</span>' : ''}</span>`
       : `<b>${money(r.owed)}</b>`;
     return `<tr class="click" onclick="select('${jesc(v.company_id)}')">
@@ -1044,7 +1044,7 @@ function renderReceivablesList(){
     const v=r.v, co=companyById[v.company_id];
     return `<div class="citem" onclick="select('${jesc(v.company_id)}')">
       <div class="cn">${esc(st(v.invoice_no)||'—')} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
-      <div class="cm"><span>${r.owed==null?(splitBilled(v)?'more than one invoice on project':'no amount'):money(r.owed)}</span>${
+      <div class="cm"><span>${r.owed==null?(noAmountKey(v)==='split'?'more than one invoice on project':'no amount'):money(r.owed)}</span>${
         r.late?`<span>· ${r.late}d late</span>`:''}</div>
     </div>`;
   }).join('') || '<div class="muted" style="padding:14px">Nothing here.</div>';
@@ -2028,9 +2028,20 @@ function splitBilled(v){
    split-billed project IS linked correctly; calling it "no amount on file"
    sends him back to re-link invoices that are already right. */
 function noAmountReason(v){
-  if(invoiceAmount(v) == null) return 'no project linked, or no revenue on it, so no amount on file';
-  if(splitBilled(v)) return 'linked correctly, but the project carries more than one invoice and no per-invoice amount exists yet';
-  return '';
+  const k = noAmountKey(v);
+  return k === 'no_amount' ? 'no project linked, or no revenue on it, so no amount on file'
+       : k === 'split' ? 'linked correctly, but the project carries more than one invoice and no per-invoice amount exists yet'
+       : '';
+}
+/* Which reason, in the SERVER's order: no amount on the project comes before
+   the split check there (no_project_link / no_revenue_on_project, then
+   multiple_invoices_on_project), so a two-invoice project with no revenue is
+   "no amount", not "split", in the row and the footer as in the header. One
+   answer for the cell, the footer and the sidebar, or they disagree. */
+function noAmountKey(v){
+  if(invoiceAmount(v) == null) return 'no_amount';
+  if(splitBilled(v)) return 'split';
+  return null;
 }
 
 /* An exclusion reason as the operator reads it. Most read fine with the
