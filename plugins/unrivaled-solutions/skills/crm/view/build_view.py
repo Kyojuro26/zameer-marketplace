@@ -282,6 +282,7 @@ TEMPLATE = r"""<!DOCTYPE html>
         <button data-f="lead">Leads<span class="fcount" id="fc_lead"></span></button>
         <button data-f="project">Projects<span class="fcount" id="fc_project"></span></button>
           <button data-f="receivable">Receivables<span class="fcount" id="fc_receivable"></span></button>
+          <button data-f="cfo">CFO</button>
       </div>
       <div class="subfilters" id="subfilters">
         <div class="sfrow" id="sf_status"><span class="sfl">Status</span></div>
@@ -785,7 +786,7 @@ function opts(list, current){
 }
 
 function companyMatches(c){
-  if(filter!=='all' && c.role!==filter) return false;
+  if(filter!=='all' && filter!=='cfo' && c.role!==filter) return false;
   if(!query) return true;
   const q=query.toLowerCase();
   if(sv(c.display_name).includes(q)) return true;
@@ -2042,6 +2043,114 @@ function showWarnings(r){
   const w = (r && r.warnings) || [];
   if(w.length) noticeToast(w.map(x => x.message || x.code).join(' \u00b7 '));
 }
+/* ------------------------------------------------------------- CFO page --
+   crm_metrics(report="cfo") -- cash, receivables, margin, expenses -- is the
+   SERVER's report; this page only renders it. Every figure is a shape: a null
+   one shows its reason in words or what to load, never $0. Embedded at build
+   time, and re-read from the server whenever the tab is opened live. */
+async function loadCfo(){
+  if(CRM.mode === 'embedded') return;
+  let r;
+  try{ r = await CRM.call('crm_metrics', {report:'cfo'}); }
+  catch(e){ r = null; }
+  if(r && r.ok && r.reports && r.reports.cfo) DATA.cfo = r.reports.cfo;
+  if(filter === 'cfo') renderMain();
+}
+function cfoWhy(sh, load, unit){
+  if(!sh) return esc(load || 'needs the server');
+  const ex = Object.keys(sh.excluded||{});
+  // `unit` names what the counts are ("80 jobs: bills not linkable from
+  // export"), where a bare "80 bills not linkable" would misread the count
+  const n = (k) => unit ? `${sh.excluded[k]} ${sh.excluded[k] === 1 ? unit : unit + 's'}:` : `${sh.excluded[k]}`;
+  if(ex.length) return ex.map(k => `${n(k)} ${esc(reasonLabel(k))}`).join(' \u00b7 ');
+  return esc(load || 'nothing to count');
+}
+function cfoMoney(sh, load){
+  return (sh && sh.value_cents != null) ? moneyCents(sh.value_cents)
+    : `<span class="muted">${cfoWhy(sh, load)}</span>`;
+}
+function cfoMeta(m){
+  if(!m || !m.loaded) return '';
+  return `<span class="muted" style="font-size:12px"> \u00b7 as of ${esc(fmtDate(m.snapshot_as_of))}, window ${esc(fmtDate(m.window_start))} \u2013 ${esc(fmtDate(m.window_end))}</span>`
+    + (m.stale ? ` <b class="badge" style="color:var(--red)">stale \u00b7 ${m.age_days} days old</b>` : '');
+}
+function renderCfo(){
+  const c = DATA.cfo;
+  if(!c) return `<div class="co-head"><h1>CFO</h1></div><div class="empty">The CFO report needs the server.</div>`;
+  const t = c.tiles || {}, cash = c.cash || {}, rec = c.receivables || {}, m = c.margin || {}, e = c.expenses || {};
+  const cov = t.realized_margin_coverage || {};
+  const tile = (id, label, body) => `<div class="kpi" id="${id}" style="min-width:180px"><div class="k">${label}</div><div class="v" style="font-size:15px">${body}</div></div>`;
+  let h = `<div class="co-head"><h1>CFO</h1><span class="muted">as of ${esc(fmtDate(c.as_of))}</span></div>`;
+  h += `<div style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 16px">`
+    + tile('cfo-tile-cash', 'Cash in the bank', cfoMoney(t.cash_usd, cash.load))
+    + tile('cfo-tile-open', 'Open receivable (QuickBooks)', cfoMoney(t.open_receivable_usd, rec.load))
+    + tile('cfo-tile-coverage', 'Realized margin coverage',
+           `${cov.counted||0} of ${cov.population||0} jobs` + (cov.counted ? '' : `<div class="muted" style="font-size:11px">${cfoWhy(cov, m.load, 'job')}</div>`))
+    + tile('cfo-tile-spend', 'Spend in the window', cfoMoney(t.window_spend_usd, e.load))
+    + `</div>`;
+  // 1. cash
+  h += `<div class="section"><h2>Cash${cfoMeta(cash)}</h2>`;
+  if(!cash.loaded) h += `<p class="muted">${esc(cash.load)}</p>`;
+  else {
+    h += `<table><thead><tr><th>Account</th><th>Type</th><th class="num">Balance</th></tr></thead><tbody>`
+      + (cash.accounts||[]).map(a => `<tr><td>${esc(a.account)}</td><td class="muted">${esc(a.account_type||'no type')}</td><td class="num">${cfoMoney(a.balance_usd)}</td></tr>`).join('')
+      + `</tbody></table><p>Banks ${cfoMoney(cash.bank_total_usd)} \u00b7 credit cards ${cfoMoney(cash.card_total_usd)}</p>`;
+  }
+  const ei = cash.expected_in || {};
+  h += `<p>Expected in (QuickBooks open balance by due date): overdue ${cfoMoney(ei.overdue_usd, ei.load)} \u00b7 next 7 days ${cfoMoney(ei.next_7_days_usd, ei.load)} \u00b7 8\u201330 days ${cfoMoney(ei.next_8_to_30_days_usd, ei.load)}</p>`;
+  h += `<p>Committed out (open POs not yet billed): ${cfoMoney(cash.committed_out_usd, cash.committed_out_load)}${
+    (cash.committed_out_usd||{}).value_cents == null && (cash.committed_out_usd||{}).population ? ' \u2014 not computable from exports' : ''}</p></div>`;
+  // 2. receivables
+  h += `<div class="section"><h2>Receivables${cfoMeta(rec)}</h2>`;
+  if(!rec.loaded) h += `<p class="muted">${esc(rec.load)}</p>`;
+  else {
+    const b = rec.buckets || {};
+    h += `<p>Open in QuickBooks ${cfoMoney(rec.open_usd)}</p><table><thead><tr>`
+      + Object.keys(b).map(k => `<th class="num">${esc(k.replace(/_/g,' '))}</th>`).join('') + `</tr></thead><tbody><tr>`
+      + Object.keys(b).map(k => `<td class="num">${cfoMoney(b[k])}</td>`).join('') + `</tr></tbody></table>`;
+    h += `<h3 style="font-size:13px">Who owes the most</h3><table><tbody>`
+      + (rec.who_owes_most||[]).slice(0, 15).map(w => `<tr><td>${esc(w.name||'(no name)')}${w.company_id ? '' : ' <span class="muted">(no CRM company)</span>'}</td><td class="num">${cfoMoney(w.open_usd)}</td></tr>`).join('')
+      + `</tbody></table>`;
+    const d = rec.drift || {};
+    h += `<p class="muted">In QuickBooks, not in the CRM: ${d.count||0} invoice${d.count===1?'':'s'}, ${cfoMoney(d)}</p>`;
+  }
+  h += `</div>`;
+  // 3. margin -- three figures per job, never merged
+  h += `<div class="section"><h2>Margin${cfoMeta(m)}</h2>`;
+  if(!m.loaded) h += `<p class="muted">${esc(m.load)}</p>`;
+  else {
+    const at = m.cogs_attribution || {};
+    h += `<table><thead><tr><th>Job</th><th class="num">Quoted</th><th class="num">PO-costed: excludes costs paid directly as expenses, so it overstates margin</th><th class="num">Realized</th></tr></thead><tbody>`
+      + (m.jobs||[]).map(j => {
+          const jb = j.job || {};
+          const name = jb.kind === 'project' ? `Project ${esc(st(jb.project_no))}` : `Invoice ${esc(st(jb.invoice_no))}`;
+          const q = j.quoted_margin_usd || {};
+          return `<tr><td>${name} <span class="muted">${esc((companyById[jb.company_id]||{}).display_name||st(jb.company_id))}</span></td>`
+            + `<td class="num">${q.value != null ? money(q.value) : `<span class="muted">${cfoWhy(q)}</span>`}</td>`
+            + `<td class="num">${cfoMoney(j.po_costed_margin_usd)}</td><td class="num">${cfoMoney(j.realized_margin_usd)}</td></tr>`;
+        }).join('')
+      + `</tbody></table>`;
+    h += `<p class="muted" style="font-size:12px">${esc((m.realized_margin_usd||{}).basis||'')}</p>`
+      + `<p class="muted" style="font-size:12px">${esc((m.po_costed_margin_usd||{}).basis||'')}</p>`
+      + `<p>Window COGS ${cfoMoney(at.cogs_usd)} \u00b7 attributed ${cfoMoney(at.attributed_usd)} \u00b7 unattributed ${cfoMoney(at.unattributed_usd)}</p>`;
+  }
+  h += `</div>`;
+  // 4. expenses
+  h += `<div class="section"><h2>Expenses${cfoMeta(e)}</h2>`;
+  if(!e.loaded) h += `<p class="muted">${esc(e.load)}</p>`;
+  else {
+    for(const [key, label] of [['window','The snapshot window'], ['last_30_days','Its last 30 days']]){
+      const x = e[key] || {};
+      h += `<h3 style="font-size:13px">${label}</h3><p>COGS ${cfoMoney(x.cogs_usd)} \u00b7 overhead ${cfoMoney(x.overhead_usd)} \u00b7 split across several accounts ${cfoMoney(x.split_usd)}</p>`
+        + `<table><thead><tr><th>Account</th><th class="num">Spend</th></tr></thead><tbody>`
+        + (x.by_split_account||[]).slice(0, 15).map(a => `<tr><td>${a.account == null ? '<i>Split across several accounts</i>' : esc(a.account)}</td><td class="num">${cfoMoney(a.amount_usd)}</td></tr>`).join('')
+        + `</tbody></table><table><thead><tr><th>Vendor (as QuickBooks names it)</th><th class="num">Spend</th></tr></thead><tbody>`
+        + (x.by_vendor||[]).slice(0, 15).map(v => `<tr><td>${esc(v.vendor||'(no name)')}</td><td class="num">${cfoMoney(v.amount_usd)}</td></tr>`).join('')
+        + `</tbody></table>`;
+    }
+  }
+  return h + `</div>`;
+}
 /* After any successful WRITE the shapes on DATA.companies are stale: the
    server computed them before the edit, and the edit was applied to DATA
    locally. Re-read them from list_companies, copying ONLY `metrics` onto the
@@ -2254,6 +2363,10 @@ function statusBadge(s){ s=st(s).toLowerCase(); const cls={won:'b-won',pending:'
 function renderMain(){
   if(filter === 'live'){
     document.getElementById('main').innerHTML = renderLiveMain();
+    return;
+  }
+  if(filter === 'cfo'){
+    document.getElementById('main').innerHTML = renderCfo();
     return;
   }
   if(filter === 'receivable'){
@@ -3706,13 +3819,15 @@ function setFilter(f){
   const isProj = (f === 'project');
   const isRecv = (f === 'receivable');
   const isLive = (f === 'live');
+  const isCfo = (f === 'cfo');
   // both cross-company views own the sub-filter row and neither wants the
   // "+ Add customer/vendor/lead" buttons, which act on the company list
   if(sf) sf.style.display = (isProj || isRecv) ? 'flex' : 'none';
-  if(add) add.style.display = (isProj || isRecv || isLive) ? 'none' : 'flex';
+  if(add) add.style.display = (isProj || isRecv || isLive || isCfo) ? 'none' : 'flex';
   if(isProj || isRecv) renderSubfilters();
   renderList();
-  if(isProj || isRecv || isLive) renderMain();
+  if(isCfo) loadCfo();
+  if(isProj || isRecv || isLive || isCfo) renderMain();
   else if(selected) renderMain();
   else document.getElementById('main').innerHTML =
     '<div class="empty">Select a company to begin. <button class="pill-btn" onclick="setFilter(\'live\')">Show Live projects</button></div>';
@@ -3817,6 +3932,8 @@ def _attach_metrics(data, store_dir):
         ctx = _srv._MetricsCtx()
         data["companies"] = [dict(c, metrics=ctx.company_metrics(c))
                              for c in data["companies"]]
+        # the CFO report, from the same builder -- re-read live when the tab opens
+        data["cfo"] = ctx.cfo()
     except Exception as ex:                                       # noqa: BLE001
         print(f"WARNING: metrics not embedded ({type(ex).__name__}: {ex}) -- "
               f"the receivables tile will say it needs the server", file=sys.stderr)

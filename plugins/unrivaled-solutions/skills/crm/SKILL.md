@@ -76,6 +76,24 @@ Use the read tools; they are side-effect-free:
   quoted `exposure_open_receivable_usd` — name each for what it is, never add
   them together. `crm_metrics(report="qbo_drift")` lists what QuickBooks and
   the CRM disagree on.
+- **The weekly CFO review** ("how are we doing", "cash position", "the CFO
+  numbers"):
+  1. Get a current snapshot. With the Intuit QuickBooks connector available
+     in this chat, read invoices, vendor transactions and account balances
+     and pass them to `load_qbo_rows` in the schema in interface-v0.1.md.
+     Otherwise ask the operator to export Invoice List by Date and
+     Transaction List by Vendor and call `load_qbo_export` on each.
+     `qbo_snapshot_info` says what is loaded and how old it is.
+  2. Call `crm_metrics(report="cfo")`.
+  3. Summarise each figure WITH its basis and coverage: cash (only from the
+     connector; say plainly when it is not loaded), what is expected in and
+     committed out, receivables and who owes most, the three margins named
+     apart (quoted; PO-costed, which excludes costs paid directly as expenses
+     and so overstates margin; realized, with how many jobs it covers and
+     what share of COGS it could attribute), and spend. A null figure is
+     "not computable" with its reason, never zero.
+  The connector field mapping is PROVISIONAL until the connector's real
+  output has been checked against it.
 - "Which customers are also vendors?" → `suggest_entity_links`. It lists
   customers whose name is also a QuickBooks vendor's (from the loaded vendor
   export) and says whether a CRM vendor record exists. It changes nothing: to

@@ -1808,13 +1808,20 @@ EXCLUSION_REASONS = (
     # QuickBooks snapshot joins (0.1.38)
     "no_qbo_snapshot", "ambiguous_qbo_match", "outside_snapshot_window",
     "not_in_qbo_snapshot", "qbo_match_shared", "partial_qbo_match",
+    # the CFO report's margin and cash (0.1.40)
+    "no_qbo_invoice", "cost_incomplete", "cost_not_billed_yet",
+    "bills_not_linkable_from_export", "po_status_unknown", "po_not_resolved",
+    "no_po_on_job",
 )
 # A leg in one of these stages has left the vendor. The importer sets Shipped
 # exactly when a ship date exists; Delivered and Installed are later states of
 # the same fact. Ordered and On Hold have not shipped; Cancelled never will.
 SHIPPED_STAGES = {"Shipped", "Delivered", "Installed"}
 METRIC_REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time",
-                  "qbo_drift")
+                  "qbo_drift", "cfo")
+# "cfo" composes the QuickBooks figures into one report and repeats qbo_drift;
+# it is returned only when named
+DEFAULT_METRIC_REPORTS = tuple(r_ for r_ in METRIC_REPORTS if r_ != "cfo")
 AGE_BUCKETS = ("not_yet_due", "0-30", "31-60", "61-90", "90+")
 
 
@@ -1903,6 +1910,55 @@ def _pct_paid(payment_status):
         return None
     p = float(m.group(1))
     return p / 100 if 0 <= p <= 100 else None
+
+
+# ---------------------------------------------------------------- CFO (0.1.40)
+QBO_BILL_PAYMENT_TYPES = ("Bill Payment (Check)", "Bill Payment (Credit Card)")
+# The Transaction List signs each Amount from the PAYMENT side (its "Account
+# full name"), measured on the real export: every Bill positive (A/P grows),
+# every Expense and Check negative (the bank shrinks). A cost is therefore the
+# Amount on an A/P-side row and minus the Amount on a bank- or card-side row;
+# a Vendor Credit (A/P shrinks) and a Deposit (money back) come out as
+# negative cost. A type not listed here is left out of spend and named --
+# never given a guessed sign.
+QBO_COST_SIGN = {"Bill": 1, "Vendor Credit": 1,
+                 "Expense": -1, "Check": -1, "Tax Payment": -1, "Deposit": -1}
+CASH_LOAD_HINT = ("no cash balances are loaded. They come only from the "
+                  "QuickBooks connector (ask Claude to read your account "
+                  "balances) or, later, a Balance Sheet export -- no such "
+                  "export exists yet")
+INVOICES_LOAD_HINT = ("no QuickBooks invoices are loaded: export Invoice List "
+                      "by Date and load it")
+VENDOR_LOAD_HINT = ("no QuickBooks vendor transactions are loaded: export "
+                    "Transaction List by Vendor and load it")
+PO_COSTED_WORDS = ("PO-costed: excludes costs paid directly as expenses, so it "
+                   "overstates margin")
+
+
+def _cents_shape(cents, unit, counted, excluded, basis):
+    """A money shape in dollars with exact integer cents beside it."""
+    sh = _shape(cents / 100 if unit == "usd" else cents, unit, counted, excluded, basis)
+    if unit == "usd":
+        sh["value_cents"] = cents if counted else None
+    return sh
+
+
+def _money_text(cents):
+    return f"{'-' if cents < 0 else ''}${abs(cents) / 100:,.2f}"
+
+
+def _is_cogs(split):
+    return isinstance(split, str) and "cost of goods sold" in split.lower()
+
+
+def _snap_meta(doc, today):
+    if not doc:
+        return {"loaded": False}
+    age = (today - _iso_date(doc["as_of"])).days
+    return {"loaded": True, "source": doc.get("source"),
+            "snapshot_as_of": doc["as_of"], "window_start": doc["window_start"],
+            "window_end": doc["window_end"], "age_days": age,
+            "stale": age > QBO_STALE_DAYS}
 
 
 class _MetricsCtx:
@@ -2131,6 +2187,425 @@ class _MetricsCtx:
              if len(v) > 1), key=lambda x: x["num"])
         sh["invoiced_usd"], sh["qbo_open_receivable_usd"] = invoiced, qbo_open
         return sh
+
+    # ---- the CFO report (0.1.40) ----
+    def cfo(self):
+        snaps, errors = {}, {}
+        for k in ("vendor_transactions", "cash_balances"):
+            try:
+                snaps[k] = _load_qbo_snapshot(k)
+            except StoreError as e:
+                snaps[k], errors[k] = None, str(e)
+        vt, cb = snaps["vendor_transactions"], snaps["cash_balances"]
+        spend, pos, bills, other = self._cfo_vendor_rows(vt)
+        margin = self._cfo_margin(vt, spend, pos, bills)
+        cash = self._cfo_cash(cb, pos, vt)
+        receivables = self._cfo_receivables()
+        expenses = self._cfo_expenses(vt, spend)
+        expenses["other_types"] = other
+        realized = margin["realized_margin_usd"]
+        cov = _shape(realized["counted"] / realized["population"]
+                     if realized["counted"] else None, "ratio", realized["counted"],
+                     realized["excluded"],
+                     "share of invoiced jobs with a realized margin figure: "
+                     + realized["basis"])
+        tiles = {"cash_usd": cash["bank_total_usd"],
+                 "open_receivable_usd": receivables["open_usd"],
+                 "realized_margin_coverage": cov,
+                 "window_spend_usd": expenses["window"]["total_usd"]}
+        snapshots = {"invoices": _snap_meta(self.qbo, self.today),
+                     "vendor_transactions": _snap_meta(vt, self.today),
+                     "cash_balances": _snap_meta(cb, self.today)}
+        if self.qbo_error:
+            errors["invoices"] = self.qbo_error
+        out = {"as_of": self.today.isoformat(), "snapshots": snapshots,
+               "tiles": tiles, "cash": cash, "receivables": receivables,
+               "margin": margin, "expenses": expenses}
+        if errors:
+            out["snapshot_errors"] = errors
+        return out
+
+    def _cfo_vendor_rows(self, vt):
+        """(spend rows, POs by number, bills by linked PO number, other types).
+        Spend is the posting rows with an amount, each carrying cost_cents by
+        QBO_COST_SIGN -- a bill payment settles a bill already counted, so it
+        is not spend twice."""
+        spend, pos, bills, other = [], {}, {}, {}
+        for r_ in (vt or {}).get("rows", []):
+            t = r_.get("type")
+            if t == "Purchase Order":
+                k = _key(r_.get("num"))
+                if k:
+                    po = pos.setdefault(k, {"amount_cents": 0, "vendors": set(),
+                                            "status": set()})
+                    if type(r_.get("amount_cents")) is int:
+                        po["amount_cents"] += r_["amount_cents"]
+                    po["vendors"].add(r_.get("vendor"))
+                    po["status"].add(r_.get("open_status"))
+                continue
+            if r_.get("posting") is not True or type(r_.get("amount_cents")) is not int \
+                    or t in QBO_BILL_PAYMENT_TYPES:
+                continue
+            if t not in QBO_COST_SIGN:
+                other[t] = other.get(t, 0) + 1
+                continue
+            row = dict(r_, cost_cents=QBO_COST_SIGN[t] * r_["amount_cents"])
+            spend.append(row)
+            if t == "Bill" and row.get("linked_po"):
+                bills.setdefault(_key(row.get("linked_po")), []).append(row)
+        return spend, pos, bills, other
+
+    def _cfo_jobs(self):
+        """{job key: {"kind","key","project_no"|"invoice_no","company_id",
+        "invoices": [...], "legs": [...]}} -- invoiced jobs dated in the
+        QuickBooks invoice window (or matched there). A job is the leg's
+        project when it has one, else its invoice on (number, company_id); a
+        project's invoices roll up to it."""
+        IN = (None, "not_in_qbo_snapshot", "ambiguous_qbo_match",
+              "qbo_match_shared", "partial_qbo_match")
+
+        def key_of(pno, inv_no, cid):
+            if _key(pno):
+                return ("project", _key(pno), cid)
+            if _key(inv_no):
+                return ("invoice", _key(inv_no), cid)
+            return None
+        jobs = {}
+        for i in self.invoices:
+            if self.qbo_match(i)[1] not in IN:
+                continue
+            k = key_of(i.get("project_no"), i.get("invoice_no"), _hk(i.get("company_id")))
+            if not k:
+                continue
+            j = jobs.setdefault(k, {"kind": k[0], "key": f"{k[0]}:{k[1]}:{k[2]}",
+                                    "company_id": i.get("company_id"),
+                                    "invoices": [], "legs": []})
+            j["project_no" if k[0] == "project" else "invoice_no"] = \
+                i.get("project_no") if k[0] == "project" else i.get("invoice_no")
+            j["invoices"].append(i)
+        for s_ in self.shipments:
+            k = key_of(s_.get("project_no"), s_.get("invoice_no"), _hk(s_.get("company_id")))
+            if k in jobs:
+                jobs[k]["legs"].append(s_)
+        return jobs
+
+    def _cfo_margin(self, vt, spend, pos, bills):
+        jobs = self._cfo_jobs()
+        realized_basis_head = ("QuickBooks invoiced minus attributed cost -- "
+                               "bills joined by linked_po to a PO on the job's "
+                               "legs, then expenses by customer_ref where that "
+                               "customer has one job; realized, not quoted")
+        if not self.qbo:
+            empty = lambda b: _cents_shape(0, "usd", 0, {}, b)  # noqa: E731
+            return {"loaded": False, "load": INVOICES_LOAD_HINT, "jobs": [],
+                    "quoted_margin_usd": _shape(0, "usd", 0, {}, "quoted revenue minus quoted cost"),
+                    "realized_margin_usd": empty(realized_basis_head + "; nothing loaded"),
+                    "po_costed_margin_usd": empty(PO_COSTED_WORDS + "; nothing loaded"),
+                    "cogs_attribution": {}}
+        from_export = bool(vt) and vt.get("source") == "export"
+        # which jobs carry each PO number on their legs
+        po_jobs, job_nums = {}, {}
+        for k, j in jobs.items():
+            per_leg = [_leg_po_numbers(s_.get("vendor_po_raw")) for s_ in j["legs"]]
+            job_nums[k] = per_leg
+            for nums in per_leg:
+                for n in nums:
+                    po_jobs.setdefault(n, set()).add(k)
+        # expenses by customer_ref -> the customer's one job
+        jobs_by_cid = {}
+        for k in jobs:
+            jobs_by_cid.setdefault(k[2], []).append(k)
+        resolve = self.customer_names()
+        job_expenses, attributed, cogs_rows = {}, 0, 0
+        cogs_total = 0
+        for r_ in spend:
+            if _is_cogs(r_.get("split_account")):
+                cogs_total += r_["cost_cents"]
+                cogs_rows += 1
+        for n, rows in bills.items():
+            owners = po_jobs.get(n, set())
+            if len(owners) == 1:
+                for b in rows:
+                    if _is_cogs(b.get("split_account")):
+                        attributed += b["cost_cents"]
+        for r_ in spend:
+            if r_.get("type") == "Expense" and r_.get("customer_ref") \
+                    and _is_cogs(r_.get("split_account")):
+                cid, _miss = resolve(r_.get("customer_ref"))
+                ks = jobs_by_cid.get(_hk(cid), []) if cid else []
+                if len(ks) == 1:
+                    job_expenses[ks[0]] = job_expenses.get(ks[0], 0) + r_["cost_cents"]
+                    attributed += r_["cost_cents"]
+        rows_out, q_tot, q_n, q_exc = [], 0, 0, []
+        re_tot, re_n, re_exc = 0, 0, []
+        pc_tot, pc_n, pc_exc = 0, 0, []
+        for k in sorted(jobs, key=lambda x: (x[0], str(x[2]), x[1])):
+            j = jobs[k]
+            matched = [self.qbo_match(i) for i in j["invoices"]]
+            invoiced = (sum(m_[0]["amount_cents"] for m_ in matched)
+                        if all(not m_[1] for m_ in matched) else None)
+            # quoted
+            p_ = self.proj_by_key.get((k[1], k[2])) if k[0] == "project" else None
+            if not p_:
+                qv, qw = None, "no_project_link"
+            elif _num(p_.get("revenue")) is None:
+                qv, qw = None, "no_revenue_on_project"
+            elif _num(p_.get("total_cost")) is None:
+                qv, qw = None, "no_cost_on_project"
+            else:
+                qv, qw = round(_num(p_["revenue"]) - _num(p_["total_cost"])), None
+            quoted = _shape(qv if qw is None else 0, "usd", 0 if qw else 1,
+                            {qw: 1} if qw else {},
+                            "quoted revenue minus quoted total cost of the job's "
+                            "project; quoted at the deal, not realized")
+            # realized
+            per_leg = job_nums[k]
+            if invoiced is None:
+                rw = "no_qbo_invoice"
+            elif not vt:
+                rw = "cost_incomplete"
+            elif from_export:
+                rw = "bills_not_linkable_from_export"
+            elif not j["legs"]:
+                rw = "cost_incomplete"
+            else:
+                unbilled = incomplete = False
+                cost = 0
+                for nums in per_leg:
+                    if not nums:
+                        incomplete = True
+                    for n in nums:
+                        if bills.get(n) and len(po_jobs.get(n, ())) == 1:
+                            cost += sum(b["cost_cents"] for b in bills[n])
+                        elif n in pos:
+                            unbilled = True
+                        else:
+                            incomplete = True
+                rw = ("cost_not_billed_yet" if unbilled
+                      else "cost_incomplete" if incomplete else None)
+            if rw:
+                rv = None
+            else:
+                rv = invoiced - cost - job_expenses.get(k, 0)
+            # PO-costed
+            if invoiced is None:
+                pw = "no_qbo_invoice"
+            elif not any(per_leg):
+                pw = "no_po_on_job"
+            elif any(not nums for nums in per_leg) or any(
+                    n not in pos or len(pos[n]["vendors"]) != 1
+                    for nums in per_leg for n in nums):
+                pw = "po_not_resolved"
+            else:
+                pw = None
+            pv = (invoiced - sum(pos[n]["amount_cents"]
+                                 for n in set().union(*per_leg))) if not pw else None
+            row = {"job": {x: j.get(x) for x in ("kind", "key", "project_no",
+                                                 "invoice_no", "company_id") if x in j},
+                   "invoiced_usd": _cents_shape(invoiced or 0, "usd",
+                                                0 if invoiced is None else 1,
+                                                {"no_qbo_invoice": 1} if invoiced is None else {},
+                                                QBO_INVOICED_BASIS),
+                   "quoted_margin_usd": quoted,
+                   "realized_margin_usd": _cents_shape(rv or 0, "usd", 0 if rw else 1,
+                                                       {rw: 1} if rw else {},
+                                                       realized_basis_head),
+                   "po_costed_margin_usd": _cents_shape(pv or 0, "usd", 0 if pw else 1,
+                                                        {pw: 1} if pw else {},
+                                                        PO_COSTED_WORDS)}
+            rows_out.append(row)
+            (q_exc.append(qw) if qw else None)
+            if not qw:
+                q_tot += qv; q_n += 1
+            if rw:
+                re_exc.append(rw)
+            else:
+                re_tot += rv; re_n += 1
+            if pw:
+                pc_exc.append(pw)
+            else:
+                pc_tot += pv; pc_n += 1
+        n_jobs = len(jobs)
+        unattr = cogs_total - attributed
+        share = (f"{attributed / cogs_total:.1%}" if cogs_total
+                 else "no COGS in the window, so 0.0%")
+        facts = (f"{re_n} of {n_jobs} jobs have a realized figure; {share} of window "
+                 f"COGS ({_money_text(cogs_total)}) could be attributed; "
+                 f"{_money_text(unattr)} is unattributed. Nothing is matched by "
+                 f"vendor, date or amount")
+        if from_export:
+            facts += ("; bills from an export carry no linked_po and are excluded "
+                      "as a block")
+        return {"loaded": True, **_snap_meta(self.qbo, self.today),
+                "vendor_snapshot": _snap_meta(vt, self.today),
+                "jobs": rows_out,
+                "quoted_margin_usd": _shape(q_tot, "usd", q_n, _tally(q_exc),
+                                            "quoted revenue minus quoted total cost "
+                                            "over the jobs' projects; quoted, not realized"),
+                "realized_margin_usd": _cents_shape(re_tot, "usd", re_n, _tally(re_exc),
+                                                    realized_basis_head + ". " + facts),
+                "po_costed_margin_usd": _cents_shape(
+                    pc_tot, "usd", pc_n, _tally(pc_exc),
+                    PO_COSTED_WORDS + ". QuickBooks invoiced minus the QuickBooks "
+                    "POs joined to the job's legs by the exact (PO, number); counted "
+                    "only when every leg's PO resolves"),
+                "cogs_attribution": {
+                    "cogs_usd": _cents_shape(cogs_total, "usd", cogs_rows, {},
+                                             "window spend booked to Cost of Goods Sold"),
+                    "attributed_usd": _cents_shape(attributed, "usd", cogs_rows, {},
+                                                   "COGS joined to a job by linked_po "
+                                                   "or customer_ref"),
+                    "unattributed_usd": _cents_shape(unattr, "usd", cogs_rows, {},
+                                                     "COGS no job key reaches")},
+                "bills_not_linkable_count": (sum(1 for r_ in spend if r_.get("type") == "Bill")
+                                             if from_export else 0)}
+
+    def _cfo_cash(self, cb, pos, vt):
+        basis_b = "sum of bank account balances in the cash snapshot"
+        basis_c = "sum of credit card balances in the cash snapshot, apart from the banks"
+        out = {"loaded": bool(cb), **_snap_meta(cb, self.today)}
+        banks, cards, other, accounts = [], [], [], []
+        for a in (cb or {}).get("rows", []):
+            t = str(a.get("account_type") or "").lower()
+            row = {"account": a.get("account"), "account_type": a.get("account_type"),
+                   "balance_usd": _cents_shape(a["balance_cents"], "usd", 1, {},
+                                               "the account's balance in the snapshot")}
+            accounts.append(row)
+            (banks if "bank" in t else cards if "credit" in t else other).append(a)
+        if not cb:
+            out["load"] = CASH_LOAD_HINT
+        out.update({
+            "accounts": accounts,
+            "bank_total_usd": _cents_shape(sum(a["balance_cents"] for a in banks), "usd",
+                                           len(banks), {}, basis_b),
+            "card_total_usd": _cents_shape(sum(a["balance_cents"] for a in cards), "usd",
+                                           len(cards), {}, basis_c),
+            "unclassified_accounts": [{"account": a.get("account"),
+                                       "account_type": a.get("account_type"),
+                                       "reason": "no account type says bank or credit card"}
+                                      for a in other]})
+        # expected in: QuickBooks open balance by QuickBooks due date
+        b = {"overdue_usd": [], "next_7_days_usd": [], "next_8_to_30_days_usd": [],
+             "no_due_date_usd": []}
+        for r_ in self._qbo_open_rows():
+            d = _iso_date(r_.get("due_date"))
+            if d is None:
+                b["no_due_date_usd"].append(r_)
+                continue
+            days = (d - self.today).days
+            if days < 0:
+                b["overdue_usd"].append(r_)
+            elif days <= 7:
+                b["next_7_days_usd"].append(r_)
+            elif days <= 30:
+                b["next_8_to_30_days_usd"].append(r_)
+        out["expected_in"] = {k: _cents_shape(sum(r_["open_cents"] for r_ in v), "usd",
+                                              len(v), {},
+                                              "QuickBooks open balance of the invoices "
+                                              "in this due-date band; never CRM quoted revenue")
+                              for k, v in b.items()}
+        if not self.qbo:
+            out["expected_in"]["load"] = INVOICES_LOAD_HINT
+        # committed out: open POs, only where the snapshot says a PO is open
+        known = {k: v for k, v in pos.items() if v["status"] - {None}}
+        unknown = len(pos) - len(known)
+        out["committed_out_usd"] = _cents_shape(
+            sum(v["amount_cents"] for v in known.values() if "open" in v["status"]),
+            "usd", len(known), {"po_status_unknown": unknown} if unknown else {},
+            "QuickBooks POs still open (not yet billed), only where the snapshot "
+            "carries the PO's status; an export carries none, so from an export "
+            "this is not computable -- never estimated")
+        if not vt:
+            out["committed_out_load"] = VENDOR_LOAD_HINT
+        return out
+
+    def _qbo_open_rows(self):
+        return [r_ for r_ in (self.qbo or {}).get("rows", [])
+                if r_.get("type") == "Invoice" and type(r_.get("open_cents")) is int
+                and r_["open_cents"] > 0]
+
+    def _cfo_receivables(self):
+        rows = self._qbo_open_rows()
+        out = {"loaded": bool(self.qbo), **_snap_meta(self.qbo, self.today)}
+        if not self.qbo:
+            out["load"] = INVOICES_LOAD_HINT
+        out["open_usd"] = _cents_shape(sum(r_["open_cents"] for r_ in rows), "usd",
+                                       len(rows), {}, QBO_OPEN_BASIS)
+        buckets = {b: [] for b in AGE_BUCKETS + ("no_due_date",)}
+        for r_ in rows:
+            d = _iso_date(r_.get("due_date"))
+            if d is None:
+                buckets["no_due_date"].append(r_); continue
+            late = (self.today - d).days
+            b = ("not_yet_due" if late < 0 else "0-30" if late <= 30 else
+                 "31-60" if late <= 60 else "61-90" if late <= 90 else "90+")
+            buckets[b].append(r_)
+        out["buckets"] = {b: _cents_shape(sum(r_["open_cents"] for r_ in v), "usd",
+                                          len(v), {},
+                                          "QuickBooks open balance aged by QuickBooks' "
+                                          "due date against today")
+                          for b, v in buckets.items()}
+        by_name = {}
+        for r_ in rows:
+            by_name.setdefault(r_.get("name"), []).append(r_)
+        resolve, unmatched, who = self.customer_names(), [], []
+        for name, rs in by_name.items():
+            cid, miss = resolve(name)
+            unmatched.append(miss)
+            who.append({"name": name, "company_id": cid,
+                        "open_usd": _cents_shape(sum(r_["open_cents"] for r_ in rs), "usd",
+                                                 len(rs), {}, QBO_OPEN_BASIS)})
+        who.sort(key=lambda w: (-w["open_usd"]["value_cents"], str(w["name"])))
+        out["who_owes_most"] = who
+        out["unmatched_names"] = _unmatched(unmatched)
+        out["drift"] = self.qbo_drift()
+        return out
+
+    def _cfo_expenses(self, vt, spend):
+        out = {"loaded": bool(vt), **_snap_meta(vt, self.today)}
+        if not vt:
+            out["load"] = VENDOR_LOAD_HINT
+        we = _iso_date(vt["window_end"]) if vt else None
+        from datetime import timedelta
+        periods = {"window": lambda d: True,
+                   "last_30_days": lambda d: we is not None and d is not None
+                   and we - timedelta(days=29) <= d <= we}
+        vres = self.vendor_names()
+        for name, inside in periods.items():
+            rows = [r_ for r_ in spend if inside(_iso_date(r_.get("date")))]
+            cogs = [r_ for r_ in rows if _is_cogs(r_.get("split_account"))]
+            split = [r_ for r_ in rows if r_.get("split_account") is None]
+            over = [r_ for r_ in rows if r_ not in cogs and r_ not in split]
+            sm = lambda rs, b: _cents_shape(sum(r_["cost_cents"] for r_ in rs),  # noqa: E731
+                                            "usd", len(rs), {}, b)
+            by_split, by_vendor = {}, {}
+            for r_ in rows:
+                by_split.setdefault(r_.get("split_account"), []).append(r_)
+                by_vendor.setdefault(r_.get("vendor"), []).append(r_)
+            vend_rows = []
+            for v, rs in by_vendor.items():
+                vid, _miss = vres(v)
+                vend_rows.append({"vendor": v, "vendor_id": vid,
+                                  "amount_usd": sm(rs, "posting spend under this "
+                                                       "QuickBooks vendor name, as exported")})
+            vend_rows.sort(key=lambda x: (-x["amount_usd"]["value_cents"], str(x["vendor"])))
+            split_rows = [{"account": a, "amount_usd": sm(rs, "posting spend booked to this "
+                                                               "account; null = split across "
+                                                               "several accounts")}
+                          for a, rs in by_split.items()]
+            split_rows.sort(key=lambda x: (-x["amount_usd"]["value_cents"], str(x["account"])))
+            out[name] = {
+                "total_usd": sm(rows, "posting spend in the period; bill payments "
+                                      "are not spend a second time"),
+                "cogs_usd": sm(cogs, "posting spend booked to Cost of Goods Sold"),
+                "overhead_usd": sm(over, "posting spend booked to any other named account"),
+                "split_usd": sm(split, "posting spend QuickBooks split across several "
+                                       "accounts; its own line, never guessed"),
+                "by_split_account": split_rows, "by_vendor": vend_rows}
+        out["rows_without_amount"] = sum(
+            1 for r_ in (vt or {}).get("rows", [])
+            if r_.get("posting") is True and type(r_.get("amount_cents")) is not int)
+        return out
 
     # ---- per-invoice ----
     def invoice_amount(self, inv):
@@ -2740,12 +3215,15 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
     effective due date, each with a priced amount), and vendor_on_time (per
     vendor: completed legs shipped on or before their ETA), and qbo_drift
     (QuickBooks invoices no CRM invoice carries, and CRM invoices in the
-    snapshot window QuickBooks lacks, with counts and dollars). Name one
-    report or omit for all. Read-only; nothing is persisted."""
+    snapshot window QuickBooks lacks, with counts and dollars). "cfo" --
+    returned only when named -- is the weekly CFO report: cash, receivables,
+    margin (quoted, realized and PO-costed, never merged) and expenses, each
+    stating its snapshot as_of and window. Name one report or omit for the
+    rest. Read-only; nothing is persisted."""
     if report is not None and report not in METRIC_REPORTS:
         return _err(f"report must be one of {list(METRIC_REPORTS)} or omitted")
     ctx = _MetricsCtx()
-    want = [report] if report else list(METRIC_REPORTS)
+    want = [report] if report else list(DEFAULT_METRIC_REPORTS)
     reports = {}
     for name in want:
         if name == "customer_concentration":
@@ -2754,6 +3232,8 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
             reports[name] = ctx.receivables_ageing()
         elif name == "qbo_drift":
             reports[name] = ctx.qbo_drift()
+        elif name == "cfo":
+            reports[name] = ctx.cfo()
         else:
             reports[name] = ctx.vendor_on_time()
     return {"ok": True, "interface_version": VERSION,
