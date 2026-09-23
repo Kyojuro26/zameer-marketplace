@@ -48,6 +48,8 @@ VOCAB = {
     "no_qbo_invoice", "cost_incomplete", "cost_not_billed_yet",
     "bills_not_linkable_from_export", "po_status_unknown", "po_not_resolved",
     "no_po_on_job",
+    # the quote pipeline (0.1.41)
+    "no_request_date", "not_decided",
 }
 
 REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time",
@@ -953,6 +955,14 @@ def run(server, crm_dir=None):
     for connector in (True, False):
         _cfo.load_vendor(srv, connector=connector)
         qbo_responses.append(cs.call("crm_metrics", report="cfo"))
+    # the quote pipeline's reasons: its own fixture
+    _qspec = _ilu.spec_from_file_location("_quotes_fixture", Path(__file__).resolve().parent / "test_quotes.py")
+    _qf = _ilu.module_from_spec(_qspec)
+    _qspec.loader.exec_module(_qf)
+    srv._today = lambda: _qf.TODAY
+    qq = Store(srv, qdir / "quotes" / "store")
+    _qf.seed(qq)
+    qbo_responses.append(qq.call("crm_metrics", report="quotes"))
     srv._today = lambda: TODAY
     for i, res in enumerate(qbo_responses):
         check_invariants(r, f"qbo[{i}]", res)
@@ -963,8 +973,8 @@ def run(server, crm_dir=None):
     r.section("the exclusion vocabulary is a closed, exported constant")
     vocab = getattr(srv, "EXCLUSION_REASONS", None)
     r.check("server exports EXCLUSION_REASONS", vocab is not None)
-    r.check("and it is exactly the thirty reasons this suite knows",
-            vocab is not None and set(vocab) == VOCAB and len(vocab) == 30,
+    r.check("and it is exactly the thirty-two reasons this suite knows",
+            vocab is not None and set(vocab) == VOCAB and len(vocab) == 32,
             f"server={sorted(vocab or [])}")
     seen = set()
     for res in list(responses.values()) + [empty, c25] + split_responses + qbo_responses:
