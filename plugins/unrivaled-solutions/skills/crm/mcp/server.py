@@ -662,6 +662,69 @@ class Store:
 
 STORE: Store = None  # set in main()
 
+# ------------------------------------------------------ QuickBooks snapshots
+#
+# QuickBooks data never enters the store's entity files, enrichment.json or
+# changelog.jsonl. Each kind is one JSON file in `qbo-snapshots`, a SIBLING of
+# the store root (C:\UnrivaledCRM\qbo-snapshots beside C:\UnrivaledCRM\store),
+# replaced wholesale on every load and joined at read time. Store.__init__,
+# the importer and the store backup (a robocopy of the store folder) never
+# see it. Amounts are integer cents.
+
+QBO_SNAPSHOT_KINDS = ("invoices", "vendor_transactions", "cash_balances")
+QBO_SNAPSHOT_SOURCES = ("export", "connector")
+
+
+def _qbo_snapshot_dir():
+    return STORE.root.parent / "qbo-snapshots"
+
+
+def _save_qbo_snapshot(kind, source, as_of, window_start, window_end, rows):
+    """Replace one kind's snapshot. Returns the path written."""
+    if kind not in QBO_SNAPSHOT_KINDS:
+        raise StoreError(f"unknown snapshot kind {kind!r}; expected one of "
+                         f"{', '.join(QBO_SNAPSHOT_KINDS)}")
+    if source not in QBO_SNAPSHOT_SOURCES:
+        raise StoreError(f"unknown snapshot source {source!r}; expected "
+                         f"export or connector")
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        raise StoreError("snapshot rows must be a list of objects")
+    for n, r in enumerate(rows):
+        for k, v in r.items():
+            if k.endswith("_cents") and v is not None and \
+                    (type(v) is not int):
+                raise StoreError(f"row {n}: {k} must be integer cents, "
+                                 f"got {v!r}")
+    doc = {"kind": kind, "source": source, "as_of": as_of,
+           "window_start": window_start, "window_end": window_end,
+           "loaded_at": datetime.now(timezone.utc).isoformat(),
+           "rows": rows}
+    d = _qbo_snapshot_dir()
+    fn = f"{kind}.json"
+    try:
+        d.mkdir(exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".~", suffix=".tmp")
+    except OSError as e:
+        raise StoreError(f"cannot write QuickBooks snapshots to {d} ({e}); "
+                         f"check it is a folder you can write to") from e
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=1, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+    except (OSError, TypeError, ValueError) as e:
+        # TypeError/ValueError: a value JSON cannot hold. No default=str here --
+        # a date stringified into a Num would be joined on as if QuickBooks
+        # had said it.
+        _unlink_quietly(tmp)
+        raise StoreError(f"could not write the {kind} snapshot ({e}); the "
+                         f"previous one is unchanged") from e
+    except BaseException:
+        _unlink_quietly(tmp)
+        raise
+    Store._commit(tmp, d / fn, fn)
+    return d / fn
+
 # ------------------------------------------------------------- helpers
 
 
