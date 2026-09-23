@@ -2295,6 +2295,7 @@ function renderMain(){
   // What this customer owes, before any table. Reading it off the invoice list
   // and doing the arithmetic was the operator's job until now.
   h += companySummary(c);
+  h += entityXref(c);
 
   if(c.role==='vendor'){
     // this vendor's open POs -- the legs filed under it that are not
@@ -2997,10 +2998,48 @@ function openEditCompany(cid){
     <div class="field"><label>Company name (required)</label><input id="e_co_name" value="${esc(c.display_name||'')}"/></div>
     <div class="field"><label>Primary location</label><input id="e_co_loc" value="${esc(c.primary_location||'')}" placeholder="e.g. Louisville, KY"/></div>
     <div class="field"><label>Notes</label><textarea id="e_co_notes" placeholder="Anything worth remembering about this company">${esc(c.notes||'')}</textarea></div>
+    ${vendorLinkField(c)}
     <button class="btn" id="saveBtn" onclick="saveEditCompany('${jesc(cid)}')">Save changes</button>
     <span class="saved" id="savedMsg"></span>
     <p class="muted" style="margin-top:16px;font-size:12px">Customer/vendor type isn't editable here — ask Claude in chat if a company needs to be reclassified.</p>`;
   openDrawer();
+}
+
+/* ------------------------------------------------ customer <-> vendor link --
+   One business that both buys and sells has two records -- QuickBooks forces
+   two names -- and the customer (or lead) record LINKS to the vendor record.
+   A link, never a merge: nothing combines and nothing copies across. The link
+   is stored on the company only; the vendor page finds it by looking the
+   other way (the server derives the same thing as linked_company_id). */
+function vendorName(vid){
+  const v = vendorById[vid] || companyById[vid] || {};
+  return v.display_name || st(vid);
+}
+function vendorLinkField(c){
+  if(c.role !== 'customer' && c.role !== 'lead') return '';
+  const cur = st(c.linked_vendor_id);
+  const opts = (DATA.vendors||[]).filter(v => !v.archived || st(v.company_id) === cur)
+    .sort((a,b) => st(a.display_name).localeCompare(st(b.display_name)));
+  return `<div class="field"><label>Also a vendor — the vendor record of this same business</label>
+    <select id="e_co_vendor" data-orig="${esc(cur)}">
+      <option value=""${cur?'':' selected'}>\u2014 none \u2014</option>
+      ${opts.map(v => `<option value="${esc(st(v.company_id))}"${st(v.company_id)===cur?' selected':''}>${esc(v.display_name||v.company_id)}</option>`).join('')}
+    </select>
+    ${cur?`<p class="muted" style="margin:4px 0 0;font-size:11px"><a href="#" id="e_co_vendor_open" onclick="closeDrawer();select('${jesc(cur)}');return false">Open ${esc(vendorName(cur))}</a></p>`:''}
+    <p class="muted" style="margin:4px 0 0;font-size:11px">Links the two records; it never merges them. A vendor links to one company.</p></div>`;
+}
+function linkedCompanyOf(vid){
+  return (DATA.companies||[]).find(x => !x.archived && st(x.linked_vendor_id) && st(x.linked_vendor_id) === st(vid)) || null;
+}
+function entityXref(c){
+  if(c.role === 'vendor'){
+    const lc = linkedCompanyOf(c.company_id);
+    return lc ? `<div class="kv" style="margin:0 0 12px"><span class="k">Also a customer</span>
+      <a href="#" id="xref-company" onclick="select('${jesc(lc.company_id)}');return false">${esc(lc.display_name||lc.company_id)}</a></div>` : '';
+  }
+  const vid = st(c.linked_vendor_id);
+  return vid ? `<div class="kv" style="margin:0 0 12px"><span class="k">Also a vendor</span>
+    <a href="#" id="xref-vendor" onclick="select('${jesc(vid)}');return false">${esc(vendorName(vid))}</a></div>` : '';
 }
 
 async function saveEditCompany(cid){
@@ -3010,6 +3049,10 @@ async function saveEditCompany(cid){
   const loc=document.getElementById('e_co_loc').value.trim()||null;
   const notes=document.getElementById('e_co_notes').value.trim()||null;
   const fields={display_name:name, primary_location:loc, locations:loc?[loc]:[], notes};
+  // the link is sent only when it CHANGED: the server validates it (exists,
+  // not archived, one-to-one) and a refusal stays in this drawer as its message
+  const lv=document.getElementById('e_co_vendor');
+  if(lv && lv.value !== (lv.getAttribute('data-orig')||'')) fields.linked_vendor_id = lv.value || null;
   await doSave('update_company', {company_id:cid, fields}, (r)=>{
     const c=r.company||Object.assign(companyById[cid]||{company_id:cid}, fields);
     const i=DATA.companies.findIndex(x=>x.company_id===cid);

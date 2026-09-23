@@ -159,11 +159,17 @@ CONTACT_FIELDS = {
 COMPANY_FIELDS = {
     "company_id", "display_name", "role", "domains", "locations", "primary_location",
     "archived", "archived_at", "notes",
+    # 0.1.39. linked_vendor_id: the vendor record of the SAME business (one
+    # that both buys and sells). Stored here only; the vendor's side is
+    # derived at read time. A link, never a merge. qbo_name: the exact name
+    # the entity carries in QuickBooks, which forces distinct customer and
+    # vendor names on one business.
+    "linked_vendor_id", "qbo_name",
 }
 VENDOR_FIELDS = {
     "company_id", "display_name", "hq_location", "rep", "email", "phone",
     "offerings", "notes", "po_routing", "invoice_routing", "po_routing_source",
-    "archived", "archived_at",
+    "archived", "archived_at", "qbo_name",
 }
 # "lead" is a prospect that hasn't become real business yet -- it's a plain
 # company record like customer/vendor (same entity, same fields), just a
@@ -1190,9 +1196,9 @@ BILL_NUM_NOTE = ("a bill's Num is the vendor's own invoice number, not a PO "
 def _number_matches(ctx, n):
     """Every typed record answering to the number n. Read-only."""
     k = _key(n)
-    out, errors = [], []
+    out, errors, unmatched = [], [], []
     if not k:
-        return out, errors
+        return out, errors, []
     names = {_hk(c.get("company_id")): c.get("display_name") for c in ctx.companies}
     for p in ctx.projects:
         if _key(p.get("project_no")) == k:
@@ -1223,8 +1229,11 @@ def _number_matches(ctx, n):
                                    or names.get(vid)) if vid else None,
                         "stage": s_.get("stage")})
     for row in ctx.qbo_by_num.get(k, []):
+        cid, miss = ctx.customer_names()(row.get("name"))
+        unmatched.append(miss)
         out.append({"type": "qbo_invoice", "num": row.get("num"),
                     "date": row.get("date"), "name": row.get("name"),
+                    "company_id": cid,
                     "amount_cents": row.get("amount_cents"),
                     "open_cents": row.get("open_cents")})
     if ctx.qbo_error:
@@ -1248,14 +1257,18 @@ def _number_matches(ctx, n):
                 g["open_status"] = row["open_status"]
             if t == "qbo_bill":
                 g["note"] = BILL_NUM_NOTE
+    for g in groups.values():
+        vid, miss = ctx.vendor_names()(g.get("vendor"))
+        g["vendor_id"] = vid
+        unmatched.append(miss)
     out.extend(groups.values())
-    return out, errors
+    return out, errors, _unmatched(unmatched)
 
 
 def _po_warnings(project_no):
     """number_is_also_vendor_po, once per leg and per QuickBooks PO, when a
     project_no being set is also a vendor PO number. Never refuses."""
-    matches, _errors = _number_matches(_MetricsCtx(), project_no)
+    matches, _errors, _unm = _number_matches(_MetricsCtx(), project_no)
     out = []
     for m in matches:
         if m["type"] == "vendor_po_on_leg":
@@ -1276,6 +1289,121 @@ def _po_warnings(project_no):
                                    f"{m.get('num')} to {m.get('vendor')} (QuickBooks "
                                    f"records no job for a PO)"})
     return out
+
+
+def _name_key(s):
+    """A name as the entity joins compare it: lower case, punctuation and
+    runs of space collapsed. "gamma  co." and "Gamma Co" are one key."""
+    return re.sub(r"[^a-z0-9]+", " ", _norm(s)).strip()
+
+
+LEGAL_SUFFIXES = {"llc", "inc", "incorporated", "co", "company", "corp",
+                  "corporation", "ltd", "limited", "lp", "llp", "pllc", "plc"}
+
+
+def _name_base(s):
+    """(the name without trailing legal-suffix words, the words removed)."""
+    words = _name_key(s).split()
+    cut = []
+    while words and words[-1] in LEGAL_SUFFIXES:
+        cut.insert(0, words.pop())
+    return " ".join(words), cut
+
+
+def _qbo_name_resolver(records):
+    """A resolver for QuickBooks names over these records (each with
+    company_id, display_name and maybe qbo_name): qbo_name first, exactly;
+    then the normalised display name. resolve(name) -> (id, None) or
+    (None, {"name", "reason": ambiguous|no_match, "candidates"}) -- a name
+    that fits two records is never given to either."""
+    by_qbo, by_disp = {}, {}
+    for rec in records:
+        cid = rec.get("company_id")
+        q = rec.get("qbo_name")
+        if isinstance(q, str) and q.strip():
+            by_qbo.setdefault(q.strip(), []).append(cid)
+        k = _name_key(rec.get("display_name"))
+        if k:
+            by_disp.setdefault(k, []).append(cid)
+
+    def resolve(name):
+        if not isinstance(name, str) or not name.strip():
+            return None, None
+        for ids in (by_qbo.get(name.strip()), by_disp.get(_name_key(name))):
+            if ids and len(ids) == 1:
+                return ids[0], None
+            if ids:
+                return None, {"name": name, "reason": "ambiguous",
+                              "candidates": sorted(ids, key=str)}
+        return None, {"name": name, "reason": "no_match", "candidates": []}
+    return resolve
+
+
+def _unmatched(items):
+    """unmatched_names, once per name, in name order."""
+    seen = {}
+    for u in items:
+        if u:
+            seen.setdefault(u["name"], u)
+    return [seen[k] for k in sorted(seen)]
+
+
+def _vendor_link_holder(vendor_id, companies, but=None):
+    """The company (other than `but`) whose linked_vendor_id is vendor_id."""
+    k = _key(vendor_id)
+    return next((c for c in companies if c.get("company_id") != but
+                 and _key(c.get("linked_vendor_id")) == k and k), None)
+
+
+def _with_linked_company(v, companies=None):
+    """A vendor record for a response, with the derived linked_company_id --
+    the live company that links to it, or None. Never stored."""
+    companies = STORE.load("companies") if companies is None else companies
+    holder = _vendor_link_holder(v.get("company_id"),
+                                 [c for c in companies if not c.get("archived")])
+    return dict(v, linked_company_id=holder.get("company_id") if holder else None)
+
+
+def _check_qbo_name(fields):
+    q = fields.get("qbo_name")
+    if "qbo_name" in fields and q is not None and \
+            (not isinstance(q, str) or not q.strip()):
+        raise StoreError("qbo_name must be the entity's name in QuickBooks, or null")
+
+
+def _check_vendor_link(company_id, value, companies):
+    """Refuse a linked_vendor_id this company cannot hold, or return the
+    vendor record's OWN id to store -- never the caller's spelling of it: the
+    page matches ids exactly, and a stored " hmart-v " links to nothing it can
+    find. None unlinks."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise StoreError("linked_vendor_id must be a vendor's company_id, or null")
+    me = next((c for c in companies if c.get("company_id") == company_id), None)
+    if me is not None and me.get("role") == "vendor":
+        raise StoreError(f"'{company_id}' is itself a vendor; the link is set on "
+                         f"the customer (or lead) record of the same business")
+    if _key(value) == _key(company_id):
+        raise StoreError("a company cannot be linked to itself")
+    v = next((x for x in STORE.load("vendors")
+              if _key(x.get("company_id")) == _key(value)), None)
+    if v is None:
+        raise StoreError(f"no vendor record '{value}'")
+    vco = next((c for c in companies if _key(c.get("company_id")) == _key(value)), None)
+    if v.get("archived") or (vco and vco.get("archived")):
+        raise StoreError(f"vendor '{value}' is archived; restore it before linking")
+    holder = _vendor_link_holder(value, companies, but=company_id)
+    if holder:
+        # an archived holder is invisible in every list, so "unlink it there"
+        # is only doable once it is restored -- say so
+        where = ("; that company is archived -- restore it, unlink it, and "
+                 "archive it again" if holder.get("archived")
+                 else "; unlink it there first")
+        raise StoreError(
+            f"vendor '{value}' is already linked to {holder.get('display_name')!s} "
+            f"('{holder.get('company_id')}'). A vendor links to one company{where}")
+    return v.get("company_id")
 
 
 def _po_warnings_safe(project_no):
@@ -1856,6 +1984,25 @@ class _MetricsCtx:
                 if k in self.qbo_by_num:
                     self.qbo_claims[k] = self.qbo_claims.get(k, 0) + 1
 
+    # ---- QuickBooks names ----
+    def customer_names(self):
+        """Resolver for QuickBooks CUSTOMER names over live non-vendor
+        companies (0.1.39)."""
+        if getattr(self, "_cust_res", None) is None:
+            self._cust_res = _qbo_name_resolver(
+                [c for c in self.companies if not c.get("archived")
+                 and c.get("role") != "vendor"])
+        return self._cust_res
+
+    def vendor_names(self):
+        """Resolver for QuickBooks VENDOR names over live vendor records."""
+        if getattr(self, "_vend_res", None) is None:
+            arch = self.arch_cids
+            self._vend_res = _qbo_name_resolver(
+                [v for v in STORE.load("vendors") if isinstance(v, dict)
+                 and not v.get("archived") and _hk(v.get("company_id")) not in arch])
+        return self._vend_res
+
     # ---- QuickBooks ----
     def qbo_match(self, inv):
         """(snapshot row, reason). The key is (Invoice, number); two rows with
@@ -1946,10 +2093,18 @@ class _MetricsCtx:
         sh["open_usd"] = self.qbo_shape(
             sum(r_["open_cents"] for r_ in without), len(q_rows), {},
             "QuickBooks Open balance of the same invoices")
-        sh["rows"] = [{"num": r_.get("num"), "date": r_.get("date"),
-                       "name": r_.get("name"),
-                       "amount_cents": r_["amount_cents"],
-                       "open_cents": r_["open_cents"]} for r_ in without]
+        resolve, unmatched = self.customer_names(), []
+        sh["rows"] = []
+        for r_ in without:
+            cid, miss = resolve(r_.get("name"))
+            unmatched.append(miss)
+            sh["rows"].append({"num": r_.get("num"), "date": r_.get("date"),
+                               "name": r_.get("name"), "company_id": cid,
+                               "amount_cents": r_["amount_cents"],
+                               "open_cents": r_["open_cents"]})
+        # the QuickBooks customer names that fit no company, or more than one
+        # -- listed, never guessed (0.1.39)
+        sh["unmatched_names"] = _unmatched(unmatched)
         missing = [i for i in self.invoices
                    if self.qbo_match(i)[1] == "not_in_qbo_snapshot"]
         q_total, q_n, q_exc = 0, 0, []
@@ -2505,7 +2660,8 @@ def get_vendor(ref: str) -> dict:
                  and s.get("stage") not in ("Delivered", "Installed", "Cancelled")
                  and _hk(s.get("company_id")) not in arch
                  and not _shipment_hidden(s, arch_p)]
-    return {"ok": True, "interface_version": VERSION, "vendor": v, "open_legs": open_legs}
+    return {"ok": True, "interface_version": VERSION,
+            "vendor": _with_linked_company(v), "open_legs": open_legs}
 
 
 @mcp.tool()
@@ -2694,12 +2850,61 @@ def lookup_number(n: str) -> dict:
     (with the leg's job and vendor), qbo_invoice, qbo_po and qbo_bill from the
     QuickBooks snapshots -- a bill's Num is the vendor's own invoice number,
     not a PO. Read-only."""
-    matches, errors = _number_matches(_MetricsCtx(), n)
+    matches, errors, unmatched = _number_matches(_MetricsCtx(), n)
     out = {"ok": True, "interface_version": VERSION, "number": _key(n),
            "matches": matches}
+    if unmatched:
+        out["unmatched_names"] = unmatched
     if errors:
         out["snapshot_errors"] = errors
     return out
+
+
+@mcp.tool()
+@_store_errors
+def suggest_entity_links() -> dict:
+    """Candidate customer/vendor pairs that may be the SAME business, from
+    their names, each with the reason. Read-only: it never links anything --
+    the operator confirms a link with update_company(linked_vendor_id=...).
+    A pair is suggested when the normalised names are equal, equal apart from
+    a trailing legal suffix (LLC, Inc, Co, ...), or one's qbo_name is the
+    other's name. Companies or vendors already linked, and archived ones, are
+    left out. A plant or division named differently from the group is not
+    paired -- they stay separate companies."""
+    companies = STORE.load("companies")
+    live = [c for c in companies if not c.get("archived")]
+    held = {_key(c.get("linked_vendor_id")) for c in live if c.get("linked_vendor_id")}
+    arch = {c.get("company_id") for c in companies if c.get("archived")}
+    cos = [c for c in live if c.get("role") in ("customer", "lead")
+           and not c.get("linked_vendor_id")]
+    vens = [v for v in STORE.load("vendors") if isinstance(v, dict)
+            and not v.get("archived") and v.get("company_id") not in arch
+            and _key(v.get("company_id")) not in held]
+    pairs = []
+    for c in cos:
+        cname, cbase = c.get("display_name"), _name_base(c.get("display_name"))
+        for v in vens:
+            if v.get("company_id") == c.get("company_id"):
+                continue
+            vname, vbase = v.get("display_name"), _name_base(v.get("display_name"))
+            reason = None
+            if _name_key(cname) and _name_key(cname) == _name_key(vname):
+                reason = "the same name"
+            elif cbase[0] and cbase[0] == vbase[0]:
+                extra = " ".join(w.upper() if len(w) <= 4 else w.title()
+                                 for w in (cbase[1] + vbase[1]))
+                reason = f"the same name apart from the legal suffix {extra}"
+            elif any(isinstance(q, str) and q.strip() and _name_key(q) == _name_key(o)
+                     for q, o in ((c.get("qbo_name"), vname), (v.get("qbo_name"), cname))):
+                reason = "one's QuickBooks name is the other's name"
+            if reason:
+                pairs.append({"company_id": c.get("company_id"), "company_name": cname,
+                              "vendor_id": v.get("company_id"), "vendor_name": vname,
+                              "reason": f"{cname!s} / {vname!s}: {reason}"})
+    pairs.sort(key=lambda p: (str(p["company_name"]), str(p["vendor_name"])))
+    return {"ok": True, "interface_version": VERSION, "pairs": pairs,
+            "basis": "names compared after lower-casing and dropping punctuation; "
+                     "suggestions only -- nothing is linked"}
 
 
 # --------- writes (validated, atomic, logged) ---------
@@ -3143,7 +3348,11 @@ def upsert_contact(fields: dict) -> dict:
 
 @mcp.tool()
 def update_company(company_id: str, fields: dict) -> dict:
-    """Edit a company record (display_name, role, domains, locations)."""
+    """Edit a company record (display_name, role, domains, locations, notes,
+    qbo_name, linked_vendor_id). linked_vendor_id links a customer or lead to
+    the vendor record of the same business: the vendor must exist and not be
+    archived, and a vendor links to ONE company (a refusal names the company
+    holding it). null unlinks. Linking never merges or copies anything."""
     try:
         with STORE.write_lock():
             # archived/archived_at are the soft-delete flag, owned by
@@ -3159,10 +3368,14 @@ def update_company(company_id: str, fields: dict) -> dict:
                     f"stamp archived_at, and keep the vendor record in step")
             _validate(fields, COMPANY_FIELDS - {"company_id", "archived",
                                                 "archived_at"}, "company")
+            _check_qbo_name(fields)
             companies = STORE.load("companies")
             target = [c for c in companies if c.get("company_id") == company_id]
             if not target:
                 return _err(f"company '{company_id}' not found")
+            if "linked_vendor_id" in fields:
+                fields["linked_vendor_id"] = _check_vendor_link(
+                    company_id, fields["linked_vendor_id"], companies)
             target[0].update(fields)
             STORE.save("companies", companies)
             STORE.log("update", "company", company_id, fields)
@@ -3303,9 +3516,14 @@ def create_company(fields: dict) -> dict:
                     f"company_id '{cid}' collides with a JavaScript built-in and "
                     f"would stop the visual app rendering -- supply a different "
                     f"company_id (e.g. '{cid}-co')")
+            _check_qbo_name(fields)
             companies = STORE.load("companies")
             if any(c.get("company_id") == cid for c in companies):
                 raise StoreError(f"company '{cid}' already exists")
+            if fields.get("linked_vendor_id") is not None:
+                fields["linked_vendor_id"] = _check_vendor_link(
+                    cid, fields["linked_vendor_id"],
+                    companies + [dict(fields, company_id=cid, role=role)])
             record = {k: None for k in COMPANY_FIELDS}
             # caller fields FIRST, then the authoritative identity -- the same
             # order create_invoice uses. Reversed, `fields` won, so a caller
@@ -3334,6 +3552,7 @@ def create_vendor(fields: dict) -> dict:
     try:
         with STORE.write_lock():
             _validate(fields, VENDOR_FIELDS, "vendor")
+            _check_qbo_name(fields)
             name = fields.get("display_name")
             if not name:
                 raise StoreError("create_vendor needs display_name")
@@ -3380,7 +3599,8 @@ def create_vendor(fields: dict) -> dict:
             # company flipped to role=vendor with no vendor record behind it
             STORE.save_many({"companies": companies, "vendors": vendors})
             STORE.log("create", "vendor", cid, {"display_name": name})
-            return {"ok": True, "interface_version": VERSION, "vendor": record}
+            return {"ok": True, "interface_version": VERSION,
+                    "vendor": _with_linked_company(record, companies)}
     except StoreError as e:
         return _err(e)
 
@@ -3392,6 +3612,7 @@ def update_vendor(company_id: str, fields: dict) -> dict:
     try:
         with STORE.write_lock():
             _validate(fields, VENDOR_FIELDS - {"company_id"}, "vendor")
+            _check_qbo_name(fields)
             vendors = STORE.load("vendors")
             target = [v for v in vendors if v["company_id"] == company_id]
             if not target:
@@ -3399,7 +3620,8 @@ def update_vendor(company_id: str, fields: dict) -> dict:
             target[0].update(fields)
             STORE.save("vendors", vendors)
             STORE.log("update", "vendor", company_id, fields)
-            return {"ok": True, "interface_version": VERSION, "vendor": target[0]}
+            return {"ok": True, "interface_version": VERSION,
+                    "vendor": _with_linked_company(target[0])}
     except StoreError as e:
         return _err(e)
 

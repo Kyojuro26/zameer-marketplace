@@ -120,7 +120,9 @@ LOOKUP = [
   '            g = groups.setdefault((t, row.get("vendor")), {',
   '            g = groups.setdefault((t, row.get("vendor"), id(row)), {'),
  ("the lookup does not go through _key",
-  "    k = _key(n)\n    out, errors = [], []", "    k = n\n    out, errors = [], []"),
+  # re-anchored 0.1.39: the same line now also starts the unmatched-names list
+  "    k = _key(n)\n    out, errors, unmatched = [], [], []",
+  "    k = n\n    out, errors, unmatched = [], [], []"),
  ("the warning refuses the write",
   '            out = {"ok": True, "interface_version": VERSION,\n                   "invoice": _with_due_on([target[0]])[0]}\n            if warnings:',
   '            if warnings:\n                raise StoreError("number is also a PO")\n'
