@@ -35,7 +35,7 @@ TODAY = date(2026, 9, 1)
 VOCAB = {
     # money
     "no_project_link", "no_revenue_on_project", "no_cost_on_project", "paid",
-    "not_won", "no_won_revenue",
+    "not_won", "no_won_revenue", "multiple_invoices_on_project",
     # dates
     "no_date", "unparseable_date", "ship_before_project_date",
     # legs
@@ -681,15 +681,77 @@ def run(server, crm_dir=None):
             len(s.read("projects")) == 1 and len(s.read("companies")) == 1
             and "metrics" not in s.read("projects")[0])
 
+    # ---- split-billed projects ---------------------------------------------
+    #
+    # An invoice carries no amount; invoice_amount() reads the linked project's
+    # revenue. A project can carry more than one invoice -- create_invoice is
+    # unique on (company, invoice_no), and update_invoice accepts project_no --
+    # and then every shape that sums outstanding() over invoices priced the
+    # project ONCE PER INVOICE. Reproduced on a constructed store, 2026-09-22:
+    # one won project at $10,000 with two open invoices read as exposure
+    # $20,000 over counted 2. The store holds no per-invoice amount and the
+    # split is never guessed: each such invoice is excluded, by name.
+    r.section("a project with more than one invoice is never priced once per invoice")
+    sp = Store(srv)
+    sp.reset(companies=[company("split", "Split Co")],
+             projects=[project("5001", "split", status="won", revenue=10000,
+                               total_cost=6000)],
+             invoices=[invoice("6001", "split", project_no="5001", payment_status="open",
+                               invoice_date="2026-06-01"),           # due 07-01: 62 late
+                       invoice("6002", "split", project_no="5001", payment_status="open",
+                               invoice_date="2026-06-01")])
+    sp_co = sp.call("get_company", ref="split")
+    sp_age = sp.call("crm_metrics", report="receivables_ageing")
+    split_responses = [sp_co, sp_age]
+    spm = _m(sp_co, "company", "metrics") or {}
+    spx = spm.get("exposure_open_receivable_usd") or {}
+    r.check("two open invoices on one $10,000 project: exposure is NOT $20,000",
+            spx.get("value") != 20000,
+            f"value={spx.get('value')!r} counted={spx.get('counted')!r} -- the "
+            f"project's revenue was counted once per invoice")
+    r.check("...nothing is priced: value null, counted 0, both excluded "
+            "multiple_invoices_on_project",
+            spx.get("value") is None and spx.get("counted") == 0
+            and spx.get("excluded") == {"multiple_invoices_on_project": 2},
+            f"value={spx.get('value')!r} counted={spx.get('counted')!r} "
+            f"excluded={spx.get('excluded')!r}")
+    r.check("the exposure basis names the exclusion",
+            "more than one invoice" in str(spx.get("basis", "")).lower(),
+            str(spx.get("basis")))
+    r.check("revenue_won_usd 10000 and quoted_gross_profit_usd 4000 are untouched: "
+            "they sum by project",
+            _m(spm, "revenue_won_usd", "value") == 10000
+            and _m(spm, "revenue_won_usd", "counted") == 1
+            and _m(spm, "quoted_gross_profit_usd", "value") == 4000,
+            f"rev={spm.get('revenue_won_usd')} gp={spm.get('quoted_gross_profit_usd')}")
+    r.check("oldest_overdue_days still reads 62 over 2: lateness needs no price",
+            _m(spm, "oldest_overdue_days", "value") == 62
+            and _m(spm, "oldest_overdue_days", "counted") == 2,
+            str(spm.get("oldest_overdue_days"))[:200])
+    bk = _m(sp_age, "reports", "receivables_ageing", "buckets", "61-90") or {}
+    r.check("the 61-90 bucket holds both invoices: count 2 (an invoice count, unchanged)",
+            bk.get("count") == 2, str(bk)[:200])
+    r.check("...and its amount_usd is not $20,000: value null, counted 0, "
+            "excluded {multiple_invoices_on_project: 2}",
+            _m(bk, "amount_usd", "value") is None and _m(bk, "amount_usd", "counted") == 0
+            and _m(bk, "amount_usd", "excluded") == {"multiple_invoices_on_project": 2},
+            str(bk.get("amount_usd"))[:220])
+    r.check("the bucket basis names the exclusion",
+            "more than one invoice" in str(_m(bk, "amount_usd", "basis") or "").lower(),
+            str(_m(bk, "amount_usd", "basis")))
+    check_invariants(r, "get_company(split)", sp_co)
+    check_invariants(r, "crm_metrics(split ageing)", sp_age)
+    s.rebind()
+
     # ---- the vocabulary is closed and exported --------------------------------
     r.section("the exclusion vocabulary is a closed, exported constant")
     vocab = getattr(srv, "EXCLUSION_REASONS", None)
     r.check("server exports EXCLUSION_REASONS", vocab is not None)
-    r.check("and it is exactly the sixteen reasons this suite knows",
-            vocab is not None and set(vocab) == VOCAB and len(vocab) == 16,
+    r.check("and it is exactly the seventeen reasons this suite knows",
+            vocab is not None and set(vocab) == VOCAB and len(vocab) == 17,
             f"server={sorted(vocab or [])}")
     seen = set()
-    for res in list(responses.values()) + [empty, c25]:
+    for res in list(responses.values()) + [empty, c25] + split_responses:
         for _p, sh in shapes_in(res):
             seen |= set((sh.get("excluded") or {}).keys())
     r.check("the fixture exercises every reason in the vocabulary",
