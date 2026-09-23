@@ -51,6 +51,7 @@ PY_MODULES = [
     ("regression.test_qbo_snapshots", "regression/test_qbo_snapshots.py"),
     ("regression.test_qbo_tools", "regression/test_qbo_tools.py"),
     ("regression.test_qbo_invoiced", "regression/test_qbo_invoiced.py"),
+    ("regression.test_positive_control", "regression/test_positive_control.py"),
     ("regression.test_number_lookup", "regression/test_number_lookup.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
