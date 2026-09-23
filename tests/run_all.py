@@ -53,6 +53,7 @@ PY_MODULES = [
     ("regression.test_qbo_invoiced", "regression/test_qbo_invoiced.py"),
     ("regression.test_positive_control", "regression/test_positive_control.py"),
     ("regression.test_entity_links", "regression/test_entity_links.py"),
+    ("regression.test_cfo", "regression/test_cfo.py"),
     ("regression.test_number_lookup", "regression/test_number_lookup.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
@@ -67,6 +68,7 @@ JS_MODULES = [("regression/test_view.js", "view"),
               ("regression/test_qbo_view.js", "qbo/view"),
               ("regression/test_number_view.js", "number-lookup/view"),
               ("regression/test_entity_links_view.js", "entity-links/view"),
+              ("regression/test_cfo_view.js", "cfo/view"),
               ("regression/test_harness.js", "harness")]
 
 

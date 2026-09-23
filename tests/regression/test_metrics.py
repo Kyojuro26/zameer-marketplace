@@ -44,6 +44,10 @@ VOCAB = {
     # QuickBooks snapshot joins (0.1.38)
     "no_qbo_snapshot", "ambiguous_qbo_match", "outside_snapshot_window",
     "not_in_qbo_snapshot", "qbo_match_shared", "partial_qbo_match",
+    # the CFO report (0.1.40)
+    "no_qbo_invoice", "cost_incomplete", "cost_not_billed_yet",
+    "bills_not_linkable_from_export", "po_status_unknown", "po_not_resolved",
+    "no_po_on_job",
 }
 
 REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time",
@@ -208,8 +212,15 @@ def check_invariants(r, label, response):
                 isinstance(sh["unit"], str) and sh["unit"] != "")
         leaf = path.rsplit(".", 1)[-1]
         if "profit" in leaf or "margin" in leaf:
-            r.check(f"{label} {path}: a profit figure says it is quoted, in name and basis",
-                    "quoted" in leaf and "quoted" in sh["basis"].lower(),
+            # a profit or margin figure names WHICH it is, in its name and its
+            # basis: quoted (the deal log), realized (QuickBooks invoiced minus
+            # attributed cost) or PO-costed (0.1.40) -- never a bare "margin"
+            kinds = [(k, w) for k, w in (("quoted", "quoted"), ("realized", "realized"),
+                                         ("po_costed", "po-costed"))
+                     if k in leaf]
+            r.check(f"{label} {path}: a profit figure says which it is -- quoted, "
+                    f"realized or PO-costed -- in name and basis",
+                    bool(kinds) and all(w in sh["basis"].lower() for _k, w in kinds),
                     f"name={leaf} basis={sh['basis']!r}")
         dated = leaf == "oldest_overdue_days" or ".receivables_ageing" in path
         r.check(f"{label} {path}: as_of {'present' if dated else 'absent'}",
@@ -929,6 +940,20 @@ def run(server, crm_dir=None):
                            + [{"type": "Invoice", "num": n, "amount_cents": 100,
                                "open_cents": 0} for n in ("8004", "8005")])
     qbo_responses = [qs.call("get_company", ref="acme"), qs.call("crm_metrics")]
+    # the CFO report's reasons: its own fixture, on the connector path and the
+    # export path (which excludes bills as a block and knows no PO status)
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("_cfo_fixture", Path(__file__).resolve().parent / "test_cfo.py")
+    _cfo = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_cfo)
+    srv._today = lambda: _cfo.TODAY
+    cs = Store(srv, qdir / "cfo" / "store")
+    _cfo.seed_store(cs)
+    _cfo.qbo_invoices(srv)
+    for connector in (True, False):
+        _cfo.load_vendor(srv, connector=connector)
+        qbo_responses.append(cs.call("crm_metrics", report="cfo"))
+    srv._today = lambda: TODAY
     for i, res in enumerate(qbo_responses):
         check_invariants(r, f"qbo[{i}]", res)
     _sh.rmtree(qdir, ignore_errors=True)
@@ -938,8 +963,8 @@ def run(server, crm_dir=None):
     r.section("the exclusion vocabulary is a closed, exported constant")
     vocab = getattr(srv, "EXCLUSION_REASONS", None)
     r.check("server exports EXCLUSION_REASONS", vocab is not None)
-    r.check("and it is exactly the twenty-three reasons this suite knows",
-            vocab is not None and set(vocab) == VOCAB and len(vocab) == 23,
+    r.check("and it is exactly the thirty reasons this suite knows",
+            vocab is not None and set(vocab) == VOCAB and len(vocab) == 30,
             f"server={sorted(vocab or [])}")
     seen = set()
     for res in list(responses.values()) + [empty, c25] + split_responses + qbo_responses:
