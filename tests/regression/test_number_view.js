@@ -48,6 +48,7 @@ async function run(crmDir) {
                                       { encoding: 'utf8' }));
   } catch (e) {
     r.check('the server answered the seeded store', false, String(e).slice(0, 300));
+    fs.rmSync(tmp, { recursive: true, force: true });
     return r;
   }
   r.check('the server found 1167 (precondition)',
