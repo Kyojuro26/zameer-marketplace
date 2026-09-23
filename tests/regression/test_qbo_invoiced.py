@@ -259,6 +259,54 @@ def _body(r, server, crm, tmp):
     r.check("store-wide, QuickBooks invoice 7001 is not counted twice: 7003 only",
             tot.get("value_cents") == 300000 and tot.get("counted") == 1, tot)
 
+    # ---- a CRM invoice that names two invoices ("A and B") -------------------
+    r.section("a pair: both must match, and it prices their sum")
+    pair_rows = [("7101", 100000, 40000), ("7102", 20000, 5000),
+                 ("7103", 30000, 30000), ("7105", 1000, 1000), ("7106", 2000, 0),
+                 ("7107", 500, 500), ("7108", 700, 700)]
+    server._save_qbo_snapshot("invoices", "export", "2026-04-07", "2026-01-01",
+                              "2026-03-31",
+                              [{"type": "Invoice", "num": n, "amount_cents": a,
+                                "open_cents": o} for n, a, o in pair_rows])
+    st.reset(companies=[company("acme", "Ace Manufacturing"),
+                        company("beta", "Beta Works")],
+             invoices=[invoice("7101 and 7102", "acme", invoice_date="2026-02-01"),
+                       invoice("7103 & 7104", "acme", invoice_date="2026-02-01"),
+                       invoice("7105 and 7106", "beta", invoice_date="2026-02-01"),
+                       invoice("7105", "acme", invoice_date="2026-02-01"),
+                       invoice("7107, 7108", "beta", invoice_date="2026-02-01"),
+                       invoice("7107 and 7108 and 7109", "beta",
+                               invoice_date="2026-02-01")])
+    rows_ = {i.get("invoice_no"): i for i in
+             (st.call("list_invoices").get("invoices") or [])}
+    pa = rows_.get("7101 and 7102") or {}
+    r.check("'7101 and 7102' names both: amount 100,000 + 20,000 cents",
+            (pa.get("qbo_amount_usd") or {}).get("value_cents") == 120000, pa)
+    r.check("... and open 40,000 + 5,000 cents",
+            (pa.get("qbo_open_usd") or {}).get("value_cents") == 45000, pa)
+    pb = (rows_.get("7103 & 7104") or {}).get("qbo_amount_usd") or {}
+    r.check("'7103 & 7104' with only 7103 in QuickBooks prices nothing: "
+            "partial_qbo_match, never half",
+            pb.get("value") is None and pb.get("excluded") == {"partial_qbo_match": 1}, pb)
+    for n in ("7105 and 7106", "7105"):
+        sh = (rows_.get(n) or {}).get("qbo_amount_usd") or {}
+        r.check(f"{n!r}: a pair's number counts toward qbo_match_shared like any other",
+                sh.get("excluded") == {"qbo_match_shared": 1}, sh)
+    for n in ("7107, 7108", "7107 and 7108 and 7109"):
+        sh = (rows_.get(n) or {}).get("qbo_amount_usd") or {}
+        r.check(f"{n!r} is not a pair: read as one number, as before",
+                sh.get("excluded") == {"not_in_qbo_snapshot": 1}, sh)
+    d2 = (st.call("crm_metrics", report="qbo_drift").get("reports") or {}) \
+        .get("qbo_drift") or {}
+    r.check("the drift list counts the pair's invoices as carried by the CRM "
+            "(7107 and 7108 stay drift: nothing names them as a pair)",
+            sorted(x.get("num") for x in d2.get("rows") or []) == ["7107", "7108"],
+            [x.get("num") for x in d2.get("rows") or []])
+    stored = json.loads((st.path / "invoices.json").read_text())
+    r.check("the pair rule writes nothing",
+            [i.get("invoice_no") for i in stored][0] == "7101 and 7102"
+            and not any(k.startswith("qbo") for i in stored for k in i))
+
     # ---- 7. one INV rule ---------------------------------------------------
     r.section("the INV token, as the importer reads it")
     if not r.check("the server has one invoice-number reader",

@@ -43,7 +43,7 @@ VOCAB = {
     "cancelled", "no_vendor_on_leg", "no_eta",
     # QuickBooks snapshot joins (0.1.38)
     "no_qbo_snapshot", "ambiguous_qbo_match", "outside_snapshot_window",
-    "not_in_qbo_snapshot", "qbo_match_shared",
+    "not_in_qbo_snapshot", "qbo_match_shared", "partial_qbo_match",
 }
 
 REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time",
@@ -919,13 +919,15 @@ def run(server, crm_dir=None):
                        invoice("8003", "acme", invoice_date="2025-06-01"),
                        # one QuickBooks invoice, a CRM invoice at each customer
                        invoice("8004", "acme", invoice_date="2026-02-01"),
-                       invoice("8004", "beta", invoice_date="2026-02-01")])
+                       invoice("8004", "beta", invoice_date="2026-02-01"),
+                       # a pair with only one of its two invoices in QuickBooks
+                       invoice("8005 and 8006", "acme", invoice_date="2026-02-01")])
     srv._save_qbo_snapshot("invoices", "export", "2026-08-30", "2026-01-01",
                            "2026-08-30",
                            [{"type": "Invoice", "num": "8001", "amount_cents": 100,
                              "open_cents": 0}] * 2
-                           + [{"type": "Invoice", "num": "8004", "amount_cents": 100,
-                               "open_cents": 0}])
+                           + [{"type": "Invoice", "num": n, "amount_cents": 100,
+                               "open_cents": 0} for n in ("8004", "8005")])
     qbo_responses = [qs.call("get_company", ref="acme"), qs.call("crm_metrics")]
     for i, res in enumerate(qbo_responses):
         check_invariants(r, f"qbo[{i}]", res)
@@ -936,8 +938,8 @@ def run(server, crm_dir=None):
     r.section("the exclusion vocabulary is a closed, exported constant")
     vocab = getattr(srv, "EXCLUSION_REASONS", None)
     r.check("server exports EXCLUSION_REASONS", vocab is not None)
-    r.check("and it is exactly the twenty-two reasons this suite knows",
-            vocab is not None and set(vocab) == VOCAB and len(vocab) == 22,
+    r.check("and it is exactly the twenty-three reasons this suite knows",
+            vocab is not None and set(vocab) == VOCAB and len(vocab) == 23,
             f"server={sorted(vocab or [])}")
     seen = set()
     for res in list(responses.values()) + [empty, c25] + split_responses + qbo_responses:
