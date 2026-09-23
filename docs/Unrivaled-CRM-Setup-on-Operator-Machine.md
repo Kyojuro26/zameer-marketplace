@@ -29,7 +29,7 @@ if Python comes from the **Microsoft Store**, so use that:
    give you a 2-line `python3` shim. Don't proceed until `python3` works.
 3. Install the packages the CRM needs:
    ```powershell
-   python -m pip install mcp msal requests openpyxl
+   python -m pip install "mcp<2" msal requests openpyxl
    ```
 
 ## Part 2 — Install the plugin (in Cowork)
@@ -117,7 +117,7 @@ Follow **`Unrivaled-CRM-Outlook-Runbook.md`** (Windows steps). In short:
 
 - **`python3` not recognized:** install Python from the **Microsoft Store**
   (not just python.org). That's what registers `python3`. Then reinstall the
-  packages with `python -m pip install mcp msal requests openpyxl`.
+  packages with `python -m pip install "mcp<2" msal requests openpyxl`.
 - **CRM plugin won't start / tools don't appear:** check the pointer file
   (`type $HOME\.unrivaled-crm-store` must print the store path) and read the
   launch log: `type $env:TEMP\unrivaled-crm-launch.log`. Fully restart Cowork

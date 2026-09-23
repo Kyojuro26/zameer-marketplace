@@ -46,7 +46,7 @@ arrive as updates to this same plugin.
 **1. Requirements.** Python 3.10+ with three packages:
 
 ```bash
-pip3 install mcp msal requests
+pip3 install "mcp<2" msal requests
 ```
 
 **2. Your data folder.** Your CRM records live in a folder YOU own. Keep the
