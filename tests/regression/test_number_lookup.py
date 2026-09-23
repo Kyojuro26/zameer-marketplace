@@ -50,6 +50,11 @@ def seed(server, st):
                             vendor_id="cobalt"),
                    shipment("4521-L2", "4521", "acme",
                             vendor_po_raw="PO # 1300 (1167 Paid)")])
+    # a build with no snapshot layer still gets the store, so the warning
+    # checks below run against its update_invoice and fail on what it RETURNS;
+    # dying here in the fixture was a crash, and a crash is not detection
+    if not callable(getattr(server, "_save_qbo_snapshot", None)):
+        return
     server._save_qbo_snapshot("invoices", "export", "2026-04-07", "2026-01-01",
                               "2026-03-31",
                               [{"type": "Invoice", "num": "1167", "date": "2026-02-01",

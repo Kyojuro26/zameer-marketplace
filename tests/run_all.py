@@ -76,10 +76,10 @@ def _load(modname, relpath):
     return mod
 
 
-def run_python(crm_dir, pattern):
+def run_python(crm_dir, pattern, modules=None):
     results = []
     server = load_server(crm_dir)
-    for modname, relpath in PY_MODULES:
+    for modname, relpath in (PY_MODULES if modules is None else modules):
         if pattern and pattern not in modname:
             continue
         mod = _load(modname, relpath)
@@ -94,8 +94,27 @@ def run_python(crm_dir, pattern):
             from lib.harness import Result
             res = Result(modname)
             res.check("module ran to completion", False, f"{type(e).__name__}: {e}")
+            # a module that threw evaluated nothing: its result is a crash
+            # report, and positive_control_verdict never credits one
+            res.crashed = True
         results.append(res)
     return results
+
+
+def positive_control_verdict(py_results, js):
+    """(detected, not_counted) module names for a run against the baseline.
+
+    Only a module that EVALUATED its checks and failed one is evidence the
+    suite detects something. A module that crashed -- a node module that
+    printed no verdict, a python module whose run() threw -- is NOT COUNTED
+    on either side. The python side used to credit its synthetic "module ran
+    to completion" failure as a detection (fixed 0.1.38)."""
+    detected = [r.name for r in py_results
+                if r.failed and not getattr(r, "crashed", False)] + \
+               [n for n, ok, reported, _pa, _fa in js if reported and not ok]
+    not_counted = [r.name for r in py_results if getattr(r, "crashed", False)] + \
+                  [n for n, _ok, reported, _pa, _fa in js if not reported]
+    return detected, not_counted
 
 
 def run_js(crm_dir, pattern):
@@ -173,9 +192,7 @@ def main():
             # Only modules that actually EVALUATED checks and failed them count.
             # A module that crashed proves the baseline is broken somewhere, not
             # that this suite can detect the thing it claims to test.
-            crashed = [n for n, _ok, reported, _pa, _fa in js if not reported]
-            failed_modules = [r.name for r in results if r.failed] + \
-                             [n for n, ok, reported, _pa, _fa in js if reported and not ok]
+            failed_modules, crashed = positive_control_verdict(results, js)
             print()
             for n in crashed:
                 print(f"NOT COUNTED: {n} crashed against the baseline without "
