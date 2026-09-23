@@ -2141,7 +2141,8 @@ function renderCfo(){
   else {
     for(const [key, label] of [['window','The snapshot window'], ['last_30_days','Its last 30 days']]){
       const x = e[key] || {};
-      h += `<h3 style="font-size:13px">${label}</h3><p>COGS ${cfoMoney(x.cogs_usd)} \u00b7 overhead ${cfoMoney(x.overhead_usd)} \u00b7 split across several accounts ${cfoMoney(x.split_usd)}</p>`
+      h += `<h3 style="font-size:13px">${label}</h3><p>Operating spend ${cfoMoney(x.total_usd)}: COGS ${cfoMoney(x.cogs_usd)} \u00b7 overhead ${cfoMoney(x.overhead_usd)} \u00b7 split across several accounts ${cfoMoney(x.split_usd)}</p>`
+        + `<p>Debt, card and tax payments ${cfoMoney(x.paydowns_usd)} <span class="muted" style="font-size:12px">\u2014 paying down balances, so not operating spend; still cash out</span></p>`
         + `<table><thead><tr><th>Account</th><th class="num">Spend</th></tr></thead><tbody>`
         + (x.by_split_account||[]).slice(0, 15).map(a => `<tr><td>${a.account == null ? '<i>Split across several accounts</i>' : esc(a.account)}</td><td class="num">${cfoMoney(a.amount_usd)}</td></tr>`).join('')
         + `</tbody></table><table><thead><tr><th>Vendor (as QuickBooks names it)</th><th class="num">Spend</th></tr></thead><tbody>`

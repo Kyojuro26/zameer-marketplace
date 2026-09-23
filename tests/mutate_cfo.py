@@ -71,8 +71,19 @@ SERVER = [
   '            if _key(inv_no):\n                return ("invoice", _key(inv_no), cid)',
   '            if _key(inv_no):\n                return ("invoice", _key(inv_no), cid)\n'
   '            if _key(pno):\n                return ("project", _key(pno), cid)'),
+ ("debt, card and tax payments count as operating spend",
+  "            rows = [r_ for r_ in inperiod if not _is_paydown(r_)]", "            rows = inperiod"),
+ ("the 'Payable' part of the paydown rule is dropped",
+  '        isinstance(split, str) and ("payable" in split.lower()',
+  '        isinstance(split, str) and (False'),
+ ("the 'Note' part of the paydown rule is dropped",
+  '                                    or split.strip().lower().startswith("note")))',
+  "                                    or False))"),
 ]
 VIEW = [
+ ("the paydown line is not shown",
+  "        + `<p>Debt, card and tax payments ${cfoMoney(x.paydowns_usd)}",
+  "        + `<p>${''}"),
  ("a missing figure renders as $0.00",
   "  return (sh && sh.value_cents != null) ? moneyCents(sh.value_cents)",
   "  return sh ? moneyCents(sh.value_cents || 0)"),

@@ -1947,6 +1947,22 @@ def _money_text(cents):
     return f"{'-' if cents < 0 else ''}${abs(cents) / 100:,.2f}"
 
 
+PAYDOWN_RULE = ("Debt, card and tax payments: Tax Payment rows, and rows whose "
+                "split account contains 'Payable' or starts with 'Note'. They pay "
+                "down balances -- a card payoff repays purchases already booked "
+                "as expenses -- so they are their own line, not operating spend "
+                "or COGS")
+
+
+def _is_paydown(r):
+    """A payment that reduces a balance owed, not an operating expense: an
+    explicit rule, named in every basis that relies on it."""
+    split = r.get("split_account")
+    return r.get("type") == "Tax Payment" or (
+        isinstance(split, str) and ("payable" in split.lower()
+                                    or split.strip().lower().startswith("note")))
+
+
 def _is_cogs(split):
     return isinstance(split, str) and "cost of goods sold" in split.lower()
 
@@ -2319,7 +2335,7 @@ class _MetricsCtx:
         job_expenses, attributed, cogs_rows = {}, 0, 0
         cogs_total = 0
         for r_ in spend:
-            if _is_cogs(r_.get("split_account")):
+            if _is_cogs(r_.get("split_account")) and not _is_paydown(r_):
                 cogs_total += r_["cost_cents"]
                 cogs_rows += 1
         for n, rows in bills.items():
@@ -2572,7 +2588,9 @@ class _MetricsCtx:
                    and we - timedelta(days=29) <= d <= we}
         vres = self.vendor_names()
         for name, inside in periods.items():
-            rows = [r_ for r_ in spend if inside(_iso_date(r_.get("date")))]
+            inperiod = [r_ for r_ in spend if inside(_iso_date(r_.get("date")))]
+            paid = [r_ for r_ in inperiod if _is_paydown(r_)]
+            rows = [r_ for r_ in inperiod if not _is_paydown(r_)]
             cogs = [r_ for r_ in rows if _is_cogs(r_.get("split_account"))]
             split = [r_ for r_ in rows if r_.get("split_account") is None]
             over = [r_ for r_ in rows if r_ not in cogs and r_ not in split]
@@ -2594,9 +2612,18 @@ class _MetricsCtx:
                                                                "several accounts")}
                           for a, rs in by_split.items()]
             split_rows.sort(key=lambda x: (-x["amount_usd"]["value_cents"], str(x["account"])))
+            by_paid = {}
+            for r_ in paid:
+                by_paid.setdefault(r_.get("split_account"), []).append(r_)
+            paid_rows = [{"account": a, "amount_usd": sm(rs, PAYDOWN_RULE)}
+                         for a, rs in by_paid.items()]
+            paid_rows.sort(key=lambda x: (-x["amount_usd"]["value_cents"], str(x["account"])))
             out[name] = {
-                "total_usd": sm(rows, "posting spend in the period; bill payments "
-                                      "are not spend a second time"),
+                "total_usd": sm(rows, "operating spend: posting spend in the period; "
+                                      "bill payments are not spend a second time, and "
+                                      + PAYDOWN_RULE + " -- see paydowns_usd"),
+                "paydowns_usd": sm(paid, PAYDOWN_RULE + "; still cash out"),
+                "paydowns_by_account": paid_rows,
                 "cogs_usd": sm(cogs, "posting spend booked to Cost of Goods Sold"),
                 "overhead_usd": sm(over, "posting spend booked to any other named account"),
                 "split_usd": sm(split, "posting spend QuickBooks split across several "
