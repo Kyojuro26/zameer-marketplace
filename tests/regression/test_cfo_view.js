@@ -118,6 +118,10 @@ async function run(crmDir) {
   r.check('full: an excluded margin shows its reason in words, not a code',
     /cost not billed yet/.test(p.main || '') && !/cost_not_billed_yet/.test(p.main || ''));
   r.check('full: nothing is stale', !/stale/i.test(p.main || ''));
+  r.check("full: debt, card and tax payments are shown as their own line with the server's total",
+    ((s.expenses.window.paydowns_usd || {}).value_cents != null) && new RegExp('Debt, card and tax payments ' + (s.expenses.window.paydowns_usd.value_cents / 100)
+      .toLocaleString('en-US', { style: 'currency', currency: 'USD' }).replace('$', '\\$')).test(p.main || ''),
+    (p.main || '').split('\n').filter(l => /Debt, card/.test(l)).join(' | '));
 
   const none = state(crmDir, 'none');
   r.check('none: the page renders with no script error', (none.page.__pageerrors || []).length === 0

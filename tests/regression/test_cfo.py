@@ -125,6 +125,12 @@ def vendor_rows(connector):
         r("Paperline Office", "2026-03-20", "Expense", None, -5000, split="Office Supplies"),
         r("Cobalt Freight", "2026-03-28", "Vendor Credit", "VC-1", -2000),
         r("Cobalt Freight", "2026-03-29", "Credit Card Credit", "CC-9", -300),
+        # paying down balances, not operating spend (invented account names)
+        r("Harbor Lending", "2026-03-05", "Check", "5502", -8000, split="Note: Truck Loan"),
+        r("Bluefin Card Services", "2026-03-06", "Expense", None, -4000,
+          split="Company Card Payable"),
+        r("State Revenue Office", "2026-03-07", "Tax Payment", None, -600,
+          split="Sales Tax Payable"),
         r("Paperline Office", "2026-03-04", "Journal Entry", "JE-7", None),
     ]
 
@@ -304,6 +310,23 @@ def _body(r, server, tmp):
             == (254000, 5000, 7000), (w.get("cogs_usd"), w.get("overhead_usd"), w.get("split_usd")))
     r.check("... a bill payment is not spend a second time",
             _v(w.get("total_usd")) == 266000, w.get("total_usd"))
+    pd = w.get("paydowns_usd") or {}
+    r.check("debt, card and tax payments are their own line: 12,600 over 3 rows",
+            _v(pd) == 12600 and pd.get("counted") == 3, pd)
+    r.check("... excluded from operating spend and COGS (the totals above are unchanged)",
+            _v(w.get("total_usd")) == 266000 and _v(w.get("cogs_usd")) == 254000)
+    r.check("... and the rule is written in the basis, not applied silently",
+            "Payable" in str(pd.get("basis")) and "Note" in str(pd.get("basis"))
+            and "Tax Payment" in str(pd.get("basis"))
+            and "Debt, card and tax payments" in str((w.get("total_usd") or {}).get("basis")), pd)
+    r.check("... a paydown vendor is not an operating vendor row",
+            not any(x.get("vendor") in ("Harbor Lending", "Bluefin Card Services",
+                                        "State Revenue Office") for x in w.get("by_vendor") or []),
+            [x.get("vendor") for x in w.get("by_vendor") or []])
+    r.check("... its accounts are listed under the paydown line",
+            sorted(x.get("account") for x in w.get("paydowns_by_account") or [])
+            == ["Company Card Payable", "Note: Truck Loan", "Sales Tax Payable"],
+            w.get("paydowns_by_account"))
     r.check("a transaction type with no known sign is left out of spend and named, "
             "never guessed", (e.get("other_types") or {}) == {"Credit Card Credit": 1},
             e.get("other_types"))
