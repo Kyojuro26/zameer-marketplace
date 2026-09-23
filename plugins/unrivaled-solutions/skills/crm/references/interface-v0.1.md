@@ -29,7 +29,9 @@ Every response carries `ok` and `interface_version`. Failures return
 | `restore_tracker_row` | `fingerprint` | undo a dismissal |
 | `renumber_duplicate_shipments` | `shipment_id` | give each leg sharing one id its own id, so they can be edited again. Stores migrated before v0.1.28 can hold several legs under one `shipment_id` — the importer restarted its leg counter per row, so a project number on two open-order rows minted the same id twice. `update_shipment` and `reassign_shipment` refuse such a leg outright (they cannot tell which one you mean) and the app opens whichever comes first, so there was no way to edit them at all. The first leg keeps the id; the rest take free `-L<n>` suffixes. Nothing else changes, and each leg's vendor PO is reported so you can tell them apart. |
 | `crm_info` | — | version, store path, record counts, archived- and enriched-company counts |
-| `crm_metrics` | `report?` (customer_concentration\|receivables_ageing\|vendor_on_time), `year?` | cross-record metrics (v0.1.36). Every derived number here — and every `metrics` object attached to a project or company by `get_project`, `list_projects`, `get_company`, `list_companies` — is one shape: `{value, unit, counted, population, excluded: {reason: n}, basis, as_of?}`. `counted + Σexcluded == population`; `value` is `null` exactly when `counted` is 0 (a denominator of zero never renders as $0; a fully paid customer is a real 0); each record is excluded for ONE reason from a closed vocabulary (`no_project_link`, `no_revenue_on_project`, `multiple_invoices_on_project` — a project carrying more than one invoice is excluded rather than priced at its full revenue once per invoice; `receivables_ageing` lists those projects under `multiple_invoices` — `paid`, `no_date`, `no_vendor_on_leg`, `ship_date_is_estimate`, …); anything derived from revenue minus cost says `quoted`. Per-record: `project.metrics.cycle_time_days`; `company.metrics.{revenue_won_usd, quoted_gross_profit_usd, exposure_open_receivable_usd, oldest_overdue_days}`. Computed on read, never stored; `metrics` is refused by every create and update. `year` applies to `customer_concentration` only. |
+| `lookup_number` | `n` | every typed record answering to the number `n` (v0.1.38): `project` (with company), `crm_invoice` (the number after `INV` in a composite like `1342 (INV 1191-PAID)`; the leading number is the quote), `vendor_po_on_leg` (digits OUTSIDE the leg's parentheses; with the leg's job and vendor), and from the QuickBooks snapshots `qbo_invoice`, `qbo_po` and `qbo_bill` (one per vendor and number, lines summed; a bill's Num is the vendor's own invoice number, not a PO). Each labelled by `type`; nothing collapsed. `snapshot_errors` when a snapshot cannot be read. Read-only. |
+| `qbo_snapshot_info` | — | per kind (`invoices`, `vendor_transactions`, `cash_balances`): `loaded`, `source`, `as_of`, `window_start`/`window_end`, `rows`, `loaded_at`, `age_days`, `stale` (> 7 days); an unreadable snapshot is `loaded: false` with `error`. |
+| `crm_metrics` | `report?` (customer_concentration\|receivables_ageing\|vendor_on_time\|qbo_drift), `year?` | cross-record metrics (v0.1.36). Every derived number here — and every `metrics` object attached to a project or company by `get_project`, `list_projects`, `get_company`, `list_companies` — is one shape: `{value, unit, counted, population, excluded: {reason: n}, basis, as_of?}`. `counted + Σexcluded == population`; `value` is `null` exactly when `counted` is 0 (a denominator of zero never renders as $0; a fully paid customer is a real 0); each record is excluded for ONE reason from a closed vocabulary (`no_project_link`, `no_revenue_on_project`, `multiple_invoices_on_project` — a project carrying more than one invoice is excluded rather than priced at its full revenue once per invoice; `receivables_ageing` lists those projects under `multiple_invoices` — `paid`, `no_date`, `no_vendor_on_leg`, `ship_date_is_estimate`, …); anything derived from revenue minus cost says `quoted`. Per-record: `project.metrics.cycle_time_days`; `company.metrics.{revenue_won_usd, quoted_gross_profit_usd, exposure_open_receivable_usd, oldest_overdue_days}`. Computed on read, never stored; `metrics` is refused by every create and update. `year` applies to `customer_concentration` only. |
 
 Reads that scan companies (`list_companies`, `list_projects`, `list_shipments`,
 `list_invoices`, `find_contacts`) exclude **archived** (soft-deleted) companies
@@ -45,6 +47,37 @@ and their records by default; pass `include_archived=true` to see them.
 The **runner** is the CRM skill: it queries the read-only Outlook MCP
 (email/calendar search per contact email), computes the signal, and persists
 it via `set_enrichment`. The store never talks to Outlook for reads itself.
+
+## QuickBooks snapshots (v0.1.38 — outside the store)
+
+Nothing here talks to QuickBooks. Data arrives as a file the operator exported,
+or as rows a chat session read from the Intuit connector. Each kind is one
+JSON file in `qbo-snapshots`, a SIBLING of the store folder, replaced wholesale
+on every load (`kind`, `source` export|connector, `as_of`, `window_start`,
+`window_end`, `loaded_at`, `rows`; amounts in integer cents). Loading writes no
+store file and no changelog line; the store backup does not include it.
+
+| Tool | Args | Notes |
+|---|---|---|
+| `load_qbo_export` | `path` | an Invoice List by Date or Transaction List by Vendor `.xlsx`, told apart by its header row. Returns `kind`, `rows`, `by_type`, `as_of` (the report's run time from its footer), `window_start`/`window_end` (title row 3). A file that is neither is refused with `found_header`; nothing is loaded partially. |
+| `load_qbo_rows` | `kind`, `rows`, `as_of`, `window_start`, `window_end` | the connector path. Dates ISO (`YYYY-MM-DD`). Refused whole on the first bad row: unknown fields, non-integer cents, a missing required field, a duplicate. Row schema below — **provisional until the connector's real output has been checked.** |
+
+Row schema (`?` = may be null; *optional* fields may be omitted and never come from an export):
+
+- `invoices`: `type`, `num`, `date`, `due_date?`, `name?`, `amount_cents`, `open_cents`; optional `id`, `memo?`. `(type, num)` unique through the server's key.
+- `vendor_transactions`: `vendor`, `date`, `type`, `num?`, `posting?` (bool), `account?`, `split_account?` (null = split across several accounts, never guessed), `amount_cents?`; optional `id`, `memo?`, `track_1099?`, `linked_po?` (Bill only), `customer_ref?` (Expense only), `open_status?` (`open`\|`closed`, Purchase Order only).
+- `cash_balances`: `account`, `balance_cents`; optional `id`, `account_type?`. `account` unique.
+
+Joined at read time, never stored: `company.metrics.invoiced_usd` and
+`qbo_open_receivable_usd` (QuickBooks basis, beside — never blended into — the
+quoted `exposure_open_receivable_usd`; `value_cents` exact, plus
+`snapshot_as_of`, window, `age_days`, `stale`), `company.metrics.qbo_invoices`
+and per invoice in `get_company`/`list_invoices`: `qbo_amount_usd`,
+`qbo_open_usd`. The key is `(Invoice, number)`; reasons `no_qbo_snapshot`,
+`ambiguous_qbo_match` (two rows, never one picked), `qbo_match_shared` (one QuickBooks invoice claimed by more than one live CRM invoice — e.g. two customers each holding a "7001"; counted for neither, never twice), `outside_snapshot_window`
+(never read as missing), `not_in_qbo_snapshot`. `crm_metrics(report="qbo_drift")`
+is the two-way drift list: QuickBooks invoices no CRM invoice carries, and CRM
+invoices in the window QuickBooks lacks, with counts and dollars.
 
 ## Writes (validated, atomic, logged)
 
@@ -62,7 +95,7 @@ it via `set_enrichment`. The store never talks to Outlook for reads itself.
 | `create_vendor` | `fields` | add a vendor: creates/reuses the company (role=vendor) + a vendor detail record (rep, email, phone, offerings, PO/invoice routing) |
 | `update_vendor` | `company_id`, `fields` | edit vendor detail |
 | `create_invoice` | `company_id`, `fields` | add a client invoice that never came through the tracker workbook. `invoice_no` required and unique for that customer; a supplied `project_no` must name a live (non-archived) project; `payment_status` defaults to `open`. `payment_status_raw`/`sheet_row` are importer provenance and cannot be set. |
-| `update_invoice` | `company_id`, `invoice_no`, `fields` | edit an invoice / customer order: `payment_status`, `pay_date`, `payment_notes`, `client_po_raw`, `due_on`, and (v0.1.26+) `invoice_date`, `project_no`. Matched by (company_id, invoice_no) — invoice numbers aren't guaranteed unique across companies. A `project_no` must name a live project. The invoice's own number is changed with `rename_invoice`. `payment_status_raw`/`sheet_row` stay locked — they record what the source workbook said. |
+| `update_invoice` | `company_id`, `invoice_no`, `fields` | edit an invoice / customer order: `payment_status`, `pay_date`, `payment_notes`, `client_po_raw`, `due_on`, and (v0.1.26+) `invoice_date`, `project_no`. Matched by (company_id, invoice_no) — invoice numbers aren't guaranteed unique across companies. A `project_no` must name a live project. The invoice's own number is changed with `rename_invoice`. `payment_status_raw`/`sheet_row` stay locked — they record what the source workbook said. Setting a `project_no` that is also a vendor PO (on a leg, or a PO in the QuickBooks snapshot) still writes, and the response carries `warnings: [{code: "number_is_also_vendor_po", source, vendor, job, message}]`; `create_invoice` does the same. |
 | `rename_project` | `old_project_no`, `new_project_no`, `company_id?` | change a project's number/key, cascading the update to every shipment (`project_no`/`all_project_nos`) and invoice (`project_no`) that references it — atomic, one write-locked operation. Fails if the new number is empty or already used by a different project. When two customers hold one number, `company_id` narrows the number to that customer's project before the ambiguity check: exactly one of theirs is used, none is "not found" (never the other customer's record), and the same customer holding the number twice is still refused; without it the call behaves exactly as before. With `company_id` the cascade leaves behind the other customer's shipments and invoices when two customers hold the number, live or archived, and carries everything else on it (a record with no company, or filed under a third); on a number one customer holds it carries every record on it, as without. The new number must still be unused store-wide. |
 | `convert_lead` | `company_id` | promote a lead to a customer (role lead -> customer); everything already recorded against it is kept |
 | `archive_company` | `company_id` | **soft-delete** a customer/vendor — hidden from the CRM, nothing destroyed; its projects/contacts/shipments/invoices are preserved |

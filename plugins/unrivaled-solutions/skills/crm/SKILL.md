@@ -64,6 +64,18 @@ Use the read tools; they are side-effect-free:
   slipped ship dates; `vendor_po=` to find which project a vendor's PO
   number belongs to — the reverse lookup for "how does vendor PO X map to
   our project #").
+- "What is 1167?" → `lookup_number(n=)`. Project, quote, PO and invoice
+  numbers share one range, so a number is often several things at once: say
+  EVERY match with its type (project, CRM invoice, vendor PO on a leg,
+  QuickBooks invoice / PO / bill), never just the first. A QuickBooks bill's
+  Num is the vendor's own invoice number, not one of our POs.
+- QuickBooks figures: `load_qbo_export(path=)` for an exported Invoice List by
+  Date or Transaction List by Vendor; `qbo_snapshot_info` says what is loaded
+  and how old. Invoiced and open amounts then arrive on companies as
+  `invoiced_usd` / `qbo_open_receivable_usd` (QuickBooks, realized) beside the
+  quoted `exposure_open_receivable_usd` — name each for what it is, never add
+  them together. `crm_metrics(report="qbo_drift")` lists what QuickBooks and
+  the CRM disagree on.
 - Invoices by number, or what's coming due → `list_invoices` (`invoice_no=`
   for exact/substring match; `overdue=true` for past-due, unpaid invoices).
   Every invoice reports `effective_due_on`: a manual `due_on` override if

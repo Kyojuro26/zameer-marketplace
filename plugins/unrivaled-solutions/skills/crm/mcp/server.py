@@ -679,6 +679,17 @@ def _qbo_snapshot_dir():
     return STORE.root.parent / "qbo-snapshots"
 
 
+def _qbo_cents_problem(rows):
+    """The first *_cents value that is not an integer (or null), as a
+    sentence, or None."""
+    for n, r in enumerate(rows):
+        for k, v in r.items():
+            if k.endswith("_cents") and v is not None and \
+                    (type(v) is not int):
+                return f"row {n}: {k} must be integer cents, got {v!r}"
+    return None
+
+
 def _save_qbo_snapshot(kind, source, as_of, window_start, window_end, rows):
     """Replace one kind's snapshot. Returns the path written."""
     if kind not in QBO_SNAPSHOT_KINDS:
@@ -689,12 +700,9 @@ def _save_qbo_snapshot(kind, source, as_of, window_start, window_end, rows):
                          f"export or connector")
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise StoreError("snapshot rows must be a list of objects")
-    for n, r in enumerate(rows):
-        for k, v in r.items():
-            if k.endswith("_cents") and v is not None and \
-                    (type(v) is not int):
-                raise StoreError(f"row {n}: {k} must be integer cents, "
-                                 f"got {v!r}")
+    bad = _qbo_cents_problem(rows)
+    if bad:
+        raise StoreError(bad)
     doc = {"kind": kind, "source": source, "as_of": as_of,
            "window_start": window_start, "window_end": window_end,
            "loaded_at": datetime.now(timezone.utc).isoformat(),
@@ -724,6 +732,163 @@ def _save_qbo_snapshot(kind, source, as_of, window_start, window_end, rows):
         raise
     Store._commit(tmp, d / fn, fn)
     return d / fn
+
+
+QBO_STALE_DAYS = 7
+QBO_INVOICED_BASIS = ("QuickBooks Amount of the invoices matched by (Invoice, "
+                      "number) in the snapshot window; invoiced (realized), "
+                      "not quoted")
+QBO_OPEN_BASIS = ("QuickBooks Open balance of the invoices matched by "
+                  "(Invoice, number) in the snapshot; QuickBooks' figure, "
+                  "whatever the CRM's payment status says")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _iso_date(v):
+    """A date from an ISO 'YYYY-MM-DD' (or the date part of an ISO datetime),
+    or None."""
+    if not isinstance(v, str) or not _ISO_DATE_RE.match(v[:10]):
+        return None
+    try:
+        d = datetime.fromisoformat(v) if len(v) > 10 else \
+            datetime.strptime(v, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return d.date()
+
+
+def _load_qbo_snapshot(kind):
+    """The snapshot of one kind, or None when nothing is loaded. A file that
+    is there but unreadable is a StoreError, never an empty snapshot."""
+    p = _qbo_snapshot_dir() / f"{kind}.json"
+    if not p.exists():
+        return None
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise StoreError(f"the {kind} snapshot ({p}) could not be read ({e}); "
+                         f"load it again") from e
+    ok = (isinstance(doc, dict) and doc.get("kind") == kind
+          and isinstance(doc.get("rows"), list)
+          and all(isinstance(r, dict) for r in doc["rows"])
+          and _iso_date(doc.get("as_of")) is not None
+          and _iso_date(doc.get("window_start")) is not None
+          and _iso_date(doc.get("window_end")) is not None
+          and _qbo_cents_problem(doc["rows"]) is None
+          and _iso_date(doc["window_start"]) <= _iso_date(doc["window_end"]))
+    if not ok:
+        raise StoreError(f"the {kind} snapshot ({p}) is not a snapshot this "
+                         f"version can read; load it again")
+    return doc
+
+
+# The connector path's row schema, documented in interface-v0.1.md. A field
+# is  text | text? | date | date? | cents | cents? | bool? ; "?" allows null.
+# REQUIRED fields must be present (possibly null where "?"); OPTIONAL ones are
+# what the Intuit connector MAY supply and an export never does. Provisional
+# until the connector's real output has been checked.
+QBO_ROW_SCHEMA = {
+    "invoices": {
+        "required": {"type": "text", "num": "text", "date": "date",
+                     "due_date": "date?", "name": "text?",
+                     "amount_cents": "cents", "open_cents": "cents"},
+        "optional": {"id": "text", "memo": "text?"},
+        "unique": ("type", "num"),
+    },
+    "vendor_transactions": {
+        "required": {"vendor": "text", "date": "date", "type": "text",
+                     "num": "text?", "posting": "bool?", "account": "text?",
+                     "split_account": "text?", "amount_cents": "cents?"},
+        "optional": {"id": "text", "memo": "text?", "track_1099": "bool?",
+                     "linked_po": "text?", "customer_ref": "text?",
+                     "open_status": "status?"},
+        "unique": None,
+    },
+    "cash_balances": {
+        "required": {"account": "text", "balance_cents": "cents"},
+        "optional": {"id": "text", "account_type": "text?"},
+        "unique": ("account",),
+    },
+}
+# a connector-only field means something on one transaction type only
+QBO_FIELD_ONLY_ON = {"linked_po": "Bill", "customer_ref": "Expense",
+                     "open_status": "Purchase Order"}
+
+
+def _qbo_value_ok(spec, v):
+    if spec.endswith("?"):
+        if v is None:
+            return True
+        spec = spec[:-1]
+    if spec == "text":
+        return isinstance(v, str) and bool(v.strip())
+    if spec == "date":
+        return isinstance(v, str) and len(v) == 10 and _iso_date(v) is not None
+    if spec == "cents":
+        return type(v) is int
+    if spec == "bool":
+        return type(v) is bool
+    if spec == "status":
+        return v in ("open", "closed")
+    return False
+
+
+def _validate_qbo_rows(kind, rows):
+    """Refuse the whole load on the first bad row, naming it."""
+    if kind not in QBO_ROW_SCHEMA:
+        raise StoreError(f"unknown snapshot kind {kind!r}; expected one of "
+                         f"{', '.join(QBO_SNAPSHOT_KINDS)}")
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        raise StoreError("rows must be a list of objects")
+    sch = QBO_ROW_SCHEMA[kind]
+    fields = {**sch["required"], **sch["optional"]}
+    seen = {}
+    for n, row in enumerate(rows):
+        unknown = sorted(set(row) - set(fields))
+        if unknown:
+            raise StoreError(f"row {n}: unknown field(s) {unknown}; a {kind} "
+                             f"row takes {sorted(fields)}")
+        missing = sorted(set(sch["required"]) - set(row))
+        if missing:
+            raise StoreError(f"row {n}: missing required field(s) {missing}")
+        for k, v in row.items():
+            if not _qbo_value_ok(fields[k], v):
+                raise StoreError(f"row {n}: {k}={v!r} is not a valid "
+                                 f"{fields[k].rstrip('?')}"
+                                 + (" (integer cents)" if "cents" in fields[k] else ""))
+            only = QBO_FIELD_ONLY_ON.get(k)
+            if only and v is not None and row.get("type") != only:
+                raise StoreError(f"row {n}: {k} belongs on a {only}, not a "
+                                 f"{row.get('type')!r}")
+        if sch["unique"]:
+            key = tuple(_key(row.get(f)) for f in sch["unique"])
+            if key in seen:
+                raise StoreError(f"rows {seen[key]} and {n} share "
+                                 f"{dict(zip(sch['unique'], key))}; a {kind} "
+                                 f"snapshot cannot hold two -- nothing picks one")
+            seen[key] = n
+
+
+_QBO_EXPORTS = None
+
+
+def _qbo_exports():
+    """pipeline/qbo_exports.py, loaded on first use by path. The visual app's
+    own copy of this folder has no pipeline/ beside it, so this is never an
+    import-time dependency: only loading an export needs the parser."""
+    global _QBO_EXPORTS
+    if _QBO_EXPORTS is None:
+        import importlib.util
+        p = Path(__file__).resolve().parent.parent / "pipeline" / "qbo_exports.py"
+        if not p.exists():
+            raise StoreError("the QuickBooks export parser is not part of this "
+                             "install (pipeline/qbo_exports.py); load the "
+                             "export from a Claude chat instead")
+        spec = importlib.util.spec_from_file_location("crm_qbo_exports", p)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        _QBO_EXPORTS = m
+    return _QBO_EXPORTS
 
 # ------------------------------------------------------------- helpers
 
@@ -950,6 +1115,162 @@ def _key(v):
                            # and it would match a record whose id is literally
                            # null as well as one reading "None".
     return _num_to_str(v).strip()
+
+
+# The invoice number inside a composite CRM number, "1342 (INV 1191-100%-PAID)"
+# -> "1191": the digits AFTER the INV token; the leading number is the quote.
+# The same pattern as pipeline/normalize.py's INV_RE, which cannot be imported
+# here: the visual app's install copies mcp/ and view/ only, and this runs
+# there. tests/regression/test_qbo_invoiced.py holds the two to one reading.
+_INV_NO_RE = re.compile(r"INV[\s#-]*(\d+)", re.IGNORECASE)
+
+
+def _qbo_invoice_key(invoice_no):
+    """The comparison key of a CRM invoice against QuickBooks' (Invoice, Num):
+    the number after INV when there is one, else the whole number -- both
+    through _key()."""
+    m = _INV_NO_RE.search(invoice_no) if isinstance(invoice_no, str) else None
+    return _key(m.group(1) if m else invoice_no)
+
+
+def _js_str(v):
+    """A stored value as the view's st() will spell it once the JSON has been
+    parsed in the browser: null is "", and a float that is a whole number
+    loses its ".0" (JSON 7040.0 reads back as the number 7040). A key the
+    server builds for the page must be this, or the page cannot find it."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+_PAREN_RE = re.compile(r"\([^()]*\)")
+
+
+def _leg_po_numbers(vendor_po_raw):
+    """The PO numbers a leg's PO text names: every digit run OUTSIDE its
+    parentheses. "PO # 1300 (1167 Paid)" is PO 1300 -- the parentheses hold
+    the vendor and payment notes, and a number there is not this leg's PO."""
+    if not isinstance(vendor_po_raw, str):
+        return set() if vendor_po_raw is None or isinstance(vendor_po_raw, bool) \
+            else {_key(vendor_po_raw)}
+    t = vendor_po_raw
+    while True:
+        u = _PAREN_RE.sub(" ", t)
+        if u == t:
+            break
+        t = u
+    return {_key(d) for d in re.findall(r"\d+", t)}
+
+
+BILL_NUM_NOTE = ("a bill's Num is the vendor's own invoice number, not a PO "
+                 "and not one of ours")
+
+
+def _number_matches(ctx, n):
+    """Every typed record answering to the number n. Read-only."""
+    k = _key(n)
+    out, errors = [], []
+    if not k:
+        return out, errors
+    names = {_hk(c.get("company_id")): c.get("display_name") for c in ctx.companies}
+    for p in ctx.projects:
+        if _key(p.get("project_no")) == k:
+            out.append({"type": "project", "project_no": p.get("project_no"),
+                        "company_id": p.get("company_id"),
+                        "company_name": names.get(_hk(p.get("company_id"))),
+                        "status": p.get("status"),
+                        "description": p.get("description")})
+    for i in ctx.invoices:
+        if _qbo_invoice_key(i.get("invoice_no")) == k:
+            out.append({"type": "crm_invoice", "invoice_no": i.get("invoice_no"),
+                        "company_id": i.get("company_id"),
+                        "company_name": names.get(_hk(i.get("company_id"))),
+                        "project_no": i.get("project_no"),
+                        "invoice_date": i.get("invoice_date"),
+                        "payment_status": i.get("payment_status")})
+    for s_ in ctx.shipments:
+        if k in _leg_po_numbers(s_.get("vendor_po_raw")):
+            vid = _hk(s_.get("vendor_id"))
+            out.append({"type": "vendor_po_on_leg",
+                        "shipment_id": s_.get("shipment_id"),
+                        "vendor_po_raw": s_.get("vendor_po_raw"),
+                        "project_no": s_.get("project_no"),
+                        "company_id": s_.get("company_id"),
+                        "company_name": names.get(_hk(s_.get("company_id"))),
+                        "vendor_id": s_.get("vendor_id"),
+                        "vendor": ((ctx.vendors.get(vid) or {}).get("display_name")
+                                   or names.get(vid)) if vid else None,
+                        "stage": s_.get("stage")})
+    for row in ctx.qbo_by_num.get(k, []):
+        out.append({"type": "qbo_invoice", "num": row.get("num"),
+                    "date": row.get("date"), "name": row.get("name"),
+                    "amount_cents": row.get("amount_cents"),
+                    "open_cents": row.get("open_cents")})
+    if ctx.qbo_error:
+        errors.append(ctx.qbo_error)
+    try:
+        vt = _load_qbo_snapshot("vendor_transactions")
+    except StoreError as e:
+        vt = None
+        errors.append(str(e))
+    groups = {}
+    for row in (vt or {}).get("rows", []):
+        t = {"Purchase Order": "qbo_po", "Bill": "qbo_bill"}.get(row.get("type"))
+        if t and _key(row.get("num")) == k:
+            g = groups.setdefault((t, row.get("vendor")), {
+                "type": t, "num": row.get("num"), "vendor": row.get("vendor"),
+                "lines": 0, "amount_cents": 0, "date": row.get("date")})
+            g["lines"] += 1
+            if type(row.get("amount_cents")) is int:
+                g["amount_cents"] += row["amount_cents"]
+            if row.get("open_status"):
+                g["open_status"] = row["open_status"]
+            if t == "qbo_bill":
+                g["note"] = BILL_NUM_NOTE
+    out.extend(groups.values())
+    return out, errors
+
+
+def _po_warnings(project_no):
+    """number_is_also_vendor_po, once per leg and per QuickBooks PO, when a
+    project_no being set is also a vendor PO number. Never refuses."""
+    matches, _errors = _number_matches(_MetricsCtx(), project_no)
+    out = []
+    for m in matches:
+        if m["type"] == "vendor_po_on_leg":
+            out.append({"code": "number_is_also_vendor_po", "number": _key(project_no),
+                        "source": "shipment_leg", "vendor": m.get("vendor"),
+                        "job": m.get("project_no"), "job_company": m.get("company_name"),
+                        "shipment_id": m.get("shipment_id"),
+                        "message": f"{_key(project_no)} is also vendor PO "
+                                   f"{m.get('vendor_po_raw')!r} on job "
+                                   f"{m.get('project_no')}"
+                                   + (f" ({m.get('company_name')})" if m.get("company_name") else "")
+                                   + (f", vendor {m.get('vendor')}" if m.get("vendor") else "")})
+        elif m["type"] == "qbo_po":
+            out.append({"code": "number_is_also_vendor_po", "number": _key(project_no),
+                        "source": "qbo_snapshot", "vendor": m.get("vendor"),
+                        "job": None,
+                        "message": f"{_key(project_no)} is also QuickBooks PO "
+                                   f"{m.get('num')} to {m.get('vendor')} (QuickBooks "
+                                   f"records no job for a PO)"})
+    return out
+
+
+def _po_warnings_safe(project_no):
+    """_po_warnings for a write that has ALREADY been saved: a store file the
+    check cannot read must not turn a completed write into a reported
+    failure. It says the check did not run instead."""
+    try:
+        return _po_warnings(project_no)
+    except StoreError as e:
+        return [{"code": "po_check_unavailable", "number": _key(project_no),
+                 "message": f"saved; could not check whether "
+                            f"{_key(project_no)} is also a vendor PO ({e})"}]
 
 
 def _resolve(wanted, stored_keys):
@@ -1339,12 +1660,16 @@ EXCLUSION_REASONS = (
     # legs
     "no_shipment", "no_shipped_leg", "ship_date_is_estimate", "not_yet_shipped",
     "cancelled", "no_vendor_on_leg", "no_eta",
+    # QuickBooks snapshot joins (0.1.38)
+    "no_qbo_snapshot", "ambiguous_qbo_match", "outside_snapshot_window",
+    "not_in_qbo_snapshot", "qbo_match_shared",
 )
 # A leg in one of these stages has left the vendor. The importer sets Shipped
 # exactly when a ship date exists; Delivered and Installed are later states of
 # the same fact. Ordered and On Hold have not shipped; Cancelled never will.
 SHIPPED_STAGES = {"Shipped", "Delivered", "Installed"}
-METRIC_REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time")
+METRIC_REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time",
+                  "qbo_drift")
 AGE_BUCKETS = ("not_yet_due", "0-30", "31-60", "61-90", "90+")
 
 
@@ -1486,6 +1811,146 @@ class _MetricsCtx:
                 k = (pno, _hk(i.get("company_id")))
                 self.inv_count_by_proj[k] = self.inv_count_by_proj.get(k, 0) + 1
         self.today = _today()
+        # The QuickBooks invoices snapshot, joined at read time. Unreadable is
+        # reported on every QBO shape, never raised: one bad side file must not
+        # take every read tool down with it.
+        self.qbo, self.qbo_error = None, None
+        try:
+            self.qbo = _load_qbo_snapshot("invoices")
+        except StoreError as e:
+            self.qbo_error = str(e)
+        self.qbo_by_num = {}
+        if self.qbo:
+            self.qbo_window = (_iso_date(self.qbo["window_start"]),
+                               _iso_date(self.qbo["window_end"]))
+            for row in self.qbo["rows"]:
+                if row.get("type") != "Invoice":
+                    continue
+                k = _key(row.get("num"))
+                if k:
+                    self.qbo_by_num.setdefault(k, []).append(row)
+        # How many live CRM invoices claim each QuickBooks number, store-wide.
+        # Two customers can each hold an invoice "7001"; both would match the
+        # one QuickBooks 7001 and count its amount twice. The customer name is
+        # never the key, so neither is picked (0.1.38, found on real data).
+        self.qbo_claims = {}
+        for i in self.invoices:
+            k = _qbo_invoice_key(i.get("invoice_no"))
+            if k and k in self.qbo_by_num:
+                self.qbo_claims[k] = self.qbo_claims.get(k, 0) + 1
+
+    # ---- QuickBooks ----
+    def qbo_match(self, inv):
+        """(snapshot row, reason). The key is (Invoice, number); two rows with
+        one number are never picked between. With no match, the invoice's own
+        date decides between "outside the window" and "not in QuickBooks" --
+        an invoice the snapshot could not have held never reads as missing."""
+        if not self.qbo:
+            return None, "no_qbo_snapshot"
+        k = _qbo_invoice_key(inv.get("invoice_no"))
+        hits = self.qbo_by_num.get(k, []) if k else []
+        if len(hits) > 1:
+            return None, "ambiguous_qbo_match"
+        if hits:
+            if self.qbo_claims.get(k, 0) > 1:
+                return None, "qbo_match_shared"
+            return hits[0], None
+        if not inv.get("invoice_date"):
+            return None, "no_date"
+        d = _parse_date_loose(inv.get("invoice_date"))
+        if not d:
+            return None, "unparseable_date"
+        ws, we = self.qbo_window
+        if not ws <= d.date() <= we:
+            return None, "outside_snapshot_window"
+        return None, "not_in_qbo_snapshot"
+
+    def qbo_shape(self, cents, counted, excluded, basis):
+        """A QuickBooks-basis money shape: dollars in value, exact integer
+        cents in value_cents, and the snapshot it came from."""
+        sh = _shape(cents / 100, "usd", counted, excluded, basis)
+        sh["value_cents"] = cents if counted else None
+        if self.qbo:
+            age = (self.today - _iso_date(self.qbo["as_of"])).days
+            sh.update({"snapshot_as_of": self.qbo["as_of"],
+                       "window_start": self.qbo["window_start"],
+                       "window_end": self.qbo["window_end"],
+                       "age_days": age, "stale": age > QBO_STALE_DAYS})
+        elif self.qbo_error:
+            sh["snapshot_error"] = self.qbo_error
+        return sh
+
+    def qbo_totals(self, invoices):
+        """(invoiced_usd, qbo_open_receivable_usd) over these invoices."""
+        amt, opn, n, exc = 0, 0, 0, []
+        for i in invoices:
+            row, why = self.qbo_match(i)
+            if why:
+                exc.append(why); continue
+            amt += row["amount_cents"]; opn += row["open_cents"]; n += 1
+        return (self.qbo_shape(amt, n, _tally(exc), QBO_INVOICED_BASIS),
+                self.qbo_shape(opn, n, _tally(exc), QBO_OPEN_BASIS))
+
+    def invoice_qbo(self, inv):
+        """The per-invoice pair, a population of one each. Responses only."""
+        a, o = self.qbo_totals([inv])
+        return {"qbo_amount_usd": a, "qbo_open_usd": o}
+
+    def qbo_drift(self):
+        """Both directions, read-only. The report IS the shape of the first:
+        QuickBooks invoices that no live CRM invoice carries, in dollars,
+        counted over every QuickBooks invoice examined, with the invoices as
+        rows. Beside it: live CRM invoices dated inside the window that
+        QuickBooks lacks (priced at the CRM's quoted figure, named so), the
+        QuickBooks numbers that match more than once, and the store-wide
+        QuickBooks totals the Receivables header adds up per company."""
+        invoiced, qbo_open = self.qbo_totals(self.invoices)
+        crm_keys = {_qbo_invoice_key(i.get("invoice_no")) for i in self.invoices}
+        crm_keys.discard("")
+        q_rows = ([r_ for r_ in self.qbo["rows"] if r_.get("type") == "Invoice"]
+                  if self.qbo else [])
+        without = [r_ for r_ in q_rows if _key(r_.get("num")) not in crm_keys]
+        without.sort(key=lambda r_: (-r_["amount_cents"], str(r_.get("num"))))
+        sh = self.qbo_shape(
+            sum(r_["amount_cents"] for r_ in without), len(q_rows), {},
+            "QuickBooks Amount of the snapshot's invoices that no live CRM "
+            "invoice carries; counted is every QuickBooks invoice examined"
+            if self.qbo else "no QuickBooks invoices snapshot is loaded")
+        sh["loaded"] = bool(self.qbo)
+        sh["count"] = len(without)
+        sh["open_usd"] = self.qbo_shape(
+            sum(r_["open_cents"] for r_ in without), len(q_rows), {},
+            "QuickBooks Open balance of the same invoices")
+        sh["rows"] = [{"num": r_.get("num"), "date": r_.get("date"),
+                       "name": r_.get("name"),
+                       "amount_cents": r_["amount_cents"],
+                       "open_cents": r_["open_cents"]} for r_ in without]
+        missing = [i for i in self.invoices
+                   if self.qbo_match(i)[1] == "not_in_qbo_snapshot"]
+        q_total, q_n, q_exc = 0, 0, []
+        for i in missing:
+            amt, why = self.invoice_amount(i)
+            if not why and self.split_billed(i):
+                why = "multiple_invoices_on_project"
+            if why:
+                q_exc.append(why); continue
+            q_total += amt; q_n += 1
+        sh["crm_invoices_not_in_qbo"] = {
+            "count": len(missing),
+            "quoted_usd": _shape(round(q_total), "usd", q_n, _tally(q_exc),
+                                 "quoted revenue of each invoice's linked "
+                                 "project -- the CRM's quoted figure, not an "
+                                 "invoiced amount; a project carrying more "
+                                 "than one invoice is excluded"),
+            "rows": [{"invoice_no": i.get("invoice_no"),
+                      "company_id": i.get("company_id"),
+                      "invoice_date": i.get("invoice_date"),
+                      "project_no": i.get("project_no")} for i in missing]}
+        sh["ambiguous_qbo_numbers"] = sorted(
+            ({"num": k, "rows": len(v)} for k, v in self.qbo_by_num.items()
+             if len(v) > 1), key=lambda x: x["num"])
+        sh["invoiced_usd"], sh["qbo_open_receivable_usd"] = invoiced, qbo_open
+        return sh
 
     # ---- per-invoice ----
     def invoice_amount(self, inv):
@@ -1635,9 +2100,16 @@ class _MetricsCtx:
                          "days past the effective due date of the most overdue "
                          "unpaid invoice, clamped at zero",
                          as_of=self.today.isoformat())
+        invoiced, qbo_open = self.qbo_totals(invoices)
         return {"revenue_won_usd": rev, "quoted_gross_profit_usd": gp,
                 "exposure_open_receivable_usd": exposure,
-                "oldest_overdue_days": overdue}
+                "oldest_overdue_days": overdue,
+                "invoiced_usd": invoiced,
+                "qbo_open_receivable_usd": qbo_open,
+                # per invoice, keyed exactly as the view keys a row (its st()),
+                # so the rows and the header add up the same shapes
+                "qbo_invoices": {_js_str(i.get("invoice_no")): self.invoice_qbo(i)
+                                 for i in invoices}}
 
     # ---- aggregates ----
     def customer_concentration(self, year=None):
@@ -1845,7 +2317,9 @@ def get_company(ref: str) -> dict:
     return {"ok": True, "interface_version": VERSION,
             "company": dict(c, metrics=ctx.company_metrics(c)),
             "contacts": contacts, "projects": _with_project_metrics(ctx, projects),
-            "shipments": shipments, "invoices": _with_due_on(invoices),
+            "shipments": shipments,
+            "invoices": [dict(i, **ctx.invoice_qbo(i))
+                         for i in _with_due_on(invoices)],
             "needs_review": flags,
             "enrichment": STORE.load_enrichment().get(cid)}
 
@@ -2044,6 +2518,8 @@ def list_invoices(payment_status: str = None, company: str = None,
         out = [i for i in out
                if i.get("effective_due_on") and i["effective_due_on"] < today
                and not str(i.get("payment_status") or "").startswith("paid")]
+    ctx = _MetricsCtx()
+    out = [dict(i, **ctx.invoice_qbo(i)) for i in out]
     return {"ok": True, "interface_version": VERSION,
             "count": len(out), "invoices": out}
 
@@ -2081,8 +2557,10 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
     only report `year` applies to), receivables_ageing (unpaid invoices in
     not_yet_due / 0-30 / 31-60 / 61-90 / 90+ buckets by days past the
     effective due date, each with a priced amount), and vendor_on_time (per
-    vendor: completed legs shipped on or before their ETA). Name one report
-    or omit for all three. Read-only; nothing is persisted."""
+    vendor: completed legs shipped on or before their ETA), and qbo_drift
+    (QuickBooks invoices no CRM invoice carries, and CRM invoices in the
+    snapshot window QuickBooks lacks, with counts and dollars). Name one
+    report or omit for all. Read-only; nothing is persisted."""
     if report is not None and report not in METRIC_REPORTS:
         return _err(f"report must be one of {list(METRIC_REPORTS)} or omitted")
     ctx = _MetricsCtx()
@@ -2093,10 +2571,110 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
             reports[name] = ctx.customer_concentration(year=year)
         elif name == "receivables_ageing":
             reports[name] = ctx.receivables_ageing()
+        elif name == "qbo_drift":
+            reports[name] = ctx.qbo_drift()
         else:
             reports[name] = ctx.vendor_on_time()
     return {"ok": True, "interface_version": VERSION,
             "as_of": ctx.today.isoformat(), "reports": reports}
+
+
+# --------- QuickBooks snapshots (outside the store; no store write) ---------
+
+
+@mcp.tool()
+@_store_errors
+def load_qbo_export(path: str) -> dict:
+    """Load a QuickBooks export the operator downloaded -- Invoice List by
+    Date or Transaction List by Vendor (.xlsx) -- as a snapshot. The file is
+    recognised by its header row and read, never changed. The snapshot is
+    written beside the store (qbo-snapshots), replacing that kind's previous
+    one; nothing in the store changes and no changelog line is written.
+    Returns the kind, row counts, the report window and as_of."""
+    qx = _qbo_exports()
+    try:
+        parsed = qx.parse_export(path)
+    except qx.QboExportError as e:
+        return dict(_err(e), found_header=e.found_header)
+    _save_qbo_snapshot(parsed["kind"], "export", parsed["as_of"],
+                       parsed["window_start"], parsed["window_end"],
+                       parsed["rows"])
+    by_type = {}
+    for row in parsed["rows"]:
+        t = row.get("type")
+        by_type[t] = by_type.get(t, 0) + 1
+    return {"ok": True, "interface_version": VERSION, "kind": parsed["kind"],
+            "rows": len(parsed["rows"]), "by_type": by_type,
+            "as_of": parsed["as_of"], "window_start": parsed["window_start"],
+            "window_end": parsed["window_end"]}
+
+
+@mcp.tool()
+@_store_errors
+def load_qbo_rows(kind: str, rows: list, as_of: str, window_start: str,
+                  window_end: str) -> dict:
+    """The connector path: rows a chat session read from the Intuit
+    QuickBooks connector, passed in THIS server's schema (interface-v0.1.md),
+    as a snapshot of `kind` (invoices | vendor_transactions | cash_balances).
+    Validated strictly -- unknown fields refused, amounts in integer cents,
+    (type, num) unique for invoices -- and refused whole on the first bad
+    row. as_of and the window are ISO dates. Nothing in the store changes."""
+    if _iso_date(as_of) is None:
+        raise StoreError(f"as_of {as_of!r} is not an ISO date")
+    ws, we = _iso_date(window_start), _iso_date(window_end)
+    if ws is None or we is None:
+        raise StoreError("window_start and window_end must be ISO dates")
+    if we < ws:
+        raise StoreError(f"the window ends ({window_end}) before it starts "
+                         f"({window_start})")
+    _validate_qbo_rows(kind, rows)
+    _save_qbo_snapshot(kind, "connector", as_of, window_start, window_end, rows)
+    return {"ok": True, "interface_version": VERSION, "kind": kind,
+            "rows": len(rows), "as_of": as_of, "window_start": window_start,
+            "window_end": window_end}
+
+
+@mcp.tool()
+@_store_errors
+def qbo_snapshot_info() -> dict:
+    """Which QuickBooks snapshots are loaded: per kind, its source, as_of,
+    window, row count, and age in days (stale past 7). Read-only."""
+    kinds = {}
+    for k in QBO_SNAPSHOT_KINDS:
+        try:
+            doc = _load_qbo_snapshot(k)
+        except StoreError as e:
+            kinds[k] = {"loaded": False, "error": str(e)}
+            continue
+        if doc is None:
+            kinds[k] = {"loaded": False}
+            continue
+        age = (_today() - _iso_date(doc["as_of"])).days
+        kinds[k] = {"loaded": True, "source": doc.get("source"),
+                    "as_of": doc["as_of"], "window_start": doc["window_start"],
+                    "window_end": doc["window_end"],
+                    "loaded_at": doc.get("loaded_at"), "rows": len(doc["rows"]),
+                    "age_days": age, "stale": age > QBO_STALE_DAYS}
+    return {"ok": True, "interface_version": VERSION,
+            "snapshot_dir": str(_qbo_snapshot_dir()), "kinds": kinds}
+
+
+@mcp.tool()
+@_store_errors
+def lookup_number(n: str) -> dict:
+    """What is this number? PO, project/quote and invoice numbers share one
+    range, so a number can be several things at once. Returns EVERY typed
+    match, each labelled: project (with its company), crm_invoice (the number
+    after INV in a composite like "1342 (INV 1191-PAID)"), vendor_po_on_leg
+    (with the leg's job and vendor), qbo_invoice, qbo_po and qbo_bill from the
+    QuickBooks snapshots -- a bill's Num is the vendor's own invoice number,
+    not a PO. Read-only."""
+    matches, errors = _number_matches(_MetricsCtx(), n)
+    out = {"ok": True, "interface_version": VERSION, "number": _key(n),
+           "matches": matches}
+    if errors:
+        out["snapshot_errors"] = errors
+    return out
 
 
 # --------- writes (validated, atomic, logged) ---------
@@ -2886,12 +3464,19 @@ def update_invoice(company_id: str, invoice_no: str, fields: dict) -> dict:
             STORE.save("invoices", invoices)
             STORE.log("update", "invoice",
                       f"{company_id}:{inv_key}", fields)
+            # a number can legitimately be both, so this warns and never
+            # refuses; an echoed, unchanged project_no is not a new claim
+            warnings = (_po_warnings_safe(_pno)
+                        if _pno and not _echoed and _pno != _stored_pno else [])
             # _with_due_on: the view replaces its local record with this
             # response, so returning the undecorated record dropped
             # effective_due_on and an overdue invoice fell out of the
             # Overdue bucket until the next full refresh.
-            return {"ok": True, "interface_version": VERSION,
-                    "invoice": _with_due_on([target[0]])[0]}
+            out = {"ok": True, "interface_version": VERSION,
+                   "invoice": _with_due_on([target[0]])[0]}
+            if warnings:
+                out["warnings"] = warnings
+            return out
     except StoreError as e:
         return _err(e)
 
@@ -2941,8 +3526,12 @@ def create_invoice(company_id: str, fields: dict) -> dict:
             invoices.append(record)
             STORE.save("invoices", invoices)
             STORE.log("create", "invoice", f"{company_id}:{inv_no}", record)
-            return {"ok": True, "interface_version": VERSION,
-                    "invoice": _with_due_on([record])[0]}
+            out = {"ok": True, "interface_version": VERSION,
+                   "invoice": _with_due_on([record])[0]}
+            warnings = _po_warnings_safe(pno) if pno else []
+            if warnings:
+                out["warnings"] = warnings
+            return out
     except StoreError as e:
         return _err(e)
 

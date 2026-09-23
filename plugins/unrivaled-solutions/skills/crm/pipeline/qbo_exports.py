@@ -296,3 +296,21 @@ def parse_vendor_transactions(path):
                                f"{where} Item split account"),
                     "amount_cents": _cents(g("Amount"), f"{where} Amount")})
     return _result("vendor_transactions", window, as_of, out)
+
+
+def parse_export(path):
+    """Whichever of the two exports this file is, told apart by its header
+    row -- never by its file name, which the operator can change."""
+    try:
+        return parse_invoice_list(path)
+    except QboExportError as e:
+        found = e.found_header
+        if found is None:
+            raise
+        names = [None if _empty(h) else str(h).strip() for h in found]
+        if sorted(names, key=str) != sorted(VENDOR_TXN_HEADER, key=str):
+            raise QboExportError(
+                f"this is neither an Invoice List by Date nor a Transaction "
+                f"List by Vendor export: its header row is {found}",
+                found_header=found) from None
+    return parse_vendor_transactions(path)

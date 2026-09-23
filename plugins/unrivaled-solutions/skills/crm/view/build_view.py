@@ -299,6 +299,7 @@ TEMPLATE = r"""<!DOCTYPE html>
         </span>
       </div>
     </div>
+    <div id="numhits"></div>
     <div class="clist" id="clist"></div>
   </aside>
   <main class="main" id="main"><div class="empty">Select a company to begin. <button class="pill-btn" onclick="setFilter('live')">Show Live projects</button></div></main>
@@ -578,6 +579,11 @@ function reindex(){
   vendorById   = Object.fromEntries((DATA.vendors||[]).map(v=>[v.company_id,v]));
 }
 const money = (n)=> (n==null||isNaN(n))?'—':'$'+Number(n).toLocaleString(undefined,{maximumFractionDigits:0});
+// QuickBooks figures arrive as exact integer cents (value_cents) and are shown
+// to the cent, so a header and the rows under it can be checked against each
+// other exactly; money() rounds to the dollar.
+const moneyCents = (c)=> (c==null||isNaN(c))?'—':(Number(c)<0?'-':'')+'$'+(Math.abs(Number(c))/100)
+  .toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const pct = (n)=> (n==null||isNaN(n))?'—':(Number(n)*100).toFixed(0)+'%';
 // Due date for an invoice: the live server computes and sends
 // effective_due_on (due_on override, else invoice_date + Net 30). The fallback
@@ -973,11 +979,22 @@ function renderReceivables(){
   // invoice in 140 and read as the receivables. The per-bucket total still
   // appears in the table footer, where it names what it excludes.
   const ex = ledgerExposure();
-  const head = ex
+  // With a QuickBooks snapshot the header leads with QuickBooks' own open
+  // balance, dated, and the CRM's figure follows labelled for what it is: the
+  // deal log's quoted revenue. Both are the server's shapes, summed.
+  const q = qboLedger('qbo_open_receivable_usd');
+  const qhead = !q ? ''
+    : (q.value_cents == null
+        ? `<span class="muted">· QuickBooks as of ${esc(fmtDate(q.as_of))}: nothing matched · ${esc(shapeCaveat(q))}</span>`
+        : `<span>· <b>${moneyCents(q.value_cents)}</b> open in QuickBooks as of ${esc(fmtDate(q.as_of))}</span>
+           <span class="muted">across ${esc(shapeCaveat(q))}</span>`)
+      + (q.stale ? ` <b class="badge" style="color:var(--red)">stale · ${q.age_days} days old</b>` : '');
+  const quoted = q ? ', quoted' : '';
+  const head = qhead + (ex
     ? (ex.value == null
-        ? `<span class="muted">· nothing priced: ${esc(shapeCaveat(ex))}</span>`
-        : `<span class="muted">· ${money(ex.value)} outstanding across ${esc(shapeCaveat(ex))}</span>`)
-    : `<span class="muted">· total needs the server</span>`;
+        ? `<span class="muted">· nothing priced${quoted}: ${esc(shapeCaveat(ex))}</span>`
+        : `<span class="muted">· ${money(ex.value)} outstanding${quoted} across ${esc(shapeCaveat(ex))}</span>`)
+    : `<span class="muted">· total needs the server</span>`);
   let h = `<div class="co-head"><h1>Receivables</h1>
     <span class="muted">${rows.length} ${esc(recvBucket.toLowerCase())}</span>
     ${head}</div>`;
@@ -994,7 +1011,8 @@ function renderReceivables(){
 
   h += `<div class="section"><table><thead><tr>
     <th>Invoice</th><th>Customer</th><th>Project</th>
-    <th class="num">Outstanding</th><th class="num">Due</th><th class="num">Late</th>
+    <th class="num">Outstanding</th><th class="num">QBO amount</th><th class="num">QBO open</th>
+    <th class="num">Due</th><th class="num">Late</th>
     <th>Status</th><th>Last note</th><th></th></tr></thead><tbody>`;
 
   h += rows.map(r=>{
@@ -1019,6 +1037,8 @@ function renderReceivables(){
       <td>${esc(coName)}</td>
       <td>${proj}</td>
       <td class="num">${owedCell}</td>
+      <td class="num">${qboCell(v, 'qbo_amount_usd')}</td>
+      <td class="num">${qboCell(v, 'qbo_open_usd')}</td>
       <td class="num">${esc(fmtDate(r.due)||'—')}</td>
       <td class="num">${lateCell}</td>
       <td>${statusPill(v.payment_status)}</td>
@@ -1031,6 +1051,7 @@ function renderReceivables(){
   h += `</tbody><tfoot><tr>
     <td colspan="3">Outstanding</td>
     <td class="num">${money(total)}</td>
+    <td class="num"></td><td class="num">${qboBucketTotal(rows)}</td>
     <td colspan="5" class="muted" style="font-weight:400">${
       [unknown ? `excludes ${unknown} invoice${unknown>1?'s':''} with no amount on file` : '',
        split ? `excludes ${split} invoice${split>1?'s':''} on a project with more than one invoice` : '']
@@ -1906,6 +1927,120 @@ function ledgerExposure(){
   });
   if(!out.counted) out.value = null;          // nothing counted is not $0
   return out;
+}
+/* The QuickBooks-basis shapes (invoiced_usd, qbo_open_receivable_usd), added
+   up across companies in integer CENTS, the way ledgerExposure adds the CRM's.
+   Null when no company carries a snapshot-backed shape -- no snapshot loaded,
+   or a server older than 0.1.38 -- so the header falls back to the CRM figure
+   alone rather than showing a QuickBooks $0. */
+function qboLedger(key){
+  const shapes = (DATA.companies||[])
+    .map(c => c && c.metrics && c.metrics[key])
+    .filter(s => s && typeof s === 'object' && 'population' in s && s.snapshot_as_of);
+  if(!shapes.length) return null;
+  const out = {value_cents: 0, counted: 0, population: 0, excluded: {},
+               as_of: shapes[0].snapshot_as_of, stale: !!shapes[0].stale,
+               age_days: shapes[0].age_days};
+  shapes.forEach(s => {
+    out.counted += Number(s.counted)||0; out.population += Number(s.population)||0;
+    if(s.value_cents != null) out.value_cents += Number(s.value_cents)||0;
+    Object.keys(s.excluded||{}).forEach(k => {
+      out.excluded[k] = (out.excluded[k]||0) + (Number(s.excluded[k])||0); });
+  });
+  if(!out.counted) out.value_cents = null;
+  return out;
+}
+/* One invoice's QuickBooks shape, as the server computed it for that row. */
+function qboShape(v, key){
+  const m = (companyById[v.company_id]||{}).metrics;
+  const per = m && m.qbo_invoices && m.qbo_invoices[st(v.invoice_no)];
+  return per ? per[key] : null;
+}
+function qboCell(v, key){
+  const sh = qboShape(v, key);
+  if(!sh) return '<span class="muted" title="needs the server">—</span>';
+  if(sh.value_cents == null){
+    const why = Object.keys(sh.excluded||{}).map(reasonLabel).join(', ') || 'not priced';
+    return `<span class="muted" title="${esc(why)}">—</span>`;
+  }
+  return moneyCents(sh.value_cents);
+}
+function qboBucketTotal(rows){
+  let t = 0, any = false;
+  rows.forEach(r => { const sh = qboShape(r.v, 'qbo_open_usd');
+    if(sh && sh.value_cents != null){ t += Number(sh.value_cents)||0; any = true; } });
+  return any ? moneyCents(t) : '';
+}
+/* ---------------------------------------------------- number lookup --
+   PO, project/quote and invoice numbers share one range, so "1167" can be a
+   project, a CRM invoice, a vendor PO on a leg and three QuickBooks records
+   at once. A number typed into search asks the SERVER (lookup_number, the one
+   matching rule) and shows every hit, grouped and labelled by type -- never
+   collapsed into one result. The company list below still filters as before. */
+const NUMBER_TYPE_LABELS = {
+  project: 'Project', crm_invoice: 'CRM invoice',
+  vendor_po_on_leg: 'Vendor PO on a shipment leg', qbo_invoice: 'QuickBooks invoice',
+  qbo_po: 'QuickBooks PO',
+  qbo_bill: "QuickBooks bill \u2014 the vendor's own invoice number, not a PO",
+};
+let numberSeq = 0;
+async function lookupNumber(q){
+  const el = document.getElementById('numhits'); if(!el) return;
+  const n = st(q).trim();
+  if(!/^\d+$/.test(n)){ el.innerHTML = ''; return; }
+  const seq = ++numberSeq;
+  let r;
+  try{ r = await CRM.call('lookup_number', {n}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
+  if(seq !== numberSeq) return;            // a newer keystroke owns the panel
+  if(!(r && r.ok)){
+    el.innerHTML = `<div class="muted" style="padding:6px 14px;font-size:12px">Number lookup needs the server: ${esc((r && r.error) || 'no answer')}</div>`;
+    return;
+  }
+  const groups = {};
+  (r.matches || []).forEach(m => { (groups[m.type] = groups[m.type] || []).push(m); });
+  // known types in a fixed order, then any type this page has no label for:
+  // a hit is never dropped because the page is older than the server
+  const order = Object.keys(NUMBER_TYPE_LABELS).filter(t => groups[t])
+    .concat(Object.keys(groups).filter(t => !(t in NUMBER_TYPE_LABELS)));
+  if(!order.length){
+    el.innerHTML = `<div class="muted" style="padding:6px 14px;font-size:12px">${esc(n)} is not a project, invoice or PO number anywhere.</div>`;
+    return;
+  }
+  el.innerHTML = `<div style="padding:6px 14px 10px;border-bottom:1px solid var(--line)">`
+    + `<div class="muted" style="font-size:11px;margin-bottom:4px">${esc(n)} is ${order.length} kind${order.length>1?'s':''} of number</div>`
+    + order.map(t => `<div data-type="${esc(t)}" style="margin:4px 0">
+        <div class="nh-label" style="font-size:11px;font-weight:600">${esc(NUMBER_TYPE_LABELS[t] || String(t).replace(/_/g, ' '))}</div>
+        ${groups[t].map(m => numberHit(m)).join('')}</div>`).join('')
+    + `</div>`;
+}
+function numberHit(m){
+  const line = (txt, click) => `<div class="nh-hit${click?' click':''}" style="font-size:12px;padding:1px 0"${
+    click ? ` onclick="${click}"` : ''}>${esc(txt)}</div>`;
+  const qcid = (cid) => `'${jesc(st(cid))}'`;
+  if(m.type === 'project')
+    return line(`Project ${st(m.project_no)} \u00b7 ${st(m.company_name || m.company_id)}${m.description ? ' \u00b7 ' + st(m.description) : ''}`,
+                `openProject('${jesc(st(m.project_no))}',${qcid(m.company_id)})`);
+  if(m.type === 'crm_invoice')
+    return line(`Invoice ${st(m.invoice_no)} \u00b7 ${st(m.company_name || m.company_id)}${m.project_no ? ' \u00b7 job ' + st(m.project_no) : ' \u00b7 not linked'}`,
+                `select(${qcid(m.company_id)})`);
+  if(m.type === 'vendor_po_on_leg')
+    return line(`${st(m.vendor_po_raw)} \u00b7 job ${st(m.project_no)} (${st(m.company_name || m.company_id)})${m.vendor ? ' \u00b7 vendor ' + st(m.vendor) : ''}`,
+                `select(${qcid(m.company_id)})`);
+  if(m.type === 'qbo_invoice')
+    return line(`QuickBooks invoice ${st(m.num)} \u00b7 ${st(m.name)} \u00b7 ${moneyCents(m.amount_cents)}, ${moneyCents(m.open_cents)} open`);
+  if(m.type === 'qbo_po')
+    return line(`QuickBooks PO ${st(m.num)} \u00b7 ${st(m.vendor)} \u00b7 ${m.lines} line${m.lines===1?'':'s'}, ${moneyCents(m.amount_cents)}`);
+  if(m.type === 'qbo_bill')
+    return line(`Bill ${st(m.num)} from ${st(m.vendor)} \u00b7 ${moneyCents(m.amount_cents)} \u00b7 ${st(m.note)}`);
+  return line(`${st(m.type)} ${st(m.num || '')}`);
+}
+/* A write that succeeded with warnings: the drawer has closed, so the warning
+   goes to the toast that stays until dismissed. A number can legitimately be
+   both a project and a vendor PO, so the save is never undone for it. */
+function showWarnings(r){
+  const w = (r && r.warnings) || [];
+  if(w.length) noticeToast(w.map(x => x.message || x.code).join(' \u00b7 '));
 }
 /* After any successful WRITE the shapes on DATA.companies are stale: the
    server computed them before the edit, and the edit was applied to DATA
@@ -2984,7 +3119,7 @@ async function saveNewInvoice(cid){
   }
   await doSave('create_invoice', {company_id: cid, fields}, (r)=>{
     DATA.invoices.push(r.invoice || Object.assign({company_id: cid}, fields));
-    reindex(); kpis(); renderList(); renderMain(); closeDrawer();
+    reindex(); kpis(); renderList(); renderMain(); closeDrawer(); showWarnings(r);
   });
 }
 
@@ -3064,7 +3199,7 @@ async function saveEditInvoice(cid, invoiceNo){
     const rec=r.invoice||Object.assign({}, (invoicesByCo[cid]||[]).find(x=>String(x.invoice_no)===String(invoiceNoNow)), fields);
     const i=DATA.invoices.findIndex(x=>x.company_id===cid && String(x.invoice_no)===String(invoiceNoNow));
     if(i>=0) DATA.invoices[i]=rec;
-    reindex(); closeDrawer();
+    reindex(); closeDrawer(); showWarnings(r);
   });
 }
 
@@ -3466,7 +3601,7 @@ async function replyToThread(companyId, messageId){
 }
 
 document.getElementById('q').addEventListener('input',e=>{
-  query=e.target.value.trim(); renderList();
+  query=e.target.value.trim(); renderList(); lookupNumber(query);
   // The Projects tab and the Live tab both own the main pane, so search has to
   // repaint it too -- renderList() alone only updates the sidebar.
   if(filter === 'project' || filter === 'live') renderMain();
