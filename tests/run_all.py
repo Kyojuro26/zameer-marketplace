@@ -49,6 +49,9 @@ PY_MODULES = [
     ("regression.test_next_action", "regression/test_next_action.py"),
     ("regression.test_vendor_match", "regression/test_vendor_match.py"),
     ("regression.test_qbo_snapshots", "regression/test_qbo_snapshots.py"),
+    ("regression.test_qbo_tools", "regression/test_qbo_tools.py"),
+    ("regression.test_qbo_invoiced", "regression/test_qbo_invoiced.py"),
+    ("regression.test_number_lookup", "regression/test_number_lookup.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
@@ -59,6 +62,8 @@ JS_MODULES = [("regression/test_view.js", "view"),
               ("regression/test_livetracker.js", "live-tracker/view"),
               ("regression/test_refresh.js", "refresh"),
               ("regression/test_split_invoice.js", "split-invoice/view"),
+              ("regression/test_qbo_view.js", "qbo/view"),
+              ("regression/test_number_view.js", "number-lookup/view"),
               ("regression/test_harness.js", "harness")]
 
 

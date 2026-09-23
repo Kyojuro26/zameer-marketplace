@@ -41,9 +41,13 @@ VOCAB = {
     # legs
     "no_shipment", "no_shipped_leg", "ship_date_is_estimate", "not_yet_shipped",
     "cancelled", "no_vendor_on_leg", "no_eta",
+    # QuickBooks snapshot joins (0.1.38)
+    "no_qbo_snapshot", "ambiguous_qbo_match", "outside_snapshot_window",
+    "not_in_qbo_snapshot", "qbo_match_shared",
 }
 
-REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time")
+REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time",
+           "qbo_drift")
 
 
 # ------------------------------------------------------------- fixture A ---
@@ -899,15 +903,44 @@ def run(server, crm_dir=None):
             str(expo(sp, "split"))[:200])
     s.rebind()
 
+    # ---- the QuickBooks join's reasons (0.1.38) --------------------------------
+    # A store with a snapshot BESIDE it, in its own temp dir: the harness's
+    # default store sits directly in the system temp dir, whose sibling
+    # qbo-snapshots would be shared by every test. One invoice matches twice,
+    # one is dated inside the window and missing, one is dated before it.
+    import shutil as _sh
+    import tempfile as _tf
+    qdir = Path(_tf.mkdtemp(prefix="crmqbo-"))
+    qs = Store(srv, qdir / "store")
+    qs.reset(companies=[company("acme", "Ace Manufacturing"),
+                        company("beta", "Beta Works")],
+             invoices=[invoice("8001", "acme", invoice_date="2026-02-01"),
+                       invoice("8002", "acme", invoice_date="2026-03-01"),
+                       invoice("8003", "acme", invoice_date="2025-06-01"),
+                       # one QuickBooks invoice, a CRM invoice at each customer
+                       invoice("8004", "acme", invoice_date="2026-02-01"),
+                       invoice("8004", "beta", invoice_date="2026-02-01")])
+    srv._save_qbo_snapshot("invoices", "export", "2026-08-30", "2026-01-01",
+                           "2026-08-30",
+                           [{"type": "Invoice", "num": "8001", "amount_cents": 100,
+                             "open_cents": 0}] * 2
+                           + [{"type": "Invoice", "num": "8004", "amount_cents": 100,
+                               "open_cents": 0}])
+    qbo_responses = [qs.call("get_company", ref="acme"), qs.call("crm_metrics")]
+    for i, res in enumerate(qbo_responses):
+        check_invariants(r, f"qbo[{i}]", res)
+    _sh.rmtree(qdir, ignore_errors=True)
+    s.rebind()
+
     # ---- the vocabulary is closed and exported --------------------------------
     r.section("the exclusion vocabulary is a closed, exported constant")
     vocab = getattr(srv, "EXCLUSION_REASONS", None)
     r.check("server exports EXCLUSION_REASONS", vocab is not None)
-    r.check("and it is exactly the seventeen reasons this suite knows",
-            vocab is not None and set(vocab) == VOCAB and len(vocab) == 17,
+    r.check("and it is exactly the twenty-two reasons this suite knows",
+            vocab is not None and set(vocab) == VOCAB and len(vocab) == 22,
             f"server={sorted(vocab or [])}")
     seen = set()
-    for res in list(responses.values()) + [empty, c25] + split_responses:
+    for res in list(responses.values()) + [empty, c25] + split_responses + qbo_responses:
         for _p, sh in shapes_in(res):
             seen |= set((sh.get("excluded") or {}).keys())
     r.check("the fixture exercises every reason in the vocabulary",
