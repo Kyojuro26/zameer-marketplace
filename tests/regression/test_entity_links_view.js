@@ -8,7 +8,9 @@
 // trying to link the same vendor sees the server's refusal in the drawer. Then
 // a SEPARATE python process re-reads companies.json and changelog.jsonl: the
 // link is on disk once, vendors.json untouched, and the refused save wrote
-// nothing. Generic names only.
+// nothing. Phase two (0.1.39 C2): the same drawer lists a QuickBooks vendor
+// that is this customer, and its confirm button creates the vendor record and
+// links it -- read back from disk again. Generic names only.
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -25,6 +27,15 @@ function seed(store) {
                   co('hmart-v', 'Harbor Mart LLC', 'vendor')]);
   w('vendors', [{ company_id: 'hmart-v', display_name: 'Harbor Mart LLC', archived: false }]);
   w('projects', []); w('invoices', []); w('contacts', []); w('shipments', []); w('needs_review', []);
+  // a QuickBooks vendor list beside the store: Beta Works appears there as a
+  // VENDOR, with no CRM vendor record -- the shape the real data has
+  const snap = path.join(path.dirname(store), 'qbo-snapshots');
+  fs.mkdirSync(snap, { recursive: true });
+  fs.writeFileSync(path.join(snap, 'vendor_transactions.json'), JSON.stringify({
+    kind: 'vendor_transactions', source: 'export', as_of: '2026-04-07',
+    window_start: '2026-01-01', window_end: '2026-03-31', loaded_at: 'x',
+    rows: [{ vendor: 'Beta Works Inc', date: '2026-01-08', type: 'Bill', num: '1',
+             posting: true, account: null, split_account: null, amount_cents: 100 }] }));
 }
 
 const PY_PORT = "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()";
@@ -39,7 +50,9 @@ const PY_READ = "import json,sys,os\n"
   + "d=sys.argv[1]\n"
   + "cos={c['company_id']:c for c in json.load(open(os.path.join(d,'companies.json')))}\n"
   + "log=[json.loads(l) for l in open(os.path.join(d,'changelog.jsonl'))] if os.path.exists(os.path.join(d,'changelog.jsonl')) else []\n"
+  + "vs=json.load(open(os.path.join(d,'vendors.json')))\n"
   + "print(json.dumps({'hmart':cos['hmart'].get('linked_vendor_id'),'beta':cos['beta'].get('linked_vendor_id'),"
+  + "'qbo_vendor':[[v.get('company_id'),v.get('display_name'),v.get('qbo_name')] for v in vs if v.get('qbo_name')],"
   + "'vendors':open(os.path.join(d,'vendors.json')).read(),"
   + "'log':[[e.get('entity'),e.get('key'),(e.get('fields') or {}).get('linked_vendor_id')] for e in log]}))";
 
@@ -53,7 +66,7 @@ async function run(crmDir) {
   const url = `http://127.0.0.1:${port}/`;
   const srv = spawn('python3', [path.join(crmDir, 'mcp', 'local_server.py'), '--store', store,
                                 '--port', port, '--no-browser'], { stdio: 'ignore' });
-  let got = {};
+  let got = {}, got2 = {}, disk = null;
   try {
     try { execFileSync('python3', ['-c', PY_WAIT, url]); }
     catch (e) { r.check('the live server came up', false, String(e).slice(0, 200)); return r; }
@@ -91,12 +104,28 @@ async function run(crmDir) {
       { wait: 800 },
       { eval: "(document.getElementById('savedMsg')||{}).innerText||''", as: 'msg2' },
       { eval: LINK_V, as: 'betaXref' },
+      { eval: "(document.getElementById('e_co_qbo_sugg')||{}).innerText||''", as: 'sugg' },
+    ]);
+    disk = JSON.parse(execFileSync('python3', ['-c', PY_READ, store], { encoding: 'utf8' }));
+    // phase two: confirm the QuickBooks-vendor suggestion from Beta's drawer
+    got2 = driveUrl(url, [
+      { wait: 800 },
+      { click: '#filters button[data-f="all"]' },
+      { fill: '#q', value: 'beta' },
+      { click: '#clist .citem >> nth=0' },
+      { click: '#main .more > button' },
+      { click: '#main .more-menu >> text=Edit company' },
+      { wait: 500 },                                        // the suggestions arrive from the server
+      { eval: "(document.getElementById('e_co_qbo_sugg')||{}).innerText||''", as: 'sugg' },
+      { click: '#e_co_qbo_link_0' },
+      { wait: 800 },
+      { eval: "(document.getElementById('xref-vendor')||{}).innerText||''", as: 'xref' },
     ]);
   } finally {
     srv.kill();
   }
   await new Promise(res => setTimeout(res, 300));
-  const disk = JSON.parse(execFileSync('python3', ['-c', PY_READ, store], { encoding: 'utf8' }));
+  const disk2 = JSON.parse(execFileSync('python3', ['-c', PY_READ, store], { encoding: 'utf8' }));
   fs.rmSync(tmp, { recursive: true, force: true });
 
   r.check('the page ran with no script error', (got.__pageerrors || []).length === 0,
@@ -123,6 +152,22 @@ async function run(crmDir) {
   r.check('... the changelog records the link once, and nothing for the refused save',
     JSON.stringify(disk.log.filter(e => e[0] === 'company')) === JSON.stringify([['company', 'hmart', 'hmart-v']]),
     JSON.stringify(disk.log));
+
+  r.check('phase two ran with no script error', (got2.__pageerrors || []).length === 0,
+    JSON.stringify(got2.__pageerrors));
+  r.check("the drawer lists the QuickBooks vendor that is this customer, saying no vendor record exists",
+    /Beta Works Inc/.test(got2.sugg || '') && /no CRM vendor record/i.test(got2.sugg || ''),
+    JSON.stringify(got2.sugg));
+  r.check('confirming shows the new vendor as the cross-reference', /Beta Works Inc/.test(got2.xref || ''),
+    JSON.stringify(got2.xref));
+  r.check('on disk: one vendor record, carrying the QuickBooks name as qbo_name',
+    JSON.stringify(disk2.qbo_vendor) === JSON.stringify([['beta-works-inc', 'Beta Works Inc', 'Beta Works Inc']]),
+    JSON.stringify(disk2.qbo_vendor));
+  r.check('... and the customer links to it', disk2.beta === 'beta-works-inc', JSON.stringify(disk2.beta));
+  r.check('... through the existing writes: the changelog adds the vendor, then the link',
+    JSON.stringify(disk2.log.slice(disk.log.length).map(e => [e[0], e[1]]))
+      === JSON.stringify([['vendor', 'beta-works-inc'], ['company', 'beta']]),
+    JSON.stringify(disk2.log.slice(disk.log.length)));
   return r;
 }
 

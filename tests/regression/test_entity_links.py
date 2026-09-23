@@ -89,9 +89,95 @@ def run(server, crm_dir=None):
     tmp = Path(tempfile.mkdtemp(prefix="crmlink-"))
     try:
         _body(r, server, tmp)
+        _qbo_vendor_section(r, server, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return r
+
+
+def _qbo_vendor_section(r, server, tmp):
+    """C2: a CRM customer that appears in QuickBooks as a VENDOR, where the CRM
+    holds no vendor record for it -- the shape the real data has."""
+    r.section("QuickBooks vendors that are CRM customers")
+    st = Store(server, tmp / "q" / "store")
+    seed(st)
+    if not callable(getattr(server, "_save_qbo_snapshot", None)):
+        return
+    line = {"date": "2026-01-08", "type": "Bill", "num": "1", "posting": True,
+            "account": None, "split_account": None, "amount_cents": 100}
+    server._save_qbo_snapshot("vendor_transactions", "export", "2026-04-07",
+                              "2026-01-01", "2026-03-31",
+                              [dict(line, vendor=v) for v in (
+                                  "Beta Works Inc",       # customer beta, no vendor record
+                                  "Harbor Mart LLC",      # customer hmart; record hmart-v exists
+                                  "Norvale",              # the group: plants are not it
+                                  "Gamma Co",             # two customers fit: never guessed
+                                  "Zeta Tools")])         # nobody
+    before = {n: st.raw(n) for n in ("companies", "vendors", "invoices")}
+    got = st.call("suggest_entity_links")
+    q = {(x.get("company_id"), x.get("qbo_vendor_name")): x
+         for x in got.get("qbo_vendor_names") or []}
+    b = q.get(("beta", "Beta Works Inc")) or {}
+    r.check("a customer whose name is a QuickBooks vendor's is suggested",
+            bool(b) and "QuickBooks vendor" in str(b.get("reason")), got.get("qbo_vendor_names"))
+    r.check("... saying no CRM vendor record exists for it",
+            b.get("vendor_record_exists") is False and b.get("vendor_id") is None, b)
+    h = q.get(("hmart", "Harbor Mart LLC")) or {}
+    r.check("where a CRM vendor record exists for the QuickBooks name, it says which",
+            h.get("vendor_record_exists") is True and h.get("vendor_id") == "hmart-v", h)
+    r.check("the group vendor is not paired with its plants",
+            not any(k[1] == "Norvale" for k in q), sorted(q))
+    r.check("... nor offered as an ambiguous candidate for them",
+            not any(x.get("qbo_vendor_name") == "Norvale"
+                    for x in got.get("qbo_vendor_ambiguous") or []), got.get("qbo_vendor_ambiguous"))
+    r.check("a QuickBooks vendor name that fits two customers is not suggested for either",
+            not any(k[1] == "Gamma Co" for k in q), sorted(q))
+    r.check("... it is listed apart, with both candidates",
+            any(a.get("qbo_vendor_name") == "Gamma Co"
+                and sorted(a.get("candidates") or []) == ["gamma1", "gamma2"]
+                for a in got.get("qbo_vendor_ambiguous") or []), got.get("qbo_vendor_ambiguous"))
+    r.check("a name nobody carries is not suggested", not any(k[1] == "Zeta Tools" for k in q))
+    r.check("suggesting still writes nothing",
+            {n: st.raw(n) for n in ("companies", "vendors", "invoices")} == before)
+
+    r.section("the one-step confirm: create the vendor record, then link")
+    got = st.call("link_qbo_vendor", company_id="beta", qbo_vendor_name="Zeta Tools")
+    r.check("a name that is not a current suggestion for that customer is refused",
+            got.get("ok") is False and "_raised" not in got, got)
+    r.check("... and nothing was written",
+            {n: st.raw(n) for n in ("companies", "vendors", "invoices")} == before)
+    got = st.call("link_qbo_vendor", company_id="beta", qbo_vendor_name="Beta Works Inc")
+    r.check("confirming creates the vendor record and links it", got.get("ok") is True
+            and got.get("created_vendor") is True, got)
+    vs = [v for v in st.read("vendors") if v.get("qbo_name") == "Beta Works Inc"]
+    r.check("... one vendor record, carrying the QuickBooks name as qbo_name",
+            len(vs) == 1 and vs[0].get("display_name") == "Beta Works Inc", vs)
+    vid = vs[0]["company_id"] if vs else None
+    beta = next(c for c in st.read("companies") if c["company_id"] == "beta")
+    r.check("... the customer links to it", beta.get("linked_vendor_id") == vid and vid, beta)
+    r.check("... and stays a customer: nothing merged", beta.get("role") == "customer", beta)
+    gv = st.call("get_vendor", ref=vid) if vid else {}
+    r.check("... the vendor side reads the link", (gv.get("vendor") or {}).get("linked_company_id") == "beta",
+            gv.get("vendor"))
+    cl = st.path / "changelog.jsonl"
+    log = [json.loads(l) for l in cl.read_text().splitlines() if l.strip()] if cl.exists() else []
+    r.check("... through the existing writes: a vendor create, then a company update",
+            [(e.get("op"), e.get("entity")) for e in log][-2:] == [("create", "vendor"), ("update", "company")],
+            [(e.get("op"), e.get("entity")) for e in log][-3:])
+    again = st.call("suggest_entity_links")
+    r.check("once linked, the customer is not suggested again",
+            not any(x.get("company_id") == "beta" for x in again.get("qbo_vendor_names") or []))
+    got = st.call("link_qbo_vendor", company_id="hmart", qbo_vendor_name="Harbor Mart LLC")
+    r.check("where the vendor record already exists, confirming links it and creates nothing",
+            got.get("ok") is True and got.get("created_vendor") is False
+            and next(c for c in st.read("companies") if c["company_id"] == "hmart")
+            .get("linked_vendor_id") == "hmart-v"
+            and len([v for v in st.read("vendors") if v.get("display_name") == "Harbor Mart LLC"]) == 1, got)
+    st2 = Store(server, tmp / "q2" / "store")
+    seed(st2)
+    got = st2.call("suggest_entity_links")
+    r.check("with no vendor snapshot loaded there are no QuickBooks suggestions, and no error",
+            got.get("ok") is True and got.get("qbo_vendor_names") == [], got.get("qbo_vendor_names"))
 
 
 def _strip(d, *keys):
