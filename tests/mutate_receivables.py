@@ -95,8 +95,10 @@ M = [
   "      out.excluded[k] = (out.excluded[k]||0) + n(s.excluded[k]); });",
   ""),
  ("the header keeps its own bucket total instead of the server's figure",
-  "        : `<span class=\"muted\">· ${money(ex.value)} outstanding across ${esc(shapeCaveat(ex))}</span>`)",
-  "        : `<span class=\"muted\">· ${money(total)} outstanding</span>`)"),
+  # re-anchored 0.1.38: the line now also carries ${quoted}, the label B3 adds
+  # when a QuickBooks figure leads the header -- same decision, same line
+  "        : `<span class=\"muted\">· ${money(ex.value)} outstanding${quoted} across ${esc(shapeCaveat(ex))}</span>`)",
+  "        : `<span class=\"muted\">· ${money(total)} outstanding${quoted}</span>`)"),
  ("the page is built without the server's shapes",
   "    _attach_metrics(data, store_dir)\n", ""),
  ("build-time shapes come from a copy of the rule, not the server's builder",
