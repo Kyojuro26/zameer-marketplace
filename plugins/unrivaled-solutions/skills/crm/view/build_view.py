@@ -962,7 +962,10 @@ function renderReceivables(){
   // an unlinked invoice has no amount anywhere in the store; it must not be
   // silently counted as zero, and the total has to say so
   const known = rows.filter(r => r.owed != null);
-  const unknown = rows.length - known.length;
+  // two reasons a row has no figure, named apart: an invoice on a split-billed
+  // project is linked and priced by nobody; an unlinked one has no amount at all
+  const split = rows.filter(r => r.owed == null && splitBilled(r.v)).length;
+  const unknown = rows.length - known.length - split;
   const total = known.reduce((a,r)=>a+r.owed,0);
 
   // The headline figure is the SERVER's, across every open invoice, with its
@@ -1008,7 +1011,8 @@ function renderReceivables(){
         : r.late > 0 ? `<b style="color:var(--amber)">${r.late}d</b>`
         : '<span class="muted">—</span>');
     const owedCell = r.owed == null
-      ? '<span class="muted" title="no project linked, so no amount on file">—</span>'
+      ? `<span class="muted" title="${esc(noAmountReason(v))}">—${splitBilled(v)
+          ? ' <span style="font-size:11px">more than one invoice on this project</span>' : ''}</span>`
       : `<b>${money(r.owed)}</b>`;
     return `<tr class="click" onclick="select('${jesc(v.company_id)}')">
       <td><b>${esc(st(v.invoice_no)||'—')}</b></td>
@@ -1028,7 +1032,9 @@ function renderReceivables(){
     <td colspan="3">Outstanding</td>
     <td class="num">${money(total)}</td>
     <td colspan="5" class="muted" style="font-weight:400">${
-      unknown ? esc(`excludes ${unknown} invoice${unknown>1?'s':''} with no amount on file`) : ''
+      [unknown ? `excludes ${unknown} invoice${unknown>1?'s':''} with no amount on file` : '',
+       split ? `excludes ${split} invoice${split>1?'s':''} on a project with more than one invoice` : '']
+        .filter(Boolean).map(esc).join(' \u00b7 ')
     }</td></tr></tfoot></table></div>`;
   return h;
 }
@@ -1038,7 +1044,7 @@ function renderReceivablesList(){
     const v=r.v, co=companyById[v.company_id];
     return `<div class="citem" onclick="select('${jesc(v.company_id)}')">
       <div class="cn">${esc(st(v.invoice_no)||'—')} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
-      <div class="cm"><span>${r.owed==null?'no amount':money(r.owed)}</span>${
+      <div class="cm"><span>${r.owed==null?(splitBilled(v)?'more than one invoice on project':'no amount'):money(r.owed)}</span>${
         r.late?`<span>· ${r.late}d late</span>`:''}</div>
     </div>`;
   }).join('') || '<div class="muted" style="padding:14px">Nothing here.</div>';
@@ -1936,7 +1942,7 @@ function shapeCaveat(sh){
   const parts = [`${sh.counted} of ${sh.population} invoice${sh.population===1?'':'s'} priced`];
   const exc = sh.excluded || {};
   Object.keys(exc).sort((a,b)=>exc[b]-exc[a])
-    .forEach(k => parts.push(`${exc[k]} ${String(k).replace(/_/g,' ')}`));
+    .forEach(k => parts.push(`${exc[k]} ${reasonLabel(k)}`));
   return parts.join(' \u00b7 ');
 }
 
@@ -2004,13 +2010,50 @@ function invoiceAmount(v){
   return Number(p.revenue);
 }
 
+/* True when the invoice's project -- keyed on trimmed project_no AND
+   company_id, exactly as invoiceAmount() finds it -- carries more than one
+   invoice on this page. Two customers can hold one number; each is judged on
+   its own invoices. */
+function splitBilled(v){
+  const pno = st(v.project_no).trim(); if(!pno) return false;
+  const cid = st(v.company_id);
+  let n = 0;
+  for(const x of (DATA.invoices||[])){
+    if(st(x.project_no).trim() === pno && st(x.company_id) === cid && ++n > 1) return true;
+  }
+  return false;
+}
+
+/* Why a row has no figure, in words the operator can act on. An invoice on a
+   split-billed project IS linked correctly; calling it "no amount on file"
+   sends him back to re-link invoices that are already right. */
+function noAmountReason(v){
+  if(invoiceAmount(v) == null) return 'no project linked, or no revenue on it, so no amount on file';
+  if(splitBilled(v)) return 'linked correctly, but the project carries more than one invoice and no per-invoice amount exists yet';
+  return '';
+}
+
+/* An exclusion reason as the operator reads it. Most read fine with the
+   underscores dropped; a split-billed invoice has to say it is linked. */
+function reasonLabel(k){
+  return k === 'multiple_invoices_on_project'
+    ? 'on a project with more than one invoice' : String(k).replace(/_/g,' ');
+}
+
 /* What is still to collect. "partial:30%" means 30% has been RECEIVED, so the
    outstanding share is the remainder -- reading it the other way round would
    understate every part-paid receivable. */
 function outstanding(v){
-  const amt = invoiceAmount(v); if(amt == null) return null;
+  // paid FIRST, as the server's outstanding() has it: a paid invoice owes 0
+  // whether or not it can be priced, and that 0 is real, not missing
   const ps = st(v.payment_status).toLowerCase();
   if(ps.startsWith('paid')) return 0;
+  const amt = invoiceAmount(v); if(amt == null) return null;
+  // The row's copy of the server's 0.1.37 rule: a project that carries more
+  // than one invoice has no per-invoice amount anywhere in the store, so the
+  // row shows no figure rather than the full project revenue once per
+  // invoice. After paid, so a paid row on such a project still reads $0.
+  if(splitBilled(v)) return null;
   const m = ps.match(/(\d+(?:\.\d+)?)\s*%/);
   if(m){
     const paidPct = Number(m[1]);
@@ -2184,7 +2227,7 @@ function renderMain(){
         // click reaching the row, so one click opens the drawer once
         return `<tr class="click" onclick="openEditInvoice('${jesc(selected)}','${jesc(v.invoice_no||'')}')"><td><b class="nw">${esc(v.invoice_no||'—')}</b></td><td class="muted nw">${esc(v.client_po_raw||'')}</td>
         <td class="muted num">${esc(fmtDate(v.invoice_date))}</td>
-        <td class="num">${owed==null?'<span class="muted">—</span>':(owed?`<b>${money(owed)}</b>`:'<span class="muted">—</span>')}</td>
+        <td class="num">${owed==null?`<span class="muted" title="${esc(noAmountReason(v))}">—</span>`:(owed?`<b>${money(owed)}</b>`:'<span class="muted">—</span>')}</td>
         <td>${statusPill(ps)}</td>
         <td class="num ${overdue?'':'muted'}" ${overdue?'style="color:var(--red);font-weight:600"':''}>${esc(fmtDate(due)||'—')}${
           overdue&&late?`<div style="font-size:11px;font-weight:400">${late} days late</div>`:''}</td>
@@ -2252,7 +2295,7 @@ function companySummary(c){
     // Nothing priced is not $0. Every invoice here is unpaid -- a paid one
     // always counts, as 0 -- so the population IS the open-invoice count.
     const exc = Object.keys(sh.excluded||{}).sort((a,b)=>sh.excluded[b]-sh.excluded[a])
-      .map(k => `${sh.excluded[k]} ${String(k).replace(/_/g,' ')}`).join(' \u00b7 ');
+      .map(k => `${sh.excluded[k]} ${reasonLabel(k)}`).join(' \u00b7 ');
     return `<p class="co-sum"><b class="${od && od.value > 0 ? 'late' : ''}">nothing priced</b>
       <span class="muted">· ${sh.population} open invoice${sh.population===1?'':'s'}${exc ? ' \u00b7 ' + esc(exc) : ''}</span>
       ${late} ${see}</p>`;
