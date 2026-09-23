@@ -1147,6 +1147,23 @@ def _js_str(v):
     return str(v)
 
 
+# "1152 and 1153" / "1152 & 1153": one CRM invoice record naming two
+# QuickBooks invoices. EXACTLY two distinct numbers joined by and/&; anything
+# else ("1152, 1153", three numbers, mixed text) is read as one number.
+_INV_PAIR_RE = re.compile(r"^\s*(\d+)\s*(?:and|&)\s*(\d+)\s*$", re.IGNORECASE)
+
+
+def _qbo_invoice_keys(invoice_no):
+    """The QuickBooks invoice numbers a CRM invoice names, for the join only:
+    both numbers of an exact pair, else the one _qbo_invoice_key reads.
+    Read-only; never stored."""
+    m = _INV_PAIR_RE.match(invoice_no) if isinstance(invoice_no, str) else None
+    if m and _key(m.group(1)) != _key(m.group(2)):
+        return (_key(m.group(1)), _key(m.group(2)))
+    k = _qbo_invoice_key(invoice_no)
+    return (k,) if k else ()
+
+
 _PAREN_RE = re.compile(r"\([^()]*\)")
 
 
@@ -1662,7 +1679,7 @@ EXCLUSION_REASONS = (
     "cancelled", "no_vendor_on_leg", "no_eta",
     # QuickBooks snapshot joins (0.1.38)
     "no_qbo_snapshot", "ambiguous_qbo_match", "outside_snapshot_window",
-    "not_in_qbo_snapshot", "qbo_match_shared",
+    "not_in_qbo_snapshot", "qbo_match_shared", "partial_qbo_match",
 )
 # A leg in one of these stages has left the vendor. The importer sets Shipped
 # exactly when a ship date exists; Delivered and Installed are later states of
@@ -1835,9 +1852,9 @@ class _MetricsCtx:
         # never the key, so neither is picked (0.1.38, found on real data).
         self.qbo_claims = {}
         for i in self.invoices:
-            k = _qbo_invoice_key(i.get("invoice_no"))
-            if k and k in self.qbo_by_num:
-                self.qbo_claims[k] = self.qbo_claims.get(k, 0) + 1
+            for k in _qbo_invoice_keys(i.get("invoice_no")):
+                if k in self.qbo_by_num:
+                    self.qbo_claims[k] = self.qbo_claims.get(k, 0) + 1
 
     # ---- QuickBooks ----
     def qbo_match(self, inv):
@@ -1847,14 +1864,22 @@ class _MetricsCtx:
         an invoice the snapshot could not have held never reads as missing."""
         if not self.qbo:
             return None, "no_qbo_snapshot"
-        k = _qbo_invoice_key(inv.get("invoice_no"))
-        hits = self.qbo_by_num.get(k, []) if k else []
-        if len(hits) > 1:
+        keys = _qbo_invoice_keys(inv.get("invoice_no"))
+        found = [self.qbo_by_num.get(k, []) for k in keys]
+        if any(len(h) > 1 for h in found):
             return None, "ambiguous_qbo_match"
-        if hits:
-            if self.qbo_claims.get(k, 0) > 1:
+        matched = [h[0] for h in found if h]
+        if matched:
+            # a pair prices only when BOTH of its invoices are there: half a
+            # record is never priced
+            if len(matched) < len(keys):
+                return None, "partial_qbo_match"
+            if any(self.qbo_claims.get(k, 0) > 1 for k in keys):
                 return None, "qbo_match_shared"
-            return hits[0], None
+            if len(matched) == 1:
+                return matched[0], None
+            return {"amount_cents": sum(r_["amount_cents"] for r_ in matched),
+                    "open_cents": sum(r_["open_cents"] for r_ in matched)}, None
         if not inv.get("invoice_date"):
             return None, "no_date"
         d = _parse_date_loose(inv.get("invoice_date"))
@@ -1905,8 +1930,8 @@ class _MetricsCtx:
         QuickBooks numbers that match more than once, and the store-wide
         QuickBooks totals the Receivables header adds up per company."""
         invoiced, qbo_open = self.qbo_totals(self.invoices)
-        crm_keys = {_qbo_invoice_key(i.get("invoice_no")) for i in self.invoices}
-        crm_keys.discard("")
+        crm_keys = {k for i in self.invoices
+                    for k in _qbo_invoice_keys(i.get("invoice_no"))}
         q_rows = ([r_ for r_ in self.qbo["rows"] if r_.get("type") == "Invoice"]
                   if self.qbo else [])
         without = [r_ for r_ in q_rows if _key(r_.get("num")) not in crm_keys]

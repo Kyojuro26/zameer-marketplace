@@ -74,7 +74,7 @@ quoted `exposure_open_receivable_usd`; `value_cents` exact, plus
 `snapshot_as_of`, window, `age_days`, `stale`), `company.metrics.qbo_invoices`
 and per invoice in `get_company`/`list_invoices`: `qbo_amount_usd`,
 `qbo_open_usd`. The key is `(Invoice, number)`; reasons `no_qbo_snapshot`,
-`ambiguous_qbo_match` (two rows, never one picked), `qbo_match_shared` (one QuickBooks invoice claimed by more than one live CRM invoice — e.g. two customers each holding a "7001"; counted for neither, never twice), `outside_snapshot_window`
+`ambiguous_qbo_match` (two rows, never one picked), `partial_qbo_match` (a CRM invoice numbered as exactly two invoices joined by `and`/`&`, e.g. `1152 and 1153`, prices as the sum of both only when BOTH are in the snapshot; one alone prices nothing), `qbo_match_shared` (one QuickBooks invoice claimed by more than one live CRM invoice — e.g. two customers each holding a "7001"; counted for neither, never twice), `outside_snapshot_window`
 (never read as missing), `not_in_qbo_snapshot`. `crm_metrics(report="qbo_drift")`
 is the two-way drift list: QuickBooks invoices no CRM invoice carries, and CRM
 invoices in the window QuickBooks lacks, with counts and dollars.
