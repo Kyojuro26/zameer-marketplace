@@ -94,6 +94,15 @@ function seedStore(dir) {
   return dir;
 }
 
+// A step that throws against a build is a NAMED failure and the module goes
+// on to the checks after it. Against the last published release several entry
+// points throw on defects fixed since; dying there reported nothing at all.
+async function step(r, label, thunk) {
+  try { return await thunk(); }
+  catch (e) { r.check(`${label} does not throw`, false, String((e && e.message) || e).slice(0, 160)); }
+  return null;
+}
+
 async function run(crmDir) {
   const r = makeResult('view');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmview-'));
@@ -128,6 +137,22 @@ async function run(crmDir) {
       'missing from this build'); return null; }
     try { return f(...a); } catch (e) { r.check(`${name} does not throw`, false, e.message); }
     return null;
+  };
+  // the awaiting twin of safe(): an entry point that throws or rejects is a
+  // named failure, and the checks after it still run -- against a build where
+  // it throws, the module must report what it found, not die (0.1.38)
+  const safeAsync = async (name, ...a) => {
+    const f = app.fn(name);
+    if (typeof f !== 'function') { r.check(`entry point ${name} exists`, false,
+      'missing from this build'); return null; }
+    try { return await f(...a); } catch (e) { r.check(`${name} does not throw`, false, e.message); }
+    return null;
+  };
+  // a control this build does not render is a named failure, not a TypeError
+  const setVal = (id, v) => {
+    const el = app.el(id);
+    if (!r.check(`control #${id} exists`, !!el, 'missing from this build')) return;
+    el.value = v;
   };
   const entry = [
     ['select + renderMain', () => app.fn('select')('acme')],
@@ -236,7 +261,7 @@ async function run(crmDir) {
   // awaited: the re-baseline happens on the save's success path, and the real
   // form is locked until then -- an un-awaited second save here would race a
   // window the operator cannot reach
-  await app.fn('saveProject')('4521');
+  await safeAsync('saveProject', '4521');
   const proj2 = app.calls().find(c => c.tool === 'update_project');
   r.check('a deal date he did change is sent',
     proj2 && proj2.args.fields.date === '2026-03-01', proj2 && JSON.stringify(proj2.args.fields.date));
@@ -245,7 +270,7 @@ async function run(crmDir) {
   // the store kept the first change under a green "Saved".
   if (app.el('f_date')) app.el('f_date').value = '2026-02-29';
   app.resetCalls();
-  await app.fn('saveProject')('4521');
+  await safeAsync('saveProject', '4521');
   const proj3 = app.calls().find(c => c.tool === 'update_project');
   r.check('a date changed back after a save is sent again, not read as unchanged',
     proj3 && proj3.args.fields.date === '2026-02-29',
@@ -333,7 +358,7 @@ async function run(crmDir) {
       && /openNewShipment\('4521','beta'\)/.test((app.el('dbody') || EMPTY).innerHTML || ''));
   if (app.el('f_desc')) app.el('f_desc').value = 'Beta job edited';
   app.resetCalls();
-  await app.fn('saveProject')('4521', 'beta');
+  await safeAsync('saveProject', '4521', 'beta');
   const upd = app.calls().find(c => c.tool === 'update_project');
   r.check("saving Beta's drawer sends company_id beta with the number",
     upd && upd.args.company_id === 'beta' && upd.args.project_no === '4521'
@@ -355,7 +380,7 @@ async function run(crmDir) {
   safe('closeDrawer'); safe('openProject', '4521', 'beta');
   if (app.el('f_pno')) app.el('f_pno').value = '4523';
   app.resetCalls();
-  await app.fn('saveProject')('4521', 'beta');
+  await safeAsync('saveProject', '4521', 'beta');
   const ren = app.calls().find(c => c.tool === 'rename_project');
   r.check("a rename from Beta's drawer names Beta",
     ren && ren.args.company_id === 'beta' && ren.args.old_project_no === '4521' && ren.args.new_project_no === '4523',
@@ -371,18 +396,18 @@ async function run(crmDir) {
   // put the number back for the checks below
   safe('closeDrawer'); safe('openProject', '4523', 'beta');
   if (app.el('f_pno')) app.el('f_pno').value = '4521';
-  await app.fn('saveProject')('4523', 'beta');
+  await safeAsync('saveProject', '4523', 'beta');
   // a new leg from Beta's drawer names Beta
   safe('closeDrawer'); safe('openNewShipment', '4521', 'beta');
   if (app.el('n_po')) app.el('n_po').value = 'VPO-BETA';
   app.resetCalls();
-  await app.fn('saveNewShipment')('4521', 'beta');
+  await safeAsync('saveNewShipment', '4521', 'beta');
   const crs = app.calls().find(c => c.tool === 'create_shipment');
   r.check("a leg added from Beta's drawer names Beta",
     crs && crs.args.company_id === 'beta' && crs.args.project_no === '4521', crs && JSON.stringify(crs.args).slice(0, 200));
   // delete from Beta's drawer archives Beta's, and only Beta's leaves the page
   app.resetCalls();
-  await app.fn('deleteProject')('4521', 'beta');
+  await safeAsync('deleteProject', '4521', 'beta');
   const arc = app.calls().find(c => c.tool === 'archive_project');
   r.check("deleting from Beta's drawer names Beta",
     arc && arc.args.company_id === 'beta' && arc.args.project_no === '4521', arc && JSON.stringify(arc.args));
@@ -393,7 +418,7 @@ async function run(crmDir) {
   r.check('a project opened by number alone still opens (the first record of that number)',
     (app.el('f_desc') || EMPTY).value === '12345', `desc=${(app.el('f_desc') || EMPTY).value}`);
   app.resetCalls();
-  await app.fn('saveProject')('4521');
+  await safeAsync('saveProject', '4521');
   const bare = app.calls().find(c => c.tool === 'update_project');
   r.check('a save with no customer given sends none',
     bare && !('company_id' in bare.args) && bare.args.project_no === '4521', bare && JSON.stringify(bare.args).slice(0, 120));
@@ -433,20 +458,20 @@ async function run(crmDir) {
       && selBlock.indexOf('FS Racking') < selBlock.indexOf('Penco'),
     selBlock.slice(0, 300));
   app.resetCalls();
-  await app.fn('saveShipment')('4521-L1');
+  await safeAsync('saveShipment', '4521-L1');
   const shV = app.calls().find(c => c.tool === 'update_shipment');
   r.check('a save that did not touch the vendor does not send it',
     shV && !('vendor_id' in shV.args.fields), shV && JSON.stringify(Object.keys(shV.args.fields)));
   safe('openShipment', '4521-L1');
-  app.el('s_vendor').value = 'penco';
+  setVal('s_vendor', 'penco');
   app.resetCalls();
-  await app.fn('saveShipment')('4521-L1');
+  await safeAsync('saveShipment', '4521-L1');
   const shV2 = app.calls().find(c => c.tool === 'update_shipment');
   r.check('a changed vendor is sent', shV2 && shV2.args.fields.vendor_id === 'penco', shV2 && JSON.stringify(shV2.args.fields));
   safe('openShipment', '4521-L1');
-  app.el('s_vendor').value = '';
+  setVal('s_vendor', '');
   app.resetCalls();
-  await app.fn('saveShipment')('4521-L1');
+  await safeAsync('saveShipment', '4521-L1');
   const shV3 = app.calls().find(c => c.tool === 'update_shipment');
   r.check('clearing it sends null', shV3 && shV3.args.fields.vendor_id === null, shV3 && JSON.stringify(shV3.args.fields));
   safe('openShipment', '4521-L3');
@@ -471,17 +496,17 @@ async function run(crmDir) {
   // invoice stay on a number no project holds until the next reload.
   if (app.el('f_pno')) app.el('f_pno').value = '4601';
   app.resetCalls();
-  await app.fn('saveProject')('4600', 'acme');
+  await safeAsync('saveProject', '4600', 'acme');
   const moved = JSON.parse(app.eval("JSON.stringify([DATA.shipments.find(x=>x.shipment_id==='4600-L1').project_no, DATA.invoices.find(x=>x.invoice_no==='9002').project_no])"));
   r.check("a rename from the sole holder's drawer renumbers its company-less leg and mis-filed invoice locally",
     JSON.stringify(moved) === JSON.stringify(['4601', '4601']), JSON.stringify(moved));
   safe('closeDrawer'); safe('openProject', '4601', 'acme');
   if (app.el('f_pno')) app.el('f_pno').value = '4600';
-  await app.fn('saveProject')('4601', 'acme');
+  await safeAsync('saveProject', '4601', 'acme');
   safe('closeDrawer');
   // and a delete from the sole holder's drawer takes them off the page, as the
   // server hides every record of a number with no live holder
-  await app.fn('deleteProject')('4600', 'acme');
+  await safeAsync('deleteProject', '4600', 'acme');
   const left4600 = JSON.parse(app.eval("JSON.stringify([DATA.shipments.some(x=>x.shipment_id==='4600-L1'), DATA.invoices.some(x=>x.invoice_no==='9002')])"));
   r.check("a delete from the sole holder's drawer removes its company-less leg and mis-filed invoice from the page",
     JSON.stringify(left4600) === '[false,false]', JSON.stringify(left4600));
@@ -630,8 +655,10 @@ async function run(crmDir) {
         // doSave('update_project'), which is the catch under test. Renaming
         // would be caught by saveProject's own guard instead.
         const a = bridge(v);
-        a.fn('openProject')('4521');
-        await a.fn('saveProject')('4521');
+        await step(r, `openProject + saveProject over a bridge rejecting with ${label}`, async () => {
+          a.fn('openProject')('4521');
+          await a.fn('saveProject')('4521');
+        });
         const m = msgOf(a);
         r.check(`doSave names a reason when the bridge rejects with ${label}`,
           /✗/.test(m) && !/undefined/.test(m), `savedMsg=${JSON.stringify(m)}`);
@@ -655,8 +682,10 @@ async function run(crmDir) {
   // genuinely has none, made when the truth is that nobody managed to ask.
   {
     const a = dead();
-    a.fn('select')('acme');          // the real path: select renders, then asks
-    await a.fn('fetchEnrichment')('acme');
+    await step(r, 'select + fetchEnrichment over a dead socket', async () => {
+      a.fn('select')('acme');          // the real path: select renders, then asks
+      await a.fn('fetchEnrichment')('acme');
+    });
     r.check('an unreachable Outlook is reported as unreachable, not as "none"',
       /Could not reach Outlook/.test((a.el('main') || EMPTY).innerHTML || ''),
       ((a.el('main') || EMPTY).innerHTML || '').includes('No Outlook signal')

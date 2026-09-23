@@ -230,13 +230,42 @@ function freezeClock(app, iso) {
   `);
 }
 
+// An evaluation that throws against a build is a NAMED failure and the module
+// goes on; dying there reported nothing (0.1.38). A check that asserts on a
+// throw keeps a raw eval inside its own try.
+// the JSON a guarded evaluation returned, or null when it returned nothing
+function jparse(v) { return v === undefined ? null : JSON.parse(v); }
+function guardedEval(r, inst, code) {
+  const fail = (e) => { r.check(`${String(code).slice(0, 70)} does not throw`, false,
+    String((e && e.message) || e).slice(0, 160)); };
+  try {
+    const v = inst.eval(code);
+    return (v && typeof v.then === 'function') ? v.catch(fail) : v;
+  } catch (e) { fail(e); return undefined; }
+}
+
 async function run(crmDir) {
   const r = makeResult('live-tracker/view');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmlt-'));
   const store = seedStore(path.join(tmp, 'store'));
   const { js, html } = buildBundle(crmDir, store, tmp);
   const app = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
-  const ev = (code) => app.eval(code);
+  const ev = (code) => guardedEval(r, app, code);
+  // An OUTPUT assertion first, so a build without the screen fails on what it
+  // paints and not only on a missing function: the app opens on Live.
+  r.check('the app opens on the Live screen: #main paints "Live projects"',
+    /Live projects/.test(((app.doc.getElementById('main') || {}).innerHTML) || ''),
+    String(((app.doc.getElementById('main') || {}).innerHTML) || '').replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ').slice(0, 120));
+  // Bail with a VERDICT, as drawer-close does: a build with no Live Tracker
+  // fails every check below on the same missing thing, and reaching them
+  // means dying on the first one that reads its output (0.1.38).
+  if (!r.check('the Live Tracker is in this build',
+                ev("typeof liveRows + typeof todayISO") === 'functionfunction',
+                'liveRows / todayISO are not defined')) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return r;
+  }
   freezeClock(app, TODAY);
   r.check('the frozen clock reaches the view', ev('todayISO()') === TODAY,
     `got ${ev('todayISO()')} -- every lateness answer below would drift`);
@@ -324,7 +353,7 @@ async function run(crmDir) {
     ev("legDate('2026-07-20').text") === '20 Jul 2026');
 
   // ---- the flags ------------------------------------------------------------
-  const flags = (pno) => JSON.parse(ev(
+  const flags = (pno) => jparse(ev(
     `JSON.stringify((liveRows().find(x=>String(x.p.project_no)==='${pno}')||{}).flags)`));
   const NONE = JSON.stringify({ red: [], amber: [] });
   const f4501 = flags('4501');
@@ -359,8 +388,8 @@ async function run(crmDir) {
   ev("renderMain(); renderList();");
   const mainSev = app.doc.getElementById('main').innerHTML;
   const cardSev = (marker) => (mainSev.split(/<div class="lt-card"[^>]*>/).find(c => c.includes(marker)) || '');
-  const redRows = JSON.parse(ev("String(liveRows().filter(r=>r.flags.red.length).length)"));
-  const amberOnly = JSON.parse(ev("JSON.stringify(liveRows().filter(r=>!r.flags.red.length&&r.flags.amber.length).map(r=>String(r.p.project_no)))"));
+  const redRows = jparse(ev("String(liveRows().filter(r=>r.flags.red.length).length)"));
+  const amberOnly = jparse(ev("JSON.stringify(liveRows().filter(r=>!r.flags.red.length&&r.flags.amber.length).map(r=>String(r.p.project_no)))"));
   r.check('the fixture has an amber-only job, so the count below can be wrong',
     JSON.stringify(amberOnly) === '["4503"]', `amber-only: ${JSON.stringify(amberOnly)}`);
   const need = (/(\d+) need a look/.exec(mainSev) || [])[1];
@@ -378,7 +407,7 @@ async function run(crmDir) {
     /lt-warn/.test(legLine(c4501sev, 'VPO-D')) && !/lt-bad/.test(legLine(c4501sev, 'VPO-D'))
       && /lt-bad/.test(legLine(c4501sev, 'VPO-A')),
     `VPO-D: ${legLine(c4501sev, 'VPO-D').slice(0, 120)}`);
-  const order = JSON.parse(ev("JSON.stringify(liveRows().map(r=>String(r.p.project_no)))"));
+  const order = jparse(ev("JSON.stringify(liveRows().map(r=>String(r.p.project_no)))"));
   r.check('red rows sort before amber-only rows, which sort before clean ones',
     order.indexOf('4503') > order.indexOf('4508') && order.indexOf('4503') > order.indexOf('4502')
       && order.indexOf('4503') < order.indexOf('4506'),
@@ -387,7 +416,7 @@ async function run(crmDir) {
   // ties with on red, so the number tiebreak alone would put it first and the
   // check above cannot see the amber tiebreak. A clean job with a LOWER number
   // is pushed in for one call: amber-only must still sort ahead of it.
-  const withClean = JSON.parse(ev("(function(){ DATA.projects.push({company_id:'mer', project_no:'4500', status:'won',"
+  const withClean = jparse(ev("(function(){ DATA.projects.push({company_id:'mer', project_no:'4500', status:'won',"
     + " tracker_status:'awaiting_materials', archived:false});"
     + " const o = liveRows().map(r=>String(r.p.project_no)); DATA.projects.pop(); return JSON.stringify(o); })()"));
   r.check('an amber-only job sorts ahead of a clean one even when its number is higher',
@@ -454,19 +483,19 @@ async function run(crmDir) {
     + 'a row wore a TBD badge while showing no start date at all');
 
   // ---- who is on the screen at all ------------------------------------------
-  const live = JSON.parse(ev("JSON.stringify(liveRows().map(x=>String(x.p.project_no)))"));
+  const live = jparse(ev("JSON.stringify(liveRows().map(x=>String(x.p.project_no)))"));
   r.check('a project with no tracker status is not live work',
     !live.includes('4504'), `got ${JSON.stringify(live)}`);
   // Injected at run time: the build now drops archived projects before the
   // page exists, so the fixture's own 4505 never reaches DATA and a check on
   // it would pass whatever liveRows did. The view's filter still matters for
   // anything that arrives through a refresh.
-  const withArch = JSON.parse(ev("(function(){ DATA.projects.push({company_id:'acme', project_no:'4505', status:'won',"
+  const withArch = jparse(ev("(function(){ DATA.projects.push({company_id:'acme', project_no:'4505', status:'won',"
     + " archived:true, tracker_status:'action_admin', open_orders_notes:'Archived.'});"
     + " const l = liveRows().map(x=>String(x.p.project_no)); DATA.projects.pop(); return JSON.stringify(l); })()"));
   r.check('an archived project is not live work either',
     !withArch.includes('4505') && withArch.length === live.length, `got ${JSON.stringify(withArch)}`);
-  const legs4501 = JSON.parse(ev(
+  const legs4501 = jparse(ev(
     "JSON.stringify(liveRows().find(x=>String(x.p.project_no)==='4501')"
     + ".legs.map(l=>l.vendor_po_raw))"));
   r.check('legs are matched on the company as well as the number',
@@ -630,7 +659,7 @@ async function run(crmDir) {
   r.check('a company id containing "::" and a number containing "::" do not share a card id',
     sepIds.length >= 2 && new Set(sepIds).size === sepIds.length, `ids: ${JSON.stringify(sepIds)}`);
   ev("liveJump('a','b::c');");
-  const hitIds = JSON.parse(ev("JSON.stringify(Object.keys(document._els).filter(k=>k.startsWith('lt-')&&document._els[k].classList.contains('lt-hit')))"));
+  const hitIds = jparse(ev("JSON.stringify(Object.keys(document._els).filter(k=>k.startsWith('lt-')&&document._els[k].classList.contains('lt-hit')))"));
   r.check('and the jump for one of them marks exactly one card',
     hitIds.filter(k => /b%3A%3Ac|b::c/.test(k)).length === 1 && !hitIds.some(k => /^lt-a%3A%3Ab::c$|^lt-a::b::c$/.test(k) && !/b%3A%3Ac/.test(k)),
     `marked: ${JSON.stringify(hitIds)}`);
@@ -872,7 +901,7 @@ async function run(crmDir) {
   // module before it prints a verdict, and the mutation runner reads that as
   // "crashed, not a kill" -- correctly. The assertion has to survive the bug
   // it is testing for.
-  try { await ev('saveAdoptTrackerRow(0)'); } catch (e) { missingErr = String(e).slice(0, 160); }
+  try { await app.eval('saveAdoptTrackerRow(0)'); } catch (e) { missingErr = String(e).slice(0, 160); }
   r.check('saving against a missing row does not throw', !missingErr, missingErr);
   r.check('saving against a missing row writes nothing',
     app.calls().length === 0,
@@ -1083,11 +1112,11 @@ async function run(crmDir) {
   {
     const pk = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http',
       onCall: () => ({ ok: true }) });
-    pk.eval("setFilter('live'); renderMain();");
-    pk.eval("openAdoptTrackerRow(2)");          // row 8, keyed '1419'
+    guardedEval(r, pk, "setFilter('live'); renderMain();");
+    guardedEval(r, pk, "openAdoptTrackerRow(2)");          // row 8, keyed '1419'
     pk.el('a_pno').value = '7001';
     pk.el('a_cid').value = 'acme';
-    await pk.eval("saveAdoptTrackerRow(2)");
+    await guardedEval(r, pk, "saveAdoptTrackerRow(2)");
     const sent = pk.calls().filter(c => c.tool === 'create_project');
     r.check('adopting a row records the key the sheet carried',
       sent.length === 1 && String((sent[0].args.fields || {}).tracker_key) === '1419',
@@ -1109,7 +1138,7 @@ async function run(crmDir) {
             tracker_unlinked: [{ sheet_row: 99, client: 'From Refresh', legs: [] }] }
         : { ok: true, companies: [], contacts: [], projects: [], shipments: [],
             invoices: [] } });
-    await live.eval('refreshData()');
+    await guardedEval(r, live, 'refreshData()');
     r.check('a live refresh pulls the tracker files too',
       live.eval("String((DATA.tracker_buckets||[]).map(b=>b.label))") === 'REFRESHED',
       'refreshing five of seven inputs left the bucket headings and the whole '
@@ -1123,7 +1152,7 @@ async function run(crmDir) {
         ? { ok: true, tracker_buckets: 'not a list', tracker_unlinked: {} }
         : { ok: true, companies: [], contacts: [], projects: [], shipments: [],
             invoices: [] } });
-    await junk.eval('refreshData()');
+    await guardedEval(r, junk, 'refreshData()');
     r.check('a wrong-shaped answer does not replace a good section',
       junk.eval("String(Array.isArray(DATA.tracker_buckets))") === 'true'
       && junk.eval("String(Array.isArray(DATA.tracker_unlinked))") === 'true',
@@ -1275,11 +1304,11 @@ async function run(crmDir) {
     onCall: (t) => t === 'create_project'
       ? { ok: false, error: "project '4501' already exists" }
       : { ok: true } });
-  cfApp.eval("setFilter('live'); renderMain();");
-  cfApp.eval("openAdoptTrackerRow(2)");
+  guardedEval(r, cfApp, "setFilter('live'); renderMain();");
+  guardedEval(r, cfApp, "openAdoptTrackerRow(2)");
   cfApp.el('a_pno').value = '4501';
   cfApp.el('a_cid').value = 'acme';
-  await cfApp.eval("saveAdoptTrackerRow(2)");
+  await guardedEval(r, cfApp, "saveAdoptTrackerRow(2)");
   const cfMsg = (cfApp.el('savedMsg') || { textContent: '' }).textContent || '';
   const cfBody = (cfApp.el('a_conflict') || { innerHTML: '' }).innerHTML || '';
   r.check('a number already in use does not just fail',
@@ -1337,12 +1366,12 @@ async function run(crmDir) {
     onCall: (t) => t === 'create_project'
       ? { ok: false, error: "project '4501' already exists" }
       : { ok: true } });
-  cf2.eval("setFilter('live'); renderMain();");
-  cf2.eval("openAdoptTrackerRow(2)");
+  guardedEval(r, cf2, "setFilter('live'); renderMain();");
+  guardedEval(r, cf2, "openAdoptTrackerRow(2)");
   cf2.el('a_pno').value = '4501';
   cf2.el('a_cid').value = 'acme';
-  await cf2.eval("saveAdoptTrackerRow(2)");
-  await cf2.eval("dismissRow('fp-row8','already_adopted')");
+  await guardedEval(r, cf2, "saveAdoptTrackerRow(2)");
+  await guardedEval(r, cf2, "dismissRow('fp-row8','already_adopted')");
   r.check('linking it closes the drawer',
     !/\bopen\b/.test(cf2.el('drawer').className || ''),
     `class=${JSON.stringify(cf2.el('drawer').className)} -- the dismissal `
@@ -1352,7 +1381,7 @@ async function run(crmDir) {
     `savedMsg=${JSON.stringify((cf2.el('savedMsg')||{}).textContent)} -- a red `
     + 'mark over a write that succeeded is this whole sequence inverted');
   r.check('and the row is out of the live list',
-    cf2.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).length)") === '1');
+    guardedEval(r, cf2, "String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).length)") === '1');
 
   r.check('a dismissed row with no fingerprint offers no restore button',
     disApp.eval(
@@ -1375,15 +1404,15 @@ async function run(crmDir) {
   fs.writeFileSync(path.join(twDir, 'tracker_unlinked.json'), JSON.stringify(twUnl));
   const twApp = launch({ crmDir, storeDir: twDir, outDir: tmp, mode: 'http',
     onCall: () => ({ ok: true }) });
-  twApp.eval("setFilter('live'); renderMain();");
-  await twApp.eval("dismissRow('fp-twin','not_a_job')");
+  guardedEval(r, twApp, "setFilter('live'); renderMain();");
+  await guardedEval(r, twApp, "dismissRow('fp-twin','not_a_job')");
   r.check('dismissing a shared fingerprint clears EVERY row that shares it',
     twApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).map(u=>u.sheet_row))")
       === '7,8',
     `got ${twApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).map(u=>u.sheet_row))")}`
     + ' -- the card says "this clears both" and the store does clear both; '
     + 'a .find() clears one and leaves the screen disagreeing with the store');
-  await twApp.eval("restoreRow('fp-twin')");
+  await guardedEval(r, twApp, "restoreRow('fp-twin')");
   r.check('and restoring brings every one of them back',
     twApp.eval("String(arr(DATA.tracker_unlinked).filter(u=>u&&u.dismissed).length)") === '0',
     'otherwise a card sits under Dismissed with a "Put it back" that is now a '
@@ -1391,9 +1420,9 @@ async function run(crmDir) {
 
   // ---- the burndown is a migration quantity, not a search result -------
   const bApp = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
-  bApp.eval("setFilter('live'); renderMain();");
+  guardedEval(r, bApp, "setFilter('live'); renderMain();");
   const before = (bApp.el('main').innerHTML.match(/(\d+) rows? left to clear/) || [])[1];
-  bApp.eval("query='northgate'; renderList(); renderMain();");
+  guardedEval(r, bApp, "query='northgate'; renderList(); renderMain();");
   const after = (bApp.el('main').innerHTML.match(/(\d+) rows? left to clear/) || [])[1];
   r.check('searching does not change how much migration is left',
     before === after, `${before} -> ${after} -- "left to clear" is a claim `
@@ -1405,13 +1434,13 @@ async function run(crmDir) {
   const slow = new Promise(res => { release = res; });
   const raceApp = launch({ crmDir, storeDir: cfDir, outDir: tmp, mode: 'http',
     onCall: (t) => t === 'dismiss_tracker_row' ? slow : { ok: true } });
-  raceApp.eval("setFilter('live'); renderMain();");
+  guardedEval(r, raceApp, "setFilter('live'); renderMain();");
   const pending = raceApp.eval("dismissRow('fp-row8','not_a_job')");
-  raceApp.eval("openProject('4501')");           // he opens something else
+  guardedEval(r, raceApp, "openProject('4501')");           // he opens something else
   // drawerDirty set directly rather than by typing into a field: reaching for
   // #f_oon made this module CRASH under an unrelated mutant that removes that
   // textarea, and a module that dies has evaluated nothing.
-  raceApp.eval("drawerDirty = true;");
+  guardedEval(r, raceApp, "drawerDirty = true;");
   release({ ok: true });
   await pending;
   r.check('an in-flight dismissal leaves a later drawer alone',
@@ -1468,7 +1497,7 @@ async function run(crmDir) {
   // Review finding: the sidebar capped the whole list at 400, so it dropped the
   // owner row the main pane showed and left its heading standing over nothing,
   // and said nowhere that it had capped.
-  bigApp.eval("renderList();");
+  guardedEval(r, bigApp, "renderList();");
   const bigSide = bigApp.doc.getElementById('clist').innerHTML;
   const bigMainIds = [...bigMain.matchAll(/<div class="lt-card" id="lt-([^"]*)">/g)].map(m => m[1]);
   const bigSideIds = [...bigSide.matchAll(/onclick="liveJump\('([^']*)','([^']*)'\)"/g)].map(m => `${m[1]}::${m[2]}`);
@@ -1514,7 +1543,7 @@ async function run(crmDir) {
   wN('invoices', []); wN('contacts', []); wN('vendors', []); wN('needs_review', []);
   const appN = launch({ crmDir, storeDir: dirN, outDir: tmp, mode: 'http' });
   freezeClock(appN, TODAY);
-  appN.eval("setFilter('live');");
+  guardedEval(r, appN, "setFilter('live');");
   const mainN = appN.doc.getElementById('main').innerHTML;
   const cardN = (no) => (mainN.split(/<div class="lt-card"[^>]*>/).find(c => c.includes('>' + no + '<')) || '');
   r.check('a card with a next action and a date carries the line under the note',
@@ -1551,14 +1580,14 @@ async function run(crmDir) {
   // of Greenwich; on a machine at UTC the two agree and this check is inert.
   const late = new Date(2026, 7, 9, 23, 30);
   freezeClock(appN, late.toISOString());
-  appN.eval("renderMain();");
+  guardedEval(r, appN, "renderMain();");
   const mainLate = appN.doc.getElementById('main').innerHTML;
   const cardLate = (no) => (mainLate.split(/<div class="lt-card"[^>]*>/).find(c => c.includes('>' + no + '<')) || '');
   r.check("at 23:30 local the screen's day is still today, so the job due today is amber, not red",
     appN.eval('todayISO()') === '2026-08-09' && /badge b-pending">due today</.test(cardLate('N3')) && !/b-lost/.test(cardLate('N3')),
     `todayISO=${appN.eval('todayISO()')} offset=${late.getTimezoneOffset()}`);
   r.check("and the 'due this week' horizon is a week from that same local day",
-    appN.eval('soonISO()') === '2026-08-16', `soonISO=${appN.eval('soonISO()')}`);
+    guardedEval(r, appN, 'soonISO()') === '2026-08-16', `soonISO=${appN.eval('soonISO()')}`);
   freezeClock(appN, TODAY);
   // the drawer: both fields shown; an untouched date is never re-sent
   appN.fn('openProject')('N2', 'acme');

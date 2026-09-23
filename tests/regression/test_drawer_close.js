@@ -109,6 +109,17 @@ const OPENERS = [
 // whether the drawer is still dirty. run_all.py's runner awaits the result.
 async function run(crmDir) {
   const r = makeResult('drawer-close');
+  // An entry point that throws against a build is a NAMED failure and the
+  // module goes on; dying reported nothing (0.1.38). Statement-form evals
+  // only -- a check that asserts a throw keeps its own try.
+  const evStep = (inst, code) => {
+    const fail = (e) => { r.check(`${String(code).slice(0, 70)} does not throw`, false,
+      String((e && e.message) || e).slice(0, 160)); };
+    try {
+      const v = inst.eval(code);
+      return (v && typeof v.then === 'function') ? v.catch(fail) : v;
+    } catch (e) { fail(e); return undefined; }
+  };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmdrawer-'));
   const store = seedStore(path.join(tmp, 'store'));
 
@@ -217,14 +228,14 @@ async function run(crmDir) {
 
   // all eleven open the scrim, not just the three named in the request
   OPENERS.forEach(([call, label]) => {
-    app.eval('closeDrawer();');
-    app.eval(call);
+    evStep(app, 'closeDrawer();');
+    evStep(app, call);
     r.check(`${label}: drawer opens`, isOpen(), call);
     r.check(`${label}: scrim opens with it`, scrimOn(), call);
   });
 
   // clean drawer -> outside click closes with NO prompt
-  app.eval("closeDrawer(); openEditInvoice('acme','9001');");
+  evStep(app, "closeDrawer(); openEditInvoice('acme','9001');");
   app.resetConfirms();
   fire(scrim, 'click', {});
   r.check('clean drawer: outside click closes it', !isOpen());
@@ -234,7 +245,7 @@ async function run(crmDir) {
     `asked: ${JSON.stringify(app.confirms())}`);
 
   // dirty drawer -> outside click asks; answering NO keeps it open
-  app.eval("openEditInvoice('acme','9001');");
+  evStep(app, "openEditInvoice('acme','9001');");
   fire(dbody, 'input', {});
   app.resetConfirms();
   app.answerConfirm(false);
@@ -264,7 +275,7 @@ async function run(crmDir) {
   r.check('the prompt says the loss is permanent', /cannot be recovered/i.test(msg), msg);
 
   // Escape must behave identically -- the fix-by-instance trap
-  app.eval("openEditInvoice('acme','9001');");
+  evStep(app, "openEditInvoice('acme','9001');");
   fire(dbody, 'change', {});                    // a <select> edit, not typing
   app.resetConfirms();
   app.answerConfirm(false);
@@ -277,7 +288,7 @@ async function run(crmDir) {
   r.check('Escape closes when allowed', !isOpen());
 
   // a non-Escape key must not close anything
-  app.eval("openEditInvoice('acme','9001');");
+  evStep(app, "openEditInvoice('acme','9001');");
   app.resetConfirms();
   fire(app.doc, 'keydown', { key: 'a' });
   r.check('other keys do not close the drawer', isOpen());
@@ -292,40 +303,40 @@ async function run(crmDir) {
   // the handler ran, and closing an already-closed drawer looks like a no-op.
   // The one thing that DOES differ is that closeDrawer() writes the page's
   // inert state -- so a value only it would overwrite proves it never ran.
-  app.eval('closeDrawer();');
+  evStep(app, 'closeDrawer();');
   app.resetConfirms();
-  app.eval("document.getElementById('apphdr').inert = 'UNTOUCHED';");
+  evStep(app, "document.getElementById('apphdr').inert = 'UNTOUCHED';");
   fire(app.doc, 'keydown', { key: 'Escape' });
   r.check('Escape with no drawer open does not prompt', app.confirms().length === 0);
   r.check('Escape with no drawer open runs nothing at all',
     app.doc.getElementById('apphdr').inert === 'UNTOUCHED',
     'the handler must check the drawer is open before doing any work');
   r.check('Escape with no drawer open does not open one', !isOpen());
-  app.eval("document.getElementById('apphdr').inert = false;");
+  evStep(app, "document.getElementById('apphdr').inert = false;");
 
   // the save path must never be interrupted, even while dirty
-  app.eval("openEditInvoice('acme','9001');");
+  evStep(app, "openEditInvoice('acme','9001');");
   fire(dbody, 'input', {});
   app.resetConfirms();
   app.answerConfirm(false);          // if the guard leaked in, this would block
-  app.eval('closeDrawer();');
+  evStep(app, 'closeDrawer();');
   r.check('a completed save closes without prompting', !isOpen(),
     'closeDrawer() is the save path -- prompting there strands a saved record');
   r.check('the save path asks nothing', app.confirms().length === 0);
 
   // dirt must not survive into the next drawer
-  app.eval("openEditInvoice('acme','9001');");
+  evStep(app, "openEditInvoice('acme','9001');");
   fire(dbody, 'input', {});
-  app.eval("closeDrawer(); openProject('4521');");
+  evStep(app, "closeDrawer(); openProject('4521');");
   app.resetConfirms();
   fire(scrim, 'click', {});
   r.check('a fresh drawer starts clean', !isOpen() && app.confirms().length === 0,
     'stale dirt makes every later drawer prompt for edits that were never made');
 
   // reopening without closing (drawer -> drawer) must also reset
-  app.eval("openEditInvoice('acme','9001');");
+  evStep(app, "openEditInvoice('acme','9001');");
   fire(dbody, 'input', {});
-  app.eval("openProject('4521');");        // straight from one drawer to another
+  evStep(app, "openProject('4521');");        // straight from one drawer to another
   app.resetConfirms();
   fire(scrim, 'click', {});
   r.check('switching drawers directly resets dirt',
@@ -338,10 +349,10 @@ async function run(crmDir) {
   //    written record and the next Escape asked about saved changes. The harm
   //    is habituation: an operator taught to dismiss a false prompt dismisses
   //    the real one.
-  app.eval("closeDrawer(); openProject('4521');");
+  evStep(app, "closeDrawer(); openProject('4521');");
   fire(dbody, 'input', {});
   app.resetCalls();
-  await app.eval("saveProject('4521')");
+  await evStep(app, "saveProject('4521')");
   r.check('a successful save was actually attempted',
     app.calls().some(c => c.tool === 'update_project'),
     `tools called: ${app.calls().map(c => c.tool).join(',') || 'none'}`);
@@ -367,16 +378,16 @@ async function run(crmDir) {
       calls.length > 0 && wrapped.length === calls.length,
       `${wrapped.length}/${calls.length} wrapped -- an unwrapped one discards the open form silently`);
   }
-  app.eval("closeDrawer(); openProject('4521');");
+  evStep(app, "closeDrawer(); openProject('4521');");
   fire(dbody, 'input', {});
   app.resetConfirms();
   app.answerConfirm(false);
-  app.eval("navFromDrawer(()=>openNewShipment('4521'))");
+  evStep(app, "navFromDrawer(()=>openNewShipment('4521'))");
   r.check('leaving a dirty project form asks first', app.confirms().length === 1);
   r.check('answering no keeps the project form', /Project/.test(app.doc.getElementById('dtitle').textContent),
     `title is now: ${app.doc.getElementById('dtitle').textContent}`);
   app.answerConfirm(true);
-  app.eval("navFromDrawer(()=>openNewShipment('4521'))");
+  evStep(app, "navFromDrawer(()=>openNewShipment('4521'))");
   r.check('answering yes navigates', /shipment/i.test(app.doc.getElementById('dtitle').textContent));
   app.resetConfirms();
   fire(scrim, 'click', {});
@@ -385,7 +396,7 @@ async function run(crmDir) {
   // 3. DOUBLE-CLICK. The scrim goes live the instant the drawer opens while the
   //    dim is still fading, so click 2 of a double-click on a row lands on it
   //    and shuts what click 1 opened.
-  app.eval("closeDrawer(); openProject('4521');");
+  evStep(app, "closeDrawer(); openProject('4521');");
   app.resetConfirms();
   fire(scrim, 'click', { detail: 2 });
   r.check('the second click of a double-click does not close the drawer', isOpen(),
@@ -396,16 +407,16 @@ async function run(crmDir) {
   // 4. THE PAGE IS INERT WHILE A DRAWER IS OPEN. The scrim stops the mouse;
   //    only inert stops Tab reaching the search box and filter buttons, where
   //    Enter repaints the main pane under the open drawer.
-  app.eval("closeDrawer();");
+  evStep(app, "closeDrawer();");
   const hdr = app.doc.getElementById('apphdr'), wrap = app.doc.getElementById('appwrap');
   r.check('page is interactive with no drawer open',
     hdr.inert !== true && wrap.inert !== true);
-  app.eval("openProject('4521');");
+  evStep(app, "openProject('4521');");
   r.check('header goes inert when a drawer opens', hdr.inert === true,
     'without this, Tab reaches the KPIs and the search box under the scrim');
   r.check('sidebar and main go inert when a drawer opens', wrap.inert === true,
     'this is what stops Enter on a filter button repainting under the drawer');
-  app.eval("closeDrawer();");
+  evStep(app, "closeDrawer();");
   r.check('header is interactive again after close', hdr.inert !== true);
   r.check('sidebar and main are interactive again after close', wrap.inert !== true,
     'a page left inert is an app that cannot be clicked at all');
@@ -414,7 +425,7 @@ async function run(crmDir) {
   const bu = (app.sandbox.window._listeners.beforeunload || []);
   r.check('a beforeunload guard is bound', bu.length > 0);
   if (bu.length) {
-    app.eval("closeDrawer(); openProject('4521');");
+    evStep(app, "closeDrawer(); openProject('4521');");
     let ev = { prevented: false, preventDefault() { this.prevented = true; }, returnValue: null };
     bu[0](ev);
     r.check('clean drawer does not block a reload', !ev.prevented,
@@ -443,9 +454,9 @@ async function run(crmDir) {
       onCall: (tool) => tool === 'update_project'
         ? { ok: false, error: 'refused' } : { ok: true },
     });
-    failApp.eval("select('acme'); openProject('4521');");
-    failApp.eval("document.getElementById('f_pno').value='9999';");
-    await failApp.eval("saveProject('4521')");
+    evStep(failApp, "select('acme'); openProject('4521');");
+    evStep(failApp, "document.getElementById('f_pno').value='9999';");
+    await evStep(failApp, "saveProject('4521')");
     const t = failApp.doc.getElementById('dtitle').textContent;
     const m = failApp.doc.getElementById('savedMsg');
     r.check('a refused save leaves the form up', /4521/.test(t),
@@ -465,9 +476,9 @@ async function run(crmDir) {
       crmDir, storeDir: store, outDir: tmp, mode: 'http',
       onCall: () => ({ ok: true }),
     });
-    okApp.eval("select('acme'); openProject('4521');");
-    okApp.eval("document.getElementById('f_pno').value='9999';");
-    await okApp.eval("saveProject('4521')");
+    evStep(okApp, "select('acme'); openProject('4521');");
+    evStep(okApp, "document.getElementById('f_pno').value='9999';");
+    await evStep(okApp, "saveProject('4521')");
     const t = okApp.doc.getElementById('dtitle').textContent;
     r.check('a successful rename reopens the drawer on the new number',
       /9999/.test(t),
@@ -487,7 +498,7 @@ async function run(crmDir) {
       crmDir, storeDir: store, outDir: tmp, mode: 'http',
       onCall: () => new Promise(res => { release = () => res({ ok: true }); }),
     });
-    slow.eval("select('acme'); openProject('4521');");
+    evStep(slow, "select('acme'); openProject('4521');");
     const rev = slow.doc.getElementById('f_revenue');
     r.check('fields are editable before a save', rev.disabled !== true);
     const p = slow.eval("saveProject('4521')");     // in flight, not awaited
@@ -506,14 +517,14 @@ async function run(crmDir) {
   //    off-screen, so its fields stayed focusable; typing in them set the dirty
   //    flag with nothing on screen, and beforeunload then blocked every reload
   //    with no visible cause.
-  app.eval('closeDrawer();');
+  evStep(app, 'closeDrawer();');
   r.check('a closed drawer has inert set (tab order NOT verified -- see header)',
     drawer.inert === true,
     'the intent is to keep the off-screen form out of the tab order');
-  app.eval("openProject('4521');");
+  evStep(app, "openProject('4521');");
   r.check('an open drawer has inert cleared', drawer.inert === false,
     'an inert drawer cannot be typed into at all');
-  app.eval('closeDrawer();');
+  evStep(app, 'closeDrawer();');
 
   // 8b. navFromDrawer must not clear the flag until the opener has actually
   //     swapped the form. Several openers bail on a missing record; clearing
@@ -521,10 +532,10 @@ async function run(crmDir) {
   //     discarded later with no prompt. openNewShipment (the only wired
   //     caller today) cannot bail, so this is asserted against the contract
   //     directly rather than through it.
-  app.eval("closeDrawer(); openProject('4521');");
+  evStep(app, "closeDrawer(); openProject('4521');");
   fire(dbody, 'input', {});
   app.answerConfirm(true);
-  app.eval('navFromDrawer(function(){ return; })');   // an opener that bails
+  evStep(app, 'navFromDrawer(function(){ return; })');   // an opener that bails
   app.resetConfirms();
   app.answerConfirm(false);
   fire(scrim, 'click', {});
@@ -532,7 +543,7 @@ async function run(crmDir) {
     app.confirms().length === 1,
     'the flag was cleared before the opener ran, so the untouched form reads clean');
   app.answerConfirm(true);
-  app.eval('closeDrawer();');
+  evStep(app, 'closeDrawer();');
 
   // 9. FALLBACK IF inert IS UNSUPPORTED. `el.inert = true` on an older engine
   //    is a silent no-op expando, which returns the keyboard bug with no signal.
@@ -544,7 +555,7 @@ async function run(crmDir) {
   //     algorithm '' is precisely the value meaning "do not prompt".
   {
     const bu2 = (app.sandbox.window._listeners.beforeunload || []);
-    app.eval("closeDrawer(); openProject('4521');");
+    evStep(app, "closeDrawer(); openProject('4521');");
     fire(dbody, 'input', {});
     const ev = { prevented: false, preventDefault() { this.prevented = true; }, returnValue: null };
     if (bu2.length) bu2[0](ev);
@@ -552,7 +563,7 @@ async function run(crmDir) {
       typeof ev.returnValue === 'string' && ev.returnValue.length > 0,
       `returnValue was ${JSON.stringify(ev.returnValue)} -- '' disables the prompt`);
     app.answerConfirm(true);
-    app.eval('closeDrawer();');
+    evStep(app, 'closeDrawer();');
   }
 
   // ---- the FAILURE branches, which had no assertions at all ----------------
@@ -568,9 +579,9 @@ async function run(crmDir) {
       crmDir, storeDir: store, outDir: tmp, mode: 'http',
       onCall: (t) => t === 'update_project' ? { ok: false, error: 'refused' } : { ok: true },
     });
-    bad.eval("select('acme'); openProject('4521');");
+    evStep(bad, "select('acme'); openProject('4521');");
     fire(bad.doc.getElementById('dbody'), 'input', {});
-    await bad.eval("saveProject('4521')");
+    await evStep(bad, "saveProject('4521')");
     bad.resetConfirms();
     bad.answerConfirm(false);
     fire(bad.doc, 'keydown', { key: 'Escape' });
@@ -590,9 +601,9 @@ async function run(crmDir) {
       onCall: (t) => t === 'update_project'
         ? Promise.reject(new Error('network down')) : { ok: true },
     });
-    boom.eval("select('acme'); openProject('4521');");
+    evStep(boom, "select('acme'); openProject('4521');");
     fire(boom.doc.getElementById('dbody'), 'input', {});
-    await boom.eval("saveProject('4521')");
+    await evStep(boom, "saveProject('4521')");
     boom.resetConfirms();
     boom.answerConfirm(false);
     fire(boom.doc, 'keydown', { key: 'Escape' });
@@ -609,9 +620,9 @@ async function run(crmDir) {
       crmDir, storeDir: store, outDir: tmp, mode: 'http',
       onCall: (t) => t === 'update_project' ? { ok: false, error: 'refused' } : { ok: true },
     });
-    bad2.eval("select('acme'); openProject('4521');");
-    bad2.eval("document.getElementById('f_revenue').value='250000';");
-    await bad2.eval("saveProject('4521')");
+    evStep(bad2, "select('acme'); openProject('4521');");
+    evStep(bad2, "document.getElementById('f_revenue').value='250000';");
+    await evStep(bad2, "saveProject('4521')");
     const rev = bad2.eval(
       "String((DATA.projects.find(p=>String(p.project_no)==='4521')||{}).revenue)");
     r.check('a refused save does not enter the in-memory ledger', rev === '100000',
@@ -627,15 +638,15 @@ async function run(crmDir) {
       onCall: (t) => t === 'rename_project'
         ? { ok: false, error: 'number already in use' } : { ok: true },
     });
-    badRen.eval("select('acme'); openProject('4521');");
-    badRen.eval("document.getElementById('f_pno').value='9999';");
-    await badRen.eval("saveProject('4521')");
+    evStep(badRen, "select('acme'); openProject('4521');");
+    evStep(badRen, "document.getElementById('f_pno').value='9999';");
+    await evStep(badRen, "saveProject('4521')");
     const tools = badRen.calls().map(c => c.tool);
     r.check('a refused rename does not go on to save fields',
       !tools.includes('update_project'),
       `called: ${tools.join(',')} -- update_project would target a phantom number`);
     r.check('a refused rename leaves the local number alone',
-      badRen.eval("String((DATA.projects.find(p=>String(p.project_no)==='4521')||{}).project_no)") === '4521');
+      evStep(badRen, "String((DATA.projects.find(p=>String(p.project_no)==='4521')||{}).project_no)") === '4521');
     r.check('a refused rename re-enables the save button',
       badRen.doc.getElementById('saveBtn').disabled === false,
       'otherwise the operator cannot correct it without a reload');
@@ -654,10 +665,10 @@ async function run(crmDir) {
         return { ok: true };
       },
     });
-    retry.eval("select('acme'); openProject('4521');");
-    retry.eval("document.getElementById('f_pno').value='9999';");
-    await retry.eval("saveProject('4521')");
-    await retry.eval("saveProject('4521')");        // the retry
+    evStep(retry, "select('acme'); openProject('4521');");
+    evStep(retry, "document.getElementById('f_pno').value='9999';");
+    await evStep(retry, "saveProject('4521')");
+    await evStep(retry, "saveProject('4521')");        // the retry
     r.check('a committed rename is not re-sent on retry', renames === 1,
       `rename_project fired ${renames}x -- the second targets a number that is gone`);
     const targets = retry.calls().filter(c => c.tool === 'update_project')

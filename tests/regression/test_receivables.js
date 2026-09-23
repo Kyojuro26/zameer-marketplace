@@ -62,13 +62,27 @@ function seedStore(dir) {
   return dir;
 }
 
+// An evaluation that throws against a build is a NAMED failure and the module
+// goes on; dying there reported nothing (0.1.38). A check that asserts on a
+// throw keeps a raw eval inside its own try.
+// the JSON a guarded evaluation returned, or null when it returned nothing
+function jparse(v) { return v === undefined ? null : JSON.parse(v); }
+function guardedEval(r, inst, code) {
+  const fail = (e) => { r.check(`${String(code).slice(0, 70)} does not throw`, false,
+    String((e && e.message) || e).slice(0, 160)); };
+  try {
+    const v = inst.eval(code);
+    return (v && typeof v.then === 'function') ? v.catch(fail) : v;
+  } catch (e) { fail(e); return undefined; }
+}
+
 async function run(crmDir) {
   const r = makeResult('receivables');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmrecv-'));
   const store = seedStore(path.join(tmp, 'store'));
   const { js, html } = buildBundle(crmDir, store, tmp);
   const app = launch({ crmDir, storeDir: store, outDir: tmp, mode: 'http' });
-  const ev = (code) => app.eval(code);
+  const ev = (code) => guardedEval(r, app, code);
 
   // ---- the shared definition -----------------------------------------------
   r.check('the receivables filter button exists', /data-f="receivable"/.test(html));
@@ -126,7 +140,7 @@ async function run(crmDir) {
         payment_status: 'open', invoice_date: '2026-01-05' }]));
     fs.writeFileSync(path.join(dupDir, 'shipments.json'), '[]');
     const dupApp = launch({ crmDir, storeDir: dupDir, outDir: tmp, mode: 'http' });
-    dupApp.eval("setFilter('receivable'); renderMain();");
+    guardedEval(r, dupApp, "setFilter('receivable'); renderMain();");
     const dupMain = dupApp.el('main').innerHTML || '';
     r.check('an amount comes from THIS company\'s project of that number',
       /1,000/.test(dupMain) && !/9,000/.test(dupMain),
@@ -180,7 +194,7 @@ async function run(crmDir) {
   r.check('it opens on Overdue', ev('recvBucket') === 'Overdue',
     'the point of the screen is what is late');
 
-  const rows = JSON.parse(ev("JSON.stringify(recvRows().map(r=>String(r.v.invoice_no)))"));
+  const rows = jparse(ev("JSON.stringify(recvRows().map(r=>String(r.v.invoice_no)))"));
   r.check('overdue rows are oldest debt first',
     JSON.stringify(rows) === JSON.stringify(['7004', '7005', '7001', '7003']),
     `got ${JSON.stringify(rows)}`);
@@ -200,7 +214,7 @@ async function run(crmDir) {
 
   // ---- bucket switching ----------------------------------------------------
   ev("setRecvBucket('Paid');");
-  const paid = JSON.parse(ev("JSON.stringify(recvRows().map(r=>String(r.v.invoice_no)))"));
+  const paid = jparse(ev("JSON.stringify(recvRows().map(r=>String(r.v.invoice_no)))"));
   r.check('the Paid bucket shows the paid invoice',
     JSON.stringify(paid) === JSON.stringify(['7002']), `got ${JSON.stringify(paid)}`);
   r.check('counts are per bucket',
@@ -243,7 +257,7 @@ async function run(crmDir) {
   r.check('ledgerExposure adds shapes; it prices nothing itself (SOURCE CHECK)',
     !/function ledgerExposure[\s\S]{0,1200}(outstanding|invoiceAmount)\(/.test(js),
     'a second pricing rule in the view is how two figures on one screen disagree');
-  const led = JSON.parse(ev("JSON.stringify(ledgerExposure())"));
+  const led = jparse(ev("JSON.stringify(ledgerExposure())"));
   r.check('the ledger tally is additive: counted + excluded == population',
     led && led.counted + Object.values(led.excluded).reduce((a,b)=>a+b,0) === led.population
       && led.population === 5 && led.counted === 3,
@@ -291,7 +305,7 @@ async function run(crmDir) {
           display_name: 'Ace Renamed', role: 'customer', domains: [], locations: [], archived: false } };
         return { ok: true };
       } });
-    const ev2 = (code) => app2.eval(code);
+    const ev2 = (code) => guardedEval(r, app2, code);
     const tile2 = () => (app2.doc.getElementById('kpis').innerHTML.split('class="kpi go"')[1] || '')
       .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
     ev2("kpis();");
@@ -322,7 +336,7 @@ async function run(crmDir) {
       `calls: ${tools.join(',')}`);
     r.check('the tile shows the refreshed figure, not the build-time one',
       /83,000/.test(tile2()) && /3 of 5 invoices priced/.test(tile2()), tile2());
-    const acme2 = JSON.parse(ev2("JSON.stringify(DATA.companies.find(c=>c.company_id==='acme'))"));
+    const acme2 = jparse(ev2("JSON.stringify(DATA.companies.find(c=>c.company_id==='acme'))"));
     r.check('the local optimistic edit survives the refresh (metrics copied, record kept)',
       acme2.display_name === 'Ace Renamed' && acme2.metrics && acme2.metrics.exposure_open_receivable_usd.counted === 2,
       JSON.stringify(acme2).slice(0, 200));
@@ -369,7 +383,7 @@ async function run(crmDir) {
       { company_id: 'pd', invoice_no: '7102', project_no: '8002', payment_status: 'paid', invoice_date: '2026-05-02' }]));
     w3('contacts', []); w3('shipments', []); w3('vendors', []); w3('needs_review', []);
     const app3 = launch({ crmDir, storeDir: dir3, outDir: tmp, mode: 'http' });
-    const ev3 = (code) => app3.eval(code);
+    const ev3 = (code) => guardedEval(r, app3, code);
     const headline = () => ((app3.doc.getElementById('main').innerHTML.match(/<p class="co-sum">[\s\S]*?<\/p>/) || [''])[0])
       .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const sideItem = (name) => (app3.doc.getElementById('clist').innerHTML.split('class="citem').find(x => x.includes(name)) || '')
@@ -458,7 +472,7 @@ async function run(crmDir) {
       { shipment_id: 'A2-L1', company_id: 'archlink', project_no: 'A2', all_project_nos: ['A2'], stage: 'Ordered', vendor_po_raw: 'VPO-LIVE' }]);
     wA('contacts', []); wA('vendors', []); wA('needs_review', []);
     const appA = launch({ crmDir, storeDir: dirA, outDir: tmp, mode: 'http' });
-    appA.eval("setFilter('all'); select('archlink');");
+    guardedEval(r, appA, "setFilter('all'); select('archlink');");
     const mainA = appA.doc.getElementById('main').innerHTML;
     r.check('an invoice on an archived project is not on the page, as it is not in any read tool',
       !/ARCH-7/.test(mainA) && /LIVE-8/.test(mainA), 'the server hides it; the page must not show money the server does not list');
@@ -469,7 +483,7 @@ async function run(crmDir) {
     const headA = ((mainA.match(/<p class="co-sum">[\s\S]*?<\/p>/) || [''])[0]).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
     r.check('so the headline and the table describe the same invoices',
       /\$100 outstanding/.test(headA) && /1 of 1 invoice priced/.test(headA), headA);
-    appA.eval("setFilter('receivable');");
+    guardedEval(r, appA, "setFilter('receivable');");
     r.check('and the Receivables list does not count it either',
       !/ARCH-7/.test(appA.doc.getElementById('main').innerHTML));
   }
