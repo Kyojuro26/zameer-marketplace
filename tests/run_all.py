@@ -82,6 +82,7 @@ JS_MODULES = [("regression/test_view.js", "view"),
               ("regression/test_completed_view.js", "completed/view"),
               ("regression/test_new_project_view.js", "new-project/view"),
               ("regression/test_customer_page_view.js", "customer-page/view"),
+              ("regression/test_receivables_tile_view.js", "receivables-tile/view"),
               ("regression/test_harness.js", "harness")]
 
 

@@ -137,8 +137,9 @@ LOOKUP = [
   "            warnings = _po_warnings_safe(pno) if pno else []", "            warnings = []"),
 ]
 QBO_VIEW = [
+ # re-anchored 0.1.44: the marker is one helper, shared with the top tile
  ("the stale marker is never shown",
-  "      + (q.stale ? ", "      + (false ? "),
+  "  return q.stale ? ", "  return false ? "),
  ("the QBO open column shows the amount",
   "      <td class=\"num\">${qboCell(v, 'qbo_open_usd')}</td>",
   "      <td class=\"num\">${qboCell(v, 'qbo_amount_usd')}</td>"),

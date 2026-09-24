@@ -681,9 +681,23 @@ function kpis(){
   // it never falls back to a sum of its own, because a second definition is
   // how two figures on one screen come to disagree.
   const ex = ledgerExposure();
-  const recvN = ex && ex.value != null ? money(ex.value) : '\u2014';
-  const recvL = ex ? `Open receivables \u00b7 ${ex.counted} of ${ex.population} invoice${ex.population===1?'':'s'} priced`
+  let recvN = ex && ex.value != null ? money(ex.value) : '\u2014';
+  let recvL = ex ? `Open receivables \u00b7 ${ex.counted} of ${ex.population} invoice${ex.population===1?'':'s'} priced`
                    : 'Open receivables \u00b7 needs the server';
+  // With a QuickBooks snapshot the tile leads, as the Receivables header does,
+  // with QuickBooks' own open balance -- the identical shape (qboLedger), dated
+  // and flagged when stale -- and the CRM's quoted figure sits beneath it. The
+  // quoted figure cannot price a split-billed job (a CRM invoice carries no
+  // amount), so leading with it showed $136,693 against QuickBooks'
+  // $179,545.38 (0.1.44). No snapshot: exactly as before.
+  const q = qboLedger('qbo_open_receivable_usd');
+  if(q){
+    recvN = q.value_cents == null ? '\u2014' : moneyCents(q.value_cents);
+    recvL = `Open receivables \u00b7 QuickBooks as of ${esc(fmtDate(q.as_of))} \u00b7 ${esc(shapeCaveat(q))}`
+      + qboStaleBadge(q)
+      + `<br>${ex && ex.value != null ? money(ex.value) : 'nothing priced'} quoted`
+      + (ex ? ` \u00b7 ${esc(shapeCaveat(ex))}` : ' \u00b7 needs the server');
+  }
   document.getElementById('kpis').innerHTML = [
     ['Companies', DATA.companies.length, null],
     ['Open shipments', openShip, null],
@@ -1019,7 +1033,7 @@ function renderReceivables(){
         ? `<span class="muted">· QuickBooks as of ${esc(fmtDate(q.as_of))}: nothing matched · ${esc(shapeCaveat(q))}</span>`
         : `<span>· <b>${moneyCents(q.value_cents)}</b> open in QuickBooks as of ${esc(fmtDate(q.as_of))}</span>
            <span class="muted">across ${esc(shapeCaveat(q))}</span>`)
-      + (q.stale ? ` <b class="badge" style="color:var(--red)">stale · ${q.age_days} days old</b>` : '');
+      + qboStaleBadge(q);
   const quoted = q ? ', quoted' : '';
   const head = qhead + (ex
     ? (ex.value == null
@@ -2097,6 +2111,10 @@ function qboLedger(key){
   });
   if(!out.counted) out.value_cents = null;
   return out;
+}
+/* The stale marker, one definition for the tile and the Receivables header. */
+function qboStaleBadge(q){
+  return q.stale ? ` <b class="badge" style="color:var(--red)">stale \u00b7 ${q.age_days} days old</b>` : '';
 }
 /* One invoice's QuickBooks shape, as the server computed it for that row. */
 function qboShape(v, key){

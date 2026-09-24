@@ -78,15 +78,16 @@ M = [
 
  # ---- the server's shape (0.1.36) -------------------------------------------
  ("the tile falls back to its own project sum when there is no shape",
-  "  const recvN = ex && ex.value != null ? money(ex.value) : '\\u2014';",
-  "  const recvN = ex && ex.value != null ? money(ex.value)\n"
+  # re-anchored 0.1.44: recvN/recvL are let, since a snapshot replaces them
+  "  let recvN = ex && ex.value != null ? money(ex.value) : '\\u2014';",
+  "  let recvN = ex && ex.value != null ? money(ex.value)\n"
   "    : money(curProjects.filter(p=>{const c=st(p.collection_status);return c && c!=='paid';}).reduce((a,p)=>a+num(p.revenue),0));"),
  ("a ledger with nothing counted renders $0",
   "  if(!out.counted) out.value = null;          // nothing counted is not $0",
   "  if(!out.counted) out.value = 0;"),
  ("the tile drops its denominator",
-  "  const recvL = ex ? `Open receivables \\u00b7 ${ex.counted} of ${ex.population} invoice${ex.population===1?'':'s'} priced`",
-  "  const recvL = ex ? `Open receivables`"),
+  "  let recvL = ex ? `Open receivables \\u00b7 ${ex.counted} of ${ex.population} invoice${ex.population===1?'':'s'} priced`",
+  "  let recvL = ex ? `Open receivables`"),
  ("the population is summed from counted alone",
   "    out.counted += n(s.counted); out.population += n(s.population);",
   "    out.counted += n(s.counted); out.population += n(s.counted);"),
