@@ -47,9 +47,15 @@ or fields of the wrong shape) is skipped and COUNTED in the report.
 It can only see edits whose line exists. An edit whose line was never written
 (the OSError case itself) is invisible here as it was to merge. Records it
 cannot place are listed separately, never silently dropped: `unmatched` (no
-store record under that key -- the record was renamed without a logged rename,
-or the key is not in the store) and `ambiguous` (more than one record answers
-to the key, e.g. two customers' 4521 logged before 0.1.41 without a company).
+store record under that key and customer -- the record was renamed without a
+logged rename, or the key is not in the store) and `ambiguous` (more than one
+record answers to the key, e.g. two customers' 4521 logged before 0.1.41
+without a company). Two known limits leave an entry unmatched rather than
+checked: a rename logged before 0.1.43 names no customer, so on a number two
+customers held it cannot say whose entries moved; and a project moved to
+another customer (update_project with a new company_id) is logged under the
+new customer, so entries made under the old one no longer match it. Check
+those by hand.
 
 Usage
 -----
@@ -115,10 +121,15 @@ def load(store, name, required):
     return data
 
 
-def load_changelog(store):
+AMBIGUOUS = "<ambiguous>"   # an entry that can no longer be tied to one record
+
+
+def load_changelog(store, records=None):
     """(events, skipped, present). events: {(entity, key, field): [(company_id
     or None, value, ts), ...]} in log order, keys moved through renames in
-    order. skipped: lines that could not be read. present: the file exists."""
+    order. skipped: lines that could not be read. present: the file exists.
+    records: the store's files, used only to tell whether a renamed number was
+    shared (another customer still holds it)."""
     events, skipped = {}, 0
     path = os.path.join(store, "changelog.jsonl")
     if not os.path.exists(path):
@@ -148,9 +159,26 @@ def load_changelog(store):
             if op == "rename":
                 new = _renamed(ent, key, fields)
                 if new and new != key:
+                    # an entry without a customer, on a number another
+                    # customer still holds, belonged to one of them -- which,
+                    # nothing says. Moving it pinned it to the renamer and
+                    # reported the other's value as missing (round 2).
+                    shared = cid is not None and ent == "project" and any(
+                        isinstance(r, dict) and idkey(r.get("project_no")) == key
+                        and r.get("company_id") != cid
+                        for r in (records or {}).get("projects.json", []))
                     for k in [k for k in events if k[0] == ent and k[1] == key]:
-                        moving = [ev for ev in events[k] if cid is None or ev[0] in (None, cid)]
-                        staying = [ev for ev in events[k] if ev not in moving]
+                        moving, staying = [], []
+                        for ev in events[k]:
+                            if cid is None or ev[0] == cid:
+                                moving.append(ev)
+                            elif ev[0] is None and shared:
+                                moving.append((AMBIGUOUS,) + ev[1:])
+                                staying.append((AMBIGUOUS,) + ev[1:])
+                            elif ev[0] is None:
+                                moving.append(ev)
+                            else:
+                                staying.append(ev)
                         if staying:
                             events[k] = staying
                         else:
@@ -188,7 +216,7 @@ def _matches(ent, rec, key):
 
 def audit(store):
     records = {f: load(store, f, f in STORE_MARKERS) for f in set(FILE_OF.values())}
-    events, skipped, present = load_changelog(store)
+    events, skipped, present = load_changelog(store, records)
     findings, unmatched, ambiguous = [], [], []
     checked = 0
     for (ent, key, field), evs in sorted(events.items(), key=lambda kv: str(kv[0])):
@@ -196,6 +224,10 @@ def audit(store):
         # replay in log order: the last entry that applies to each record
         last = {}
         for cid, value, ts in evs:
+            if cid == AMBIGUOUS:
+                for i in range(len(hits)):
+                    last[i] = None
+                continue
             if ent == "project" and cid is not None:
                 mine = [i for i, h in enumerate(hits) if h.get("company_id") == cid]
                 if not mine:
@@ -249,7 +281,11 @@ def render(res, store):
                         ("MORE THAN ONE RECORD ANSWERS TO THE KEY", res["ambiguous"])):
         L.append(f"{title}: {len(rows)}")
         for f in rows:
-            L.append(f"  {f['entity']} {f['key']} {f['field']}")
+            who = f["key"] + (f" ({f['company_id']})" if f.get("company_id") else "")
+            L.append(f"  {f['entity']} {who} {f['field']}")
+    if res["unmatched"]:
+        L.append("  An unmatched entry's record may have been renamed, or moved to another "
+                 "customer, before this version logged it -- check by hand.")
     L += ["", "Read-only: no store file was modified. Nothing was restored; each "
           "line is for a person to review."]
     return "\n".join(L) + "\n"
@@ -299,6 +335,10 @@ def main():
         if _inside_store(out, store):
             sys.exit("FATAL: --out resolves inside the store. This audit never "
                      "writes into a live store. Choose a path outside it.")
+        if os.path.isdir(out):
+            sys.exit(f"FATAL: --out {a.out} is a directory; give a file path.")
+        if not os.path.isdir(os.path.dirname(out)):
+            sys.exit(f"FATAL: --out {a.out}: its folder does not exist.")
     res = audit(store)
     text = json.dumps(res, indent=2, default=str) if a.json else render(res, store)
     if a.out:

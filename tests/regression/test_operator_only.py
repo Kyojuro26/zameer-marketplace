@@ -627,3 +627,42 @@ def _audit_review1(r, aud, crm, tmp):
                              capture_output=True, text=True, timeout=60)
         r.check(f"--out as {what} is refused", out.returncode != 0, (out.stdout + out.stderr)[-160:])
     r.check("... and the store is byte-identical after every attempt", _digest(s.path) == before)
+
+    # round 2: a directory, the store itself, a missing parent -- a message, not a traceback
+    for what, dest in (("the store directory itself", s.path), ("a directory", outside),
+                       ("a path whose parent does not exist", outside / "nope" / "r.txt")):
+        out = subprocess.run([sys.executable, script, "--store", str(s.path), "--out", str(dest)],
+                             capture_output=True, text=True, timeout=60)
+        r.check(f"--out as {what} fails with a message, not a traceback",
+                out.returncode != 0 and "Traceback" not in out.stderr and "FATAL" in out.stderr,
+                out.stderr[-200:])
+    r.check("... and the store is still byte-identical", _digest(s.path) == before)
+
+    # round 2: an entry without a customer, on a number two customers held, is
+    # not pinned to whichever of them renames first
+    s = Store(srv, tmp / "audit-rename-legacy")
+    s.reset(companies=[company("acme", "Ace Manufacturing"), company("beta", "Beta Works")],
+            projects=[project("4600", "acme"), project("4600", "beta", next_action_on="2026-09-01")])
+    with open(s.path / "changelog.jsonl", "w") as f:
+        f.write(json.dumps({"ts": "1", "op": "update", "entity": "project", "key": "4600",
+                            "fields": {"next_action_on": "2026-09-01"}}) + "\n")
+    s.call("rename_project", old_project_no="4600", new_project_no="4999", company_id="acme")
+    res = aud.audit(str(s.path))
+    r.check("audit: a customer's rename does not pin an unscoped entry on a shared number to it",
+            not res["findings"], json.dumps(res)[:240])
+    r.check("... the entry is listed as ambiguous instead", any(a_["field"] == "next_action_on" for a_ in res["ambiguous"]),
+            json.dumps(res)[:240])
+
+    # round 2: an entry the audit cannot place names its customer and says why
+    s = Store(srv, tmp / "audit-moved")
+    s.reset(companies=[company("acme", "Ace Manufacturing"), company("beta", "Beta Works")],
+            projects=[project("4700", "acme")])
+    s.call("update_project", project_no="4700", company_id="acme", fields={"next_action_on": "2026-09-01"})
+    s.call("update_project", project_no="4700", company_id="acme", fields={"company_id": "beta"})
+    res = aud.audit(str(s.path))
+    text = aud.render(res, str(s.path))
+    r.check("audit: an entry for a customer that no longer holds the number is unmatched, naming the customer",
+            any(u["key"] == "4700" and u["company_id"] == "acme" for u in res["unmatched"])
+            and "4700 (acme)" in text, text[-300:])
+    r.check("... and the report says the record may have moved or been renamed, to check by hand",
+            "check by hand" in text, text[-300:])

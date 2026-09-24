@@ -387,13 +387,18 @@ function demoSlug(s){ return (s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').re
    names one -- as the server's _one_project does. By number alone, completing
    one customer's 4521 completed (and overwrote with) the other's (0.1.43). */
 function demoProject(no, cid){
-  return DATA.projects.find(x => String(x.project_no) === String(no)
-    && (cid == null || String(x.company_id) === String(cid)));
+  // a company is compared as the server's _key compares it: null and '' are
+  // the same "no customer" (round 2: a project with none was "not found")
+  const k = v => v == null ? '' : String(v).trim();
+  const hits = DATA.projects.filter(x => k(x.project_no) === k(no) && (cid == null || k(x.company_id) === k(cid)));
+  // a number two customers hold, named without one: refused, as on the server
+  return hits.length === 1 ? hits[0] : (hits.length > 1 ? 'shared' : null);
 }
 function embeddedCall(tool, args){   // demo fallback — session-only mutation
   const f = args.fields || {};
   if (tool === 'update_project'){
     const p = demoProject(args.project_no, args.company_id);
+    if (p === 'shared') return {ok:false, error:"projects share the number '"+args.project_no+"' -- pass company_id to say which"};
     if (!p) return {ok:false, error:'project not found'};
     Object.assign(p, args.fields); return {ok:true, project:p};
   }
@@ -446,6 +451,7 @@ function embeddedCall(tool, args){   // demo fallback — session-only mutation
     if(DATA.projects.some(p=>String(p.project_no)===String(args.new_project_no) && String(p.project_no)!==String(args.old_project_no)))
       return {ok:false, error:"project '"+args.new_project_no+"' already exists"};
     const p = demoProject(args.old_project_no, args.company_id);
+    if(p === 'shared') return {ok:false, error:"projects share the number '"+args.old_project_no+"' -- pass company_id to say which"};
     if(!p) return {ok:false, error:'project not found'};
     return {ok:true, project:Object.assign({}, p, {project_no:args.new_project_no}),
       shipments_updated:0, invoices_updated:0};
@@ -1227,7 +1233,9 @@ function unlinkedMatches(u, q){
    bucket (the bucket stays, as provenance), and listed under Completed. A
    non-blank STRING -- the server's _is_completed() is the same test, so a job
    leaves the Live screen exactly when it leaves next_action_due. */
-function isCompleted(p){ const v = p && p.completed_on; return typeof v === 'string' && v.trim() !== ''; }
+// ASCII whitespace only, as the server's COMPLETED_BLANK: trim() and Python's strip() disagree
+// on U+FEFF, U+0085 and \x1c-\x1f (review round 2)
+function isCompleted(p){ const v = p && p.completed_on; return typeof v === 'string' && v.replace(/[ \t\n\r\f\v]/g, '') !== ''; }
 function _jobLegs(p){
   return (DATA.shipments||[]).filter(s=>
     st(s.company_id)===st(p.company_id) &&

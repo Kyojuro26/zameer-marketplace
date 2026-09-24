@@ -92,7 +92,15 @@ def run(server, crm_dir=None):
     res = s.call("update_project", project_no="5003", company_id="acme", fields={"company_id": "beta"})
     r.check("moving one under a lead is allowed", res.get("ok") is True and ("5003", "beta") in ids(),
             json.dumps(res)[:200])
-    s.write("companies", [c if c["company_id"] != "gamma" else dict(c, role="customer")
+    # round 2: re-sending a project's own company is not a move
+    s.write("companies", [c if c["company_id"] != "beta" else dict(c, role="vendor")
+                          for c in s.read("companies")])
+    res = s.call("update_project", project_no="5003", company_id="beta",
+                 fields={"company_id": "beta", "notes": "still here"})
+    r.check("re-sending the project's current company is not a move, even once it is a vendor",
+            res.get("ok") is True, json.dumps(res)[:200])
+    s.write("companies", [c if c["company_id"] not in ("gamma", "beta") else
+                          dict(c, role="customer" if c["company_id"] == "gamma" else "lead")
                           for c in s.read("companies")])
 
     r.section("a project number is unique across the business")

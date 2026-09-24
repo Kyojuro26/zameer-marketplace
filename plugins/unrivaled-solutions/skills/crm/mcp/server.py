@@ -1167,6 +1167,9 @@ def _check_sent_after(requested, sent, what):
                          f"{requested}")
 
 
+COMPLETED_BLANK = " \t\n\r\f\v"   # the view's isCompleted() strips exactly these
+
+
 def _is_completed(p):
     """The job is done: completed_on is a non-blank STRING. The one reading of
     "complete" -- the view's isCompleted() is the same test -- so a project is
@@ -1175,7 +1178,9 @@ def _is_completed(p):
     number) is not a completion. Stringifying it made "[]" complete here while
     the view read it as "" and kept the job live (review round 1)."""
     v = p.get("completed_on")
-    return isinstance(v, str) and v.strip() != ""
+    # ASCII whitespace only, spelled out: str.strip() and JavaScript's trim()
+    # disagree on U+FEFF, U+0085 and \x1c-\x1f (review round 2)
+    return isinstance(v, str) and v.strip(COMPLETED_BLANK) != ""
 
 
 def _check_completed(record, fields):
@@ -4162,7 +4167,6 @@ def update_project(project_no: str, fields: dict,
             _validate(fields, PROJECT_FIELDS - {"project_no"}, "project")
             if "company_id" in fields:
                 _require_company(fields["company_id"])
-                _require_project_owner(fields["company_id"])
             projects = STORE.load("projects")
             want = _resolve(project_no, _project_keys(projects))
             hit = _one_project(projects, want, "Editing it", company_id) if want else None
@@ -4185,6 +4189,10 @@ def update_project(project_no: str, fields: dict,
             old_cid = _key(target[0].get("company_id"))
             new_cid = _key(fields["company_id"]) if "company_id" in fields \
                 else old_cid
+            # the owner rule on an actual move only: re-sending the project's
+            # own company moves nothing, even if it has since become a vendor
+            if new_cid != old_cid:
+                _require_project_owner(fields["company_id"])
             if new_cid != old_cid and any(
                     p is not target[0] and _key(p.get("project_no")) == want
                     and _key(p.get("company_id")) == new_cid for p in projects):

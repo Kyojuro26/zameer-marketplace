@@ -218,12 +218,21 @@ def run(server, crm_dir=None):
     # the view alike -- a raw list read "[]" (complete) here and "" (live) there
     ps = s.read("projects")
     extra = [("4550", []), ("4551", {}), ("4552", True), ("4553", False), ("4554", 0), ("4555", 20260919)]
+    # round 2: one whitespace set on both sides -- Python's strip() and
+    # JavaScript's trim() disagree on U+FEFF, U+0085 and \x1c-\x1f
+    odd = [("4560", "\ufeff"), ("4561", "\x1c"), ("4562", "\x85")]
+    for pno, v in odd:
+        ps.append(project(pno, "acme", next_action_on="2026-08-01", completed_on=v))
+    ps.append(project("4563", "acme", next_action_on="2026-08-01", completed_on=" \t\n\r\f\v"))
     for pno, v in extra:
         ps.append(project(pno, "acme", next_action_on="2026-08-01", completed_on=v))
     s.write("projects", ps)
     got = due()
     r.check("a raw completed_on that is not a string -- list, object, bool, number -- is not a completion",
             all((pno, "acme") in got for pno, _ in extra), json.dumps(got))
+    r.check("a string of anything but ASCII whitespace is a completion, as the page reads it",
+            all((pno, "acme") not in got for pno, _ in odd), json.dumps(got))
+    r.check("... and ASCII whitespace alone is not", ("4563", "acme") in got, json.dumps(got))
 
     # ---- 4a. a fresh process reads it back -----------------------------------------
     r.section("round trip through a fresh process")

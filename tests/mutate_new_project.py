@@ -31,9 +31,12 @@ SERVER = [
  ("the refusal does not name the company",
   "            f\"company '{company_id}' ({co.get('display_name') or 'no name'}) \"\n",
   "            f\"that company \"\n"),
+ # re-anchored review round 2: the owner rule fires on an actual move only
  ("moving a project under a vendor is allowed again (round 1)",
-  '                _require_company(fields["company_id"])\n                _require_project_owner(fields["company_id"])\n',
-  '                _require_company(fields["company_id"])\n'),
+  "            if new_cid != old_cid:\n                _require_project_owner(fields[\"company_id\"])\n", ""),
+ ("re-sending the project's own company counts as a move (round 2)",
+  "            if new_cid != old_cid:\n                _require_project_owner(fields[\"company_id\"])\n",
+  "            if \"company_id\" in fields:\n                _require_project_owner(fields[\"company_id\"])\n"),
  ("a number is unique per customer, not across the business",
   "            if any(_key(p.get(\"project_no\")) == pn for p in projects):\n"
   "                raise StoreError(f\"project '{pn}' already exists\")",
