@@ -1167,6 +1167,74 @@ def _check_sent_after(requested, sent, what):
                          f"{requested}")
 
 
+PROFIT_TOL = 0.01          # a cent
+MARGIN_TOL = 0.0001        # a margin is a fraction
+
+
+def _derived_profit(rec):
+    """(gross_profit, margin) worked out from revenue and total_cost: profit to
+    the cent; margin a fraction, null when revenue is zero or negative; both
+    null when either input is missing or not a number."""
+    rev, cost = _num(rec.get("revenue")), _num(rec.get("total_cost"))
+    if rev is None or cost is None:
+        return None, None
+    gp = round(rev - cost, 2)
+    return gp, (round(gp / rev, 6) if rev > 0 else None)
+
+
+def _derive_profit(fields, prior):
+    """Profit and margin follow revenue and cost (0.1.44). On a write that
+    CHANGES revenue or total_cost (prior None: a create), the derived pair is
+    written into `fields`, so it is saved and logged with the edit. A
+    gross_profit or margin the caller sends that disagrees by more than a cent
+    (0.0001 for margin) is refused, naming both; a consistent one is replaced
+    by the recomputed value. Editing revenue used to leave a stored profit
+    that no longer matched it."""
+    changed = [k for k in ("revenue", "total_cost") if k in fields
+               and (prior is None or _num(fields[k]) != _num(prior.get(k))
+                    or (fields[k] is None) != (prior.get(k) is None))]
+    if not changed:
+        return
+    gp, margin = _derived_profit(dict(prior or {}, **fields))
+    for key, want, tol, shown in (("gross_profit", gp, PROFIT_TOL, lambda v: f"{v:.2f}"),
+                                  ("margin", margin, MARGIN_TOL, lambda v: f"{v:.4f}")):
+        if key not in fields:
+            continue
+        got = _num(fields[key])
+        if (got is None) != (want is None) or (got is not None and abs(got - want) > tol):
+            raise StoreError(
+                f"{key} {fields[key]!r} disagrees with revenue and total_cost, which "
+                f"give {key} {shown(want) if want is not None else 'null'} -- leave "
+                f"{key} out and it is worked out for you")
+    fields["gross_profit"], fields["margin"] = gp, margin
+
+
+def _derived_mismatch(projects):
+    """Read-only: live projects whose stored gross_profit or margin disagree
+    with their revenue and total_cost. Only projects with both inputs are
+    checked; nothing is written."""
+    checked, out = 0, []
+    for p in projects:
+        if not isinstance(p, dict) or p.get("archived"):
+            continue
+        gp, margin = _derived_profit(p)
+        if _num(p.get("revenue")) is None or _num(p.get("total_cost")) is None:
+            continue
+        checked += 1
+        sgp, sm = _num(p.get("gross_profit")), _num(p.get("margin"))
+        off_gp = sgp is None or abs(sgp - gp) > PROFIT_TOL
+        off_m = (sm is None) != (margin is None) or (sm is not None and abs(sm - margin) > MARGIN_TOL)
+        if off_gp or off_m:
+            out.append({"project_no": p.get("project_no"), "company_id": p.get("company_id"),
+                        "revenue": p.get("revenue"), "total_cost": p.get("total_cost"),
+                        "gross_profit": p.get("gross_profit"), "margin": p.get("margin"),
+                        "derived_gross_profit": gp, "derived_margin": margin})
+    return {"checked": checked, "count": len(out), "projects": out,
+            "basis": "stored gross_profit / margin against revenue - total_cost and "
+                     "(revenue - total_cost) / revenue, over live projects with both; "
+                     "re-save a project's revenue to correct it"}
+
+
 COMPLETED_BLANK = " \t\n\r\f\v"   # the view's isCompleted() strips exactly these
 
 
@@ -4269,6 +4337,7 @@ def update_project(project_no: str, fields: dict,
                     f"give that customer the number twice, and nothing could "
                     f"then tell them apart. Rename one of them first.")
             _check_quote_order(dict(target[0], **fields))
+            _derive_profit(fields, target[0])
             warnings = _check_completed(dict(target[0], **fields), fields)
             target[0].update(fields)
             updates = {"projects": projects}
@@ -4730,6 +4799,7 @@ def create_project(fields: dict) -> dict:
                 raise StoreError(f"project '{pn}' already exists")
             record = {k: None for k in PROJECT_FIELDS}
             record.update({"owner": [], "annotations": [], "po_flag": False, "archived": False})
+            _derive_profit(fields, None)
             record.update(fields)
             _check_quote_order(record)
             warnings = _check_completed(record, fields)
@@ -5608,6 +5678,11 @@ def crm_info() -> dict:
         out["enriched_companies"] = len(STORE.load_enrichment())
     except StoreError as ex:
         problems["enrichment/archive"] = str(ex)
+    # Data quality, not a store fault: listed, never counted against `ok`.
+    try:
+        out["derived_mismatch"] = _derived_mismatch(STORE.load("projects"))
+    except StoreError as ex:
+        problems["derived_mismatch"] = str(ex)
     # A store file this build had to create at first boot is surfaced here,
     # not buried in a temp-dir launch log. If it was missing because OneDrive
     # had not synced it down, this is the operator's only signal.

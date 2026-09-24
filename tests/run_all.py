@@ -64,6 +64,7 @@ PY_MODULES = [
     ("regression.test_temp_cleanup", "regression/test_temp_cleanup.py"),
     ("regression.test_local_server", "regression/test_local_server.py"),
     ("regression.test_qbo_customer", "regression/test_qbo_customer.py"),
+    ("regression.test_derived_margin", "regression/test_derived_margin.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
@@ -84,6 +85,7 @@ JS_MODULES = [("regression/test_view.js", "view"),
               ("regression/test_new_project_view.js", "new-project/view"),
               ("regression/test_customer_page_view.js", "customer-page/view"),
               ("regression/test_receivables_tile_view.js", "receivables-tile/view"),
+              ("regression/test_derived_margin_view.js", "derived-margin/view"),
               ("regression/test_harness.js", "harness")]
 
 

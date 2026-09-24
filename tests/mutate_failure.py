@@ -170,6 +170,7 @@ HEALTH = [
  # the top of it rather than the bottom, with the two edit points twenty-two
  # lines apart. No shorter anchor can express that, and a fuzzy one could not
  # say which of the two it moved.
+ # re-anchored 0.1.44: crm_info gained the derived_mismatch block
  ("crm_info computes ok BEFORE the blocks that can still add problems",
   "    # `ok` is NOT computed here. Two blocks below can still add to `problems`\n"
   "    # -- the enrichment/archive read and the auto_created manifest -- and a\n"
@@ -186,6 +187,11 @@ HEALTH = [
   "        out[\"enriched_companies\"] = len(STORE.load_enrichment())\n"
   "    except StoreError as ex:\n"
   "        problems[\"enrichment/archive\"] = str(ex)\n"
+  "    # Data quality, not a store fault: listed, never counted against `ok`.\n"
+  "    try:\n"
+  "        out[\"derived_mismatch\"] = _derived_mismatch(STORE.load(\"projects\"))\n"
+  "    except StoreError as ex:\n"
+  "        problems[\"derived_mismatch\"] = str(ex)\n"
   "    # A store file this build had to create at first boot is surfaced here,\n"
   "    # not buried in a temp-dir launch log. If it was missing because OneDrive\n"
   "    # had not synced it down, this is the operator's only signal.\n"
@@ -218,6 +224,11 @@ HEALTH = [
   "        out[\"enriched_companies\"] = len(STORE.load_enrichment())\n"
   "    except StoreError as ex:\n"
   "        problems[\"enrichment/archive\"] = str(ex)\n"
+  "    # Data quality, not a store fault: listed, never counted against `ok`.\n"
+  "    try:\n"
+  "        out[\"derived_mismatch\"] = _derived_mismatch(STORE.load(\"projects\"))\n"
+  "    except StoreError as ex:\n"
+  "        problems[\"derived_mismatch\"] = str(ex)\n"
   "    # A store file this build had to create at first boot is surfaced here,\n"
   "    # not buried in a temp-dir launch log. If it was missing because OneDrive\n"
   "    # had not synced it down, this is the operator's only signal.\n"

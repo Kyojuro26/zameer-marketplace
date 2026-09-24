@@ -2939,12 +2939,11 @@ function openProject(pno, cid){
   // names the customer and the server can tell the twins apart.
   cid = st(p.company_id);
   document.getElementById('dtitle').textContent='Project '+(pno||'');
-  // revenue/total_cost/gross_profit/margin are independent stored values
-  // (each read from its own tracker column, never computed from the
-  // others) -- see pipeline/normalize.py -- so all four are safe to edit
-  // as plain fields, same as everything else here. margin is stored as a
-  // fraction (0.33 == 33%); the field shows/accepts a whole percent and
-  // converts on save.
+  // revenue and total_cost are edited here; gross_profit and margin are
+  // read-only, because the server works them out from those two whenever
+  // either changes (0.1.44) -- the importer still reads each from its own
+  // tracker column. margin is stored as a fraction (0.33 == 33%); the field
+  // shows a whole percent.
   const marginPct = (p.margin==null||isNaN(p.margin)) ? '' : Math.round(p.margin*10000)/100;
   document.getElementById('dbody').innerHTML=`
     <div class="kv"><span class="k">Company</span><span>${esc((companyById[p.company_id]||{}).display_name||p.company_name||'—')}</span></div>
@@ -2983,8 +2982,8 @@ function openProject(pno, cid){
       <div class="field"><label>Total cost ($)</label><input id="f_cost" type="number" step="0.01" value="${p.total_cost==null?'':esc(p.total_cost)}"/></div>
     </div>
     <div class="row2">
-      <div class="field"><label>Gross profit ($)</label><input id="f_gp" type="number" step="0.01" value="${p.gross_profit==null?'':esc(p.gross_profit)}"/></div>
-      <div class="field"><label>Margin (%)</label><input id="f_margin" type="number" step="0.1" value="${esc(marginPct)}"/></div>
+      <div class="field"><label>Gross profit ($)</label><input id="f_gp" type="number" readonly title="Worked out from revenue and cost when either changes" value="${p.gross_profit==null?'':esc(p.gross_profit)}"/></div>
+      <div class="field"><label>Margin (%)</label><input id="f_margin" type="number" readonly title="Worked out from revenue and cost when either changes" value="${esc(marginPct)}"/></div>
     </div>
     <div class="field"><label>Owner (reps, comma-separated)</label><input id="f_owner" value="${esc(arr(p.owner).join(', '))}"/></div>
     <div class="field"><label>Open orders note <span class="muted"
@@ -3049,7 +3048,6 @@ async function saveProject(pnoArg, cid){
   let pno = pnoEl.getAttribute('data-orig');
   if(pno === null) pno = pnoArg;
   const newPno = pnoEl.value.trim();
-  const marginRaw = numOrNull('f_margin');
   const fields = {
     description: document.getElementById('f_desc').value.trim() || null,
     location: document.getElementById('f_loc').value.trim() || null,
@@ -3074,8 +3072,8 @@ async function saveProject(pnoArg, cid){
     annotations: document.getElementById('f_annos').value.split('\n').map(s=>s.trim()).filter(Boolean),
     revenue: numOrNull('f_revenue'),
     total_cost: numOrNull('f_cost'),
-    gross_profit: numOrNull('f_gp'),
-    margin: marginRaw==null ? null : marginRaw/100,
+    // gross_profit and margin are not sent: the server works them out from
+    // revenue and cost (0.1.44), and refuses a stale one sent beside a change
   };
   dateIfChanged('f_date', fields, 'date');     // never send a date he did not touch
   dateIfChanged('f_nao', fields, 'next_action_on');   // same rule for "by when"
@@ -3141,6 +3139,11 @@ async function saveProject(pnoArg, cid){
   const ok = await doSave('update_project', {project_no: pno, fields, company_id: cid}, (r)=>{
     const p=findProject(pno, cid);
     if(p) Object.assign(p, r.project || fields);
+    // show the profit and margin the server stored, not the ones the form opened with
+    const sp = r.project || p || {};
+    const gpEl = document.getElementById('f_gp'), mEl = document.getElementById('f_margin');
+    if(gpEl) gpEl.value = sp.gross_profit == null ? '' : sp.gross_profit;
+    if(mEl) mEl.value = (sp.margin == null || isNaN(sp.margin)) ? '' : Math.round(sp.margin*10000)/100;
     // The bucket's baseline used to be re-taken HERE, alone. doSave now
     // re-baselines every control carrying data-orig on its success path --
     // one rule for the bucket, the deal date and every other snapshotted
