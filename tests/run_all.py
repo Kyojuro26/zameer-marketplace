@@ -28,7 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
 sys.path.insert(0, str(ROOT))
-from lib.harness import load_server  # noqa: E402
+from lib.harness import cleanup_temp, load_server  # noqa: E402
 
 PLUGIN = "plugins/unrivaled-solutions/skills/crm"
 
@@ -61,6 +61,7 @@ PY_MODULES = [
     ("regression.test_operator_only", "regression/test_operator_only.py"),
     ("regression.test_new_project", "regression/test_new_project.py"),
     ("regression.test_completed_chat", "regression/test_completed_chat.py"),
+    ("regression.test_temp_cleanup", "regression/test_temp_cleanup.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
@@ -111,6 +112,8 @@ def run_python(crm_dir, pattern, modules=None):
             # a module that threw evaluated nothing: its result is a crash
             # report, and positive_control_verdict never credits one
             res.crashed = True
+        finally:
+            cleanup_temp()          # the module's scratch stores, not the next one's
         results.append(res)
     return results
 

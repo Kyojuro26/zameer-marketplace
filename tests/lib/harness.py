@@ -15,6 +15,7 @@ Two rules this file exists to enforce, both learned the hard way:
    an explicit null), which a direct call cannot see.
 """
 import asyncio
+import atexit
 import json
 import os
 import shutil
@@ -42,12 +43,32 @@ def load_server(crm_dir):
         sys.path.remove(mcp_dir)
 
 
+# Scratch stores this process created (Store() with no path). Removed after
+# each module by run_all, and at exit for a module run on its own -- the
+# mutation runner runs one per process. Before this, nothing removed them: one
+# full run left 22 crmtest-* directories behind, and they accumulated by the
+# thousand. A store given a path belongs to its caller and is never listed.
+_OWNED = []
+
+
+def cleanup_temp():
+    """Remove every scratch store this process created so far."""
+    while _OWNED:
+        shutil.rmtree(_OWNED.pop(), ignore_errors=True)
+
+
+atexit.register(cleanup_temp)
+
+
 class Store:
     """A scratch store plus the tool-call plumbing."""
 
     def __init__(self, server, path=None):
         self.server = server
-        self.path = Path(path or tempfile.mkdtemp(prefix="crmtest-"))
+        if path is None:
+            path = tempfile.mkdtemp(prefix="crmtest-")
+            _OWNED.append(path)
+        self.path = Path(path)
         self.reset()
 
     def reset(self, **files):
