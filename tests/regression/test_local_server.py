@@ -172,6 +172,61 @@ def run(server, crm_dir=None):
             rc not in (0, None) and "in use by another program" in err and "Another CRM app" not in err
             and OPENED not in out, (err + out)[-300:])
 
+    # 5. review of 0.1.44: a holder that never answers, or trickles a byte a
+    # second, must not hold the new app up -- the probe has a total budget
+    for label, mode in (("never answers", "silent"), ("trickles a byte a second", "trickle")):
+        port, stop = _raw_listener(mode)
+        try:
+            t0 = time.time()
+            rc, out, err = _second(crm, s.path, port, secs=60)
+            took = time.time() - t0
+        finally:
+            stop()
+        r.check(f"a holder that {label} is named as another program within the probe's budget",
+                rc not in (0, None) and "in use by another program" in err and OPENED not in out
+                and took < 20, f"rc={rc} took={took:.1f}s {err[-160:]}")
+
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     return r
+
+
+def _raw_listener(mode):
+    """A TCP listener that accepts and then says nothing, or one byte a second."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+    conns = []
+
+    def serve():
+        srv.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                c, _ = srv.accept()
+                conns.append(c)
+            except OSError:
+                continue
+            if mode == "trickle":
+                def drip(c=c):
+                    try:
+                        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n")
+                        while not stop.is_set():
+                            c.sendall(b"x")
+                            time.sleep(1)
+                    except OSError:
+                        pass
+                threading.Thread(target=drip, daemon=True).start()
+    threading.Thread(target=serve, daemon=True).start()
+
+    def close():
+        stop.set()
+        for c in conns:
+            try:
+                c.close()
+            except OSError:
+                pass
+        srv.close()
+    return port, close

@@ -102,9 +102,23 @@ def run(server, crm_dir=None):
     res = up("4600", notes="unrelated")
     r.check("a write that does not change revenue or cost leaves profit alone",
             res.get("ok") is True and rec("4600").get("gross_profit") == stale.get("gross_profit"), json.dumps(rec("4600"))[:160])
-    res = up("4600", revenue=1000, gross_profit=999)
-    r.check("re-sending the same revenue changes nothing, so its profit is not judged",
-            res.get("ok") is True and rec("4600").get("gross_profit") == 999, json.dumps(res)[:200])
+    # review of 0.1.44: a write that sends profit or margin is judged whether or
+    # not it changes revenue or cost -- {"margin": 40} was stored as 4000%
+    for label, fields in (("a profit alone", {"gross_profit": 999}),
+                          ("a margin sent as a percent", {"margin": 40}),
+                          ("the same revenue re-sent with a stale profit", {"revenue": 1000, "gross_profit": 999})):
+        res = up("4600", **fields)
+        r.check(f"{label} is refused when revenue and cost give another value",
+                res.get("ok") is False and "disagrees" in str(res.get("error")), json.dumps(res)[:200])
+    res = up("4600", gross_profit=400)
+    r.check("a consistent profit alone is accepted, and corrects the stored one",
+            res.get("ok") is True and fresh("4600") == [400, 0.4], json.dumps([res.get("error"), fresh("4600")]))
+    res = up("4603", gross_profit=75)
+    r.check("with no revenue or cost to judge by, a profit is taken as given",
+            res.get("ok") is True and rec("4603").get("gross_profit") == 75, json.dumps(res)[:200])
+    import inspect
+    r.check("update_project's description says profit and margin are worked out",
+            "worked out" in (inspect.getdoc(getattr(srv, "update_project", None)) or ""))
     res = s.call("create_project", fields={"project_no": "4700", "company_id": "acme",
                                            "revenue": 800, "total_cost": 200})
     r.check("create_project derives them too", res.get("ok") is True and fresh("4700") == [600, 0.75],
@@ -119,10 +133,16 @@ def run(server, crm_dir=None):
     dm = res.get("derived_mismatch") or {}
     got = sorted(str(p.get("project_no")) for p in dm.get("projects", []))
     r.check("crm_info lists exactly the projects whose stored profit or margin disagree",
-            got == ["4600", "4601"], json.dumps(dm)[:300])
+            got == ["4601"], json.dumps(dm)[:300])
     r.check("... with how many it checked", dm.get("checked") == 4, json.dumps(dm)[:200])
     r.check("... and each listing carries the stored and the derived values",
-            any(p.get("project_no") == "4600" and p.get("gross_profit") == 999
-                and p.get("derived_gross_profit") == 400 for p in dm.get("projects", [])), json.dumps(dm)[:300])
+            any(p.get("project_no") == "4601" and p.get("margin") == 0.1
+                and p.get("derived_margin") == 0.75 for p in dm.get("projects", [])), json.dumps(dm)[:300])
     r.check("the check writes nothing", digest() == before)
+    ps = s.read("projects")
+    ps += [project(str(5000 + n), "acme", revenue=100, total_cost=50, gross_profit=1, margin=0.5) for n in range(60)]
+    s.write("projects", ps)
+    dm = s.call("crm_info").get("derived_mismatch") or {}
+    r.check("the list is bounded: 50 shown, the count says 61",
+            len(dm.get("projects", [])) == 50 and dm.get("count") == 61, json.dumps({k: dm.get(k) for k in ("count", "checked")}))
     return r

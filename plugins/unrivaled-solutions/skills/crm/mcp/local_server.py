@@ -43,6 +43,7 @@ import os
 import re
 import secrets
 import sys
+import time
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -126,12 +127,40 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     # On Windows SO_REUSEADDR lets a second process bind a port another one is
-    # already listening on, so the "is the port free" answer below would be a
-    # lie there. Elsewhere it only allows reuse after a close (0.1.44).
+    # already listening on, so "bind first" would bind anyway. It is left on
+    # elsewhere; there it does not let two listeners share 127.0.0.1:port
+    # (macOS will bind 127.0.0.1 beside a wildcard listener either way, and
+    # then this app is the one that answers on 127.0.0.1) (0.1.44).
     allow_reuse_address = os.name != "nt"
 
 
-def probe_holder(port, timeout=10):
+PROBE_BUDGET = 8.0        # seconds for the whole probe, however the holder behaves
+PROBE_MAX_BYTES = 8 << 20
+
+
+def _fetch(url, deadline, headers=None):
+    """The body at url, read in chunks against ONE deadline and a size cap. A
+    per-read timeout let a holder that sent a byte every few seconds keep the
+    new app waiting forever (0.1.44 review)."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("probe budget spent")
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=left) as resp:
+        chunks, size = [], 0
+        while True:
+            if time.monotonic() > deadline:
+                raise TimeoutError("probe budget spent")
+            b = resp.read1(65536) if hasattr(resp, "read1") else resp.read(65536)
+            if not b:
+                return b"".join(chunks)
+            chunks.append(b)
+            size += len(b)
+            if size > PROBE_MAX_BYTES:
+                raise ValueError("probe answer too large")
+
+
+def probe_holder(port, budget=PROBE_BUDGET):
     """What is listening on `port`: ("crm", version or None) or ("other", None).
 
     Asks the app the way its own page does -- GET / (which carries the page's
@@ -139,9 +168,9 @@ def probe_holder(port, timeout=10):
     server_version. That works for apps from before this release too, which
     have no route of their own for it."""
     base = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + budget
     try:
-        with urllib.request.urlopen(base + "/", timeout=timeout) as resp:
-            page = resp.read().decode("utf-8", "replace")
+        page = _fetch(base + "/", deadline).decode("utf-8", "replace")
     except Exception:                                  # noqa: BLE001 -- anything else
         return "other", None
     if "<title>Unrivaled CRM</title>" not in page:
@@ -150,9 +179,8 @@ def probe_holder(port, timeout=10):
     if not m:
         return "crm", None
     try:
-        req = urllib.request.Request(base + "/health", headers={"X-Bridge-Token": m.group(1)})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8", "replace"))
+        body = json.loads(_fetch(base + "/health", deadline,
+                                 {"X-Bridge-Token": m.group(1)}).decode("utf-8", "replace"))
     except Exception:                                  # noqa: BLE001
         return "crm", None
     v = body.get("server_version") or body.get("version") if isinstance(body, dict) else None

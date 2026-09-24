@@ -1193,9 +1193,17 @@ def _derive_profit(fields, prior):
     changed = [k for k in ("revenue", "total_cost") if k in fields
                and (prior is None or _num(fields[k]) != _num(prior.get(k))
                     or (fields[k] is None) != (prior.get(k) is None))]
-    if not changed:
+    sent = [k for k in ("gross_profit", "margin") if k in fields]
+    if not changed and not sent:
         return
-    gp, margin = _derived_profit(dict(prior or {}, **fields))
+    merged = dict(prior or {}, **fields)
+    derivable = _num(merged.get("revenue")) is not None and _num(merged.get("total_cost")) is not None
+    # A profit or margin sent without a revenue or cost change is judged too
+    # (0.1.44 review: {"margin": 40} was stored as 4000%). With nothing to judge
+    # it by -- no revenue or no cost -- it is taken as given.
+    if not changed and not derivable:
+        return
+    gp, margin = _derived_profit(merged)
     for key, want, tol, shown in (("gross_profit", gp, PROFIT_TOL, lambda v: f"{v:.2f}"),
                                   ("margin", margin, MARGIN_TOL, lambda v: f"{v:.4f}")):
         if key not in fields:
@@ -1229,7 +1237,7 @@ def _derived_mismatch(projects):
                         "revenue": p.get("revenue"), "total_cost": p.get("total_cost"),
                         "gross_profit": p.get("gross_profit"), "margin": p.get("margin"),
                         "derived_gross_profit": gp, "derived_margin": margin})
-    return {"checked": checked, "count": len(out), "projects": out,
+    return {"checked": checked, "count": len(out), "projects": out[:50],
             "basis": "stored gross_profit / margin against revenue - total_cost and "
                      "(revenue - total_cost) / revenue, over live projects with both; "
                      "re-save a project's revenue to correct it"}
@@ -2425,7 +2433,8 @@ class _MetricsCtx:
         to a QuickBooks name when it has a qbo_name, or when its display name
         (normalised) is a customer name the snapshot uses. A row that names
         the company -- qbo_name exactly, or the display name normalised --
-        agrees. A tied company whose row names someone else is a mismatch:
+        agrees (names compared as QuickBooks does: case, spacing and
+        punctuation aside). A tied company whose row names someone else is a mismatch:
         one wrong CRM invoice claiming another customer's number was priced
         silently. With no tie, or a row naming nobody, it is unverified:
         priced as before and counted in the basis, never excluded, or every
@@ -2440,7 +2449,7 @@ class _MetricsCtx:
             if not isinstance(name, str) or not name.strip():
                 verdict = "unverified"
                 continue
-            if (q and name.strip() == q) or (dk and _name_key(name) == dk):
+            if (q and _name_key(name) == _name_key(q)) or (dk and _name_key(name) == dk):
                 continue
             if tied:
                 return "mismatch", name.strip()
@@ -2491,8 +2500,12 @@ class _MetricsCtx:
                 unverified += 1
         # priced, but nothing ties the company to a QuickBooks name: said, not hidden
         tail = f"; customer not verified: {unverified}" if unverified else ""
-        return (self.qbo_shape(amt, n, _tally(exc), QBO_INVOICED_BASIS + tail),
-                self.qbo_shape(opn, n, _tally(exc), QBO_OPEN_BASIS + tail))
+        out = (self.qbo_shape(amt, n, _tally(exc), QBO_INVOICED_BASIS + tail),
+               self.qbo_shape(opn, n, _tally(exc), QBO_OPEN_BASIS + tail))
+        if unverified:                      # a count the screen shows beside the figure
+            for sh in out:
+                sh["customer_not_verified"] = unverified
+        return out
 
     def invoice_qbo(self, inv):
         """The per-invoice pair, a population of one each. Responses only.
@@ -2515,7 +2528,10 @@ class _MetricsCtx:
         QuickBooks numbers that match more than once, and the store-wide
         QuickBooks totals the Receivables header adds up per company."""
         invoiced, qbo_open = self.qbo_totals(self.invoices)
+        # an invoice whose number matched another customer's QuickBooks row does
+        # not carry that row: it is listed as uncarried, under its own customer
         crm_keys = {k for i in self.invoices
+                    if self.qbo_match(i)[1] != "qbo_customer_mismatch"
                     for k in _qbo_invoice_keys(i.get("invoice_no"))}
         q_rows = ([r_ for r_ in self.qbo["rows"] if r_.get("type") == "Invoice"]
                   if self.qbo else [])
@@ -2798,8 +2814,10 @@ class _MetricsCtx:
         QuickBooks invoice window (or matched there). A job is the leg's
         project when it has one, else its invoice on (number, company_id); a
         project's invoices roll up to it."""
+        # a customer mismatch keeps the invoice in its job (0.1.44 review):
+        # dropping it priced a split job on its other half, or dropped a job
         IN = (None, "not_in_qbo_snapshot", "ambiguous_qbo_match",
-              "qbo_match_shared", "partial_qbo_match")
+              "qbo_match_shared", "partial_qbo_match", "qbo_customer_mismatch")
 
         def key_of(pno, inv_no, cid):
             if _key(pno):
@@ -4287,6 +4305,8 @@ def update_store_settings(fields: dict) -> dict:
 def update_project(project_no: str, fields: dict,
                    company_id: Optional[str] = None) -> dict:
     """Edit a project card (status, owner, revenue, collection_status, notes, ...).
+    gross_profit and margin are worked out from revenue and total_cost: leave
+    them out; one sent that disagrees with revenue and cost is refused.
     Validated against the v0.1 schema; persists atomically. `company_id`
     (optional) names the customer whose project this is, for a number two
     customers hold; a company_id inside `fields` still MOVES the project, and

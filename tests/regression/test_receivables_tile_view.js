@@ -39,7 +39,9 @@ function seed(dir, asOf, mismatch) {
   w('companies', [
     { company_id: 'acme', display_name: 'Ace Manufacturing', role: 'customer', domains: [], locations: [], archived: false },
     { company_id: 'beta', display_name: 'Beta Works', role: 'customer', domains: [], locations: [], archived: false,
-      ...(mismatch ? { qbo_name: 'Beta Works' } : {}) }]);
+      ...(mismatch ? { qbo_name: 'Beta Works' } : {}) },
+    ...(mismatch ? [{ company_id: 'gamma', display_name: 'Gamma Tooling', role: 'customer', domains: [],
+                      locations: [], archived: false }] : [])]);
   w('projects', [
     // split-billed: one paid invoice, one open -- the CRM cannot price it
     { company_id: 'acme', project_no: '1419', status: 'won', revenue: 90000, archived: false },
@@ -49,7 +51,9 @@ function seed(dir, asOf, mismatch) {
     { company_id: 'acme', invoice_no: '1238', project_no: '1419', payment_status: 'open', invoice_date: '2026-07-01' },
     { company_id: 'beta', invoice_no: '7010', project_no: '4600', payment_status: 'open', invoice_date: '2026-06-04' },
     // an open invoice QuickBooks has no row for: counted out of both figures, with its reason
-    { company_id: 'beta', invoice_no: '7011', payment_status: 'open', invoice_date: '2026-06-05' }]);
+    { company_id: 'beta', invoice_no: '7011', payment_status: 'open', invoice_date: '2026-06-05' },
+    // gamma is tied to no QuickBooks name: priced, and said to be not verified
+    ...(mismatch ? [{ company_id: 'gamma', invoice_no: '7030', payment_status: 'open', invoice_date: '2026-06-06' }] : [])]);
   w('contacts', []); w('shipments', []); w('vendors', []); w('needs_review', []);
   if (asOf) {
     const snap = path.join(dir, 'qbo-snapshots');
@@ -63,7 +67,8 @@ function seed(dir, asOf, mismatch) {
              row('1238', 'Ace Manufacturing', 4500000, 4285213),
              // 0.1.44 H3: with beta tied to 'Beta Works', a 7010 QuickBooks lists
              // under Ace Manufacturing is not beta's: not priced, both named
-             row('7010', mismatch ? 'Ace Manufacturing' : 'Beta Works', 300000, 300025)] }));
+             row('7010', mismatch ? 'Ace Manufacturing' : 'Beta Works', 300000, 300025)]
+             .concat(mismatch ? [row('7030', 'Somebody Else', 10000, 100)] : []) }));
   }
   return store;
 }
@@ -99,8 +104,8 @@ async function run(crmDir) {
     stale = serveAndRead(crmDir, seed(path.join(tmp, 'stale'), isoDaysAgo(20)), read);
     none = serveAndRead(crmDir, seed(path.join(tmp, 'none'), null), [{ eval: TILE, as: 'html' }]);
     mm = serveAndRead(crmDir, seed(path.join(tmp, 'mm'), isoDaysAgo(1), true), [
-      { eval: TILE_HEAD, as: 'head' }, { click: '#kpis .kpi.go' }, { wait: 500 },
-      { eval: RECV_HEAD, as: 'recv' },
+      { eval: TILE_HEAD, as: 'head' }, { eval: TILE_TEXT, as: 'text' }, { click: '#kpis .kpi.go' }, { wait: 500 },
+      { eval: RECV_HEAD, as: 'recv' }, { eval: "((document.querySelector('#main .co-head')||{}).innerText||'')", as: 'recvText' },
       { eval: "(() => { for (const b of BUCKET_ORDER) { setRecvBucket(b); const tr = [...document.querySelectorAll('#main table tbody tr')]"
         + ".find(t => t.children[0].innerText.trim() === '7010'); if (tr) return (tr.querySelector('[title]')||{}).title || ''; } return null; })()", as: 'cell' }]);
     // 0.1.43's page over the same no-snapshot store: a copy of the plugin
@@ -134,7 +139,10 @@ async function run(crmDir) {
   r.check('a stale snapshot says so on the tile, with its age', /stale · 20 days old/i.test(stale.text || ''), stale.text);
   r.check("... and still leads with QuickBooks' figure", stale.head === '$45,852.38', stale.head);
   r.check("a QuickBooks invoice under another customer is not priced: the tile and header leave it out",
-    mm.head === '$42,852.13' && mm.recv === mm.head, JSON.stringify([mm.head, mm.recv]));
+    mm.head === '$42,853.13' && mm.recv === mm.head, JSON.stringify([mm.head, mm.recv]));
+  r.check('a priced invoice whose customer is not verified is said so on the tile and the header',
+    /1 customer not verified/i.test(mm.text || '') && /1 customer not verified/i.test(mm.recvText || ''),
+    JSON.stringify([mm.text, mm.recvText]));
   r.check('... and the invoice names both customers where it is shown',
     /Ace Manufacturing/.test(mm.cell || '') && /Beta Works/.test(mm.cell || ''), mm.cell);
   r.check('with no snapshot the tile is byte-identical to 0.1.43',

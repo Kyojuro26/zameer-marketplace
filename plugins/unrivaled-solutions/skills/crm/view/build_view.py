@@ -693,7 +693,7 @@ function kpis(){
   const q = qboLedger('qbo_open_receivable_usd');
   if(q){
     recvN = q.value_cents == null ? '\u2014' : moneyCents(q.value_cents);
-    recvL = `Open receivables \u00b7 QuickBooks as of ${esc(fmtDate(q.as_of))} \u00b7 ${esc(shapeCaveat(q))}`
+    recvL = `Open receivables \u00b7 QuickBooks as of ${esc(fmtDate(q.as_of))} \u00b7 ${esc(shapeCaveat(q))}${qboUnverified(q)}`
       + qboStaleBadge(q)
       + `<br>${ex && ex.value != null ? money(ex.value) : 'nothing priced'} quoted`
       + (ex ? ` \u00b7 ${esc(shapeCaveat(ex))}` : ' \u00b7 needs the server');
@@ -1032,7 +1032,7 @@ function renderReceivables(){
     : (q.value_cents == null
         ? `<span class="muted">· QuickBooks as of ${esc(fmtDate(q.as_of))}: nothing matched · ${esc(shapeCaveat(q))}</span>`
         : `<span>· <b>${moneyCents(q.value_cents)}</b> open in QuickBooks as of ${esc(fmtDate(q.as_of))}</span>
-           <span class="muted">across ${esc(shapeCaveat(q))}</span>`)
+           <span class="muted">across ${esc(shapeCaveat(q))}${qboUnverified(q)}</span>`)
       + qboStaleBadge(q);
   const quoted = q ? ', quoted' : '';
   const head = qhead + (ex
@@ -2102,15 +2102,21 @@ function qboLedger(key){
   if(!shapes.length) return null;
   const out = {value_cents: 0, counted: 0, population: 0, excluded: {},
                as_of: shapes[0].snapshot_as_of, stale: !!shapes[0].stale,
-               age_days: shapes[0].age_days};
+               age_days: shapes[0].age_days, not_verified: 0};
   shapes.forEach(s => {
     out.counted += Number(s.counted)||0; out.population += Number(s.population)||0;
+    out.not_verified += Number(s.customer_not_verified)||0;
     if(s.value_cents != null) out.value_cents += Number(s.value_cents)||0;
     Object.keys(s.excluded||{}).forEach(k => {
       out.excluded[k] = (out.excluded[k]||0) + (Number(s.excluded[k])||0); });
   });
   if(!out.counted) out.value_cents = null;
   return out;
+}
+/* Priced, but nothing ties the company to a QuickBooks name (0.1.44): said
+   beside the figure, on the tile and the header alike. */
+function qboUnverified(q){
+  return q && q.not_verified ? ` \u00b7 ${q.not_verified} customer not verified` : '';
 }
 /* The stale marker, one definition for the tile and the Receivables header. */
 function qboStaleBadge(q){
