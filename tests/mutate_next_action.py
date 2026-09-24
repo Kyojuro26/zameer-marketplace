@@ -55,13 +55,18 @@ SERVER = [
 ]
 
 MERGE = [
+ # re-anchored 0.1.43: merge.OPERATOR_ONLY now carries these fields as well
+ # as the changelog's touched set, so dropping them from `touched` alone is
+ # masked. The obvious wrong version is now "both paths forget them".
  ("a re-import drops the operator's next action",
   "            for field in touched:\n"
   "                if field in prior:\n"
-  "                    merged_rec[field] = prior[field]",
+  "                    merged_rec[field] = prior[field]\n"
+  "            for field in OPERATOR_ONLY.get(fname, ()):\n",
   "            for field in touched - {\"next_action\", \"next_action_on\"}:\n"
   "                if field in prior:\n"
-  "                    merged_rec[field] = prior[field]"),
+  "                    merged_rec[field] = prior[field]\n"
+  "            for field in OPERATOR_ONLY.get(fname, set()) - {\"next_action\", \"next_action_on\"}:\n"),
  ("add-only mode drops fields the workbook does not carry",
   "                kept = dict(prior)\n",
   "                kept = {k: v for k, v in prior.items() if k in rec or k in IMPORTER_OWNED}\n"),

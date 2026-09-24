@@ -80,6 +80,25 @@ REGENERATED = {"needs_review.json", "tracker_buckets.json",
 # open_orders_notes is deliberately NOT here: it is the operator's own text.
 IMPORTER_OWNED = {"tracker_status", "tracker_row"}
 
+# Fields the importer NEVER produces, per file: only the operator (through the
+# server) writes them. The refresh path starts from the workbook's record and
+# used to copy back only what the changelog named, so one of these survived a
+# re-import ONLY while its changelog line existed -- and Store.log swallows
+# OSError (a locked changelog on OneDrive), so an edit can land with no line.
+# The next import then deleted it outright: a follow-up date, a quote date, a
+# due-date override, gone with no word. These are now carried from the stored
+# record whenever the workbook's record does not supply them (absent or null),
+# changelog or not. tests/regression/test_operator_only.py holds the project
+# set equal to "PROJECT_FIELDS the importer does not emit".
+OPERATOR_ONLY = {
+    "projects.json": {"next_action", "next_action_on", "quote_requested_on",
+                      "quote_sent_on", "quote_revisions", "tracker_key"},
+    "shipments.json": {"eta"},
+    "invoices.json": {"due_on", "source"},
+    "companies.json": {"notes", "linked_vendor_id", "qbo_name"},
+    "vendors.json": {"notes", "qbo_name"},
+}
+
 # how Store.log names each entity, and how it builds the key it logs under
 CHANGELOG_ENTITY = {
     "companies.json": "company", "contacts.json": "contact",
@@ -569,6 +588,9 @@ def merge_all(fresh_files, store_dir):
             merged_rec = dict(rec)
             for field in touched:
                 if field in prior:
+                    merged_rec[field] = prior[field]
+            for field in OPERATOR_ONLY.get(fname, ()):
+                if merged_rec.get(field) is None and field in prior:
                     merged_rec[field] = prior[field]
             # soft-delete is always the operator's, never the workbook's
             for field in ("archived", "archived_at"):

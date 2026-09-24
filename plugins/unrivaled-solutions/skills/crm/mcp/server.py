@@ -101,8 +101,8 @@ PROJECT_FIELDS = {
     "tracker_key",
     # The operator's own "by when". The Live screen groups by whose court a
     # job is in; the note carried the deadline as prose. Both are
-    # operator-owned: never in merge's IMPORTER_OWNED, preserved through the
-    # changelog on a re-import. next_action_on is stored as given and read
+    # operator-owned: never in merge's IMPORTER_OWNED, carried over a
+    # re-import by merge.OPERATOR_ONLY. next_action_on is stored as given and read
     # with _parse_date_loose, like every other date.
     "next_action", "next_action_on",
     # The quote pipeline (0.1.41). When a quote was asked for and when it went

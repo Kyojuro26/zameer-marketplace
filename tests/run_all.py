@@ -57,6 +57,7 @@ PY_MODULES = [
     ("regression.test_quotes", "regression/test_quotes.py"),
     ("regression.test_rankings", "regression/test_rankings.py"),
     ("regression.test_number_lookup", "regression/test_number_lookup.py"),
+    ("regression.test_operator_only", "regression/test_operator_only.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),
