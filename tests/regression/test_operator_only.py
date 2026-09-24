@@ -126,6 +126,7 @@ def run(server, crm_dir=None):
         r.check("no importer-owned field is operator-only",
                 not (set(oo.get("projects.json", ())) & set(getattr(merge, "IMPORTER_OWNED", set()))))
         _fresh_supplies(r, merge, tmp)
+        _company_and_po(r, merge, tmp)
         _tripwire(r, crm, tmp, oo)
         _differential(r, crm, tmp, oo)
         _audit_checks(r, crm, tmp)
@@ -666,3 +667,122 @@ def _audit_review1(r, aud, crm, tmp):
             and "4700 (acme)" in text, text[-300:])
     r.check("... and the report says the record may have moved or been renamed, to check by hand",
             "check by hand" in text, text[-300:])
+
+
+def _merged_one(merge, tmp, fname, stored, fresh, log):
+    d = _store(tmp, fname, stored, log)
+    merged, rep = merge.merge_all(_fresh(fname, fresh), str(d))
+    return (merged.get(fname) or [{}])[0], rep
+
+
+def _company_and_po(r, merge, tmp):
+    """The operator's decision (0.1.43): merge follows the number.
+
+    Projects: when the workbook lists a number under a different customer,
+    the operator's fields are carried (the number is unique across the
+    business, so this is a correction) -- and the report says so, naming the
+    number, both customers and the fields carried.
+    Shipment legs: ids are positional, so when a leg's vendor PO differs its
+    operator fields (eta) are NOT carried -- and the report lists the leg, both
+    POs and the value dropped, so it can be re-entered."""
+    other = _line("contact", "contact-1", {"phone": "1"})
+    op = {"next_action_on": "2026-08-20", "completed_on": "2026-08-01"}
+
+    # --- projects -------------------------------------------------------------
+    stored = dict(project("5001", "acme", company_name="Ace Manufacturing"), **op)
+    moved = project("5001", "beta", company_name="Beta Works", revenue=9)
+    for how, log in (("its lines missing", other),
+                     ("the changelog intact", other + _line("project", "5001", op))):
+        rec, rep = _merged_one(merge, tmp, "projects.json", stored, dict(moved), log)
+        r.check(f"a project moved to another customer by the workbook keeps the operator's fields ({how})",
+                rec.get("company_id") == "beta" and all(rec.get(k) == v for k, v in op.items()),
+                json.dumps(rec)[:200])
+        ch = rep.get("company_changed") or []
+        r.check(f"... and the report names the number, both customers and the fields carried ({how})",
+                len(ch) == 1 and ch[0].get("key") == "5001" and ch[0].get("old") == "acme"
+                and ch[0].get("new") == "beta" and ch[0].get("carried") == sorted(op),
+                json.dumps(ch))
+    try:
+        text = merge.format_report(rep)
+    except Exception as exc:                                       # noqa: BLE001
+        text = f"<format_report raised {type(exc).__name__}: {exc}>"
+    r.check("the printed report says the customer changed, with both names",
+            "CUSTOMER CHANGED" in text and "Ace Manufacturing" in text and "Beta Works" in text
+            and "completed_on" in text, text[-300:])
+    rec, rep = _merged_one(merge, tmp, "projects.json", stored,
+                           project("5001", "acme", company_name="Ace Manufacturing", revenue=9), other)
+    r.check("the same customer: carried, and nothing reported",
+            rec.get("completed_on") == "2026-08-01" and not rep.get("company_changed"), json.dumps(rep)[:200])
+    rec, rep = _merged_one(merge, tmp, "projects.json", stored, project("5001", " acme ", revenue=9), other)
+    r.check("a company_id differing only by whitespace is the same customer: nothing reported",
+            not rep.get("company_changed"), json.dumps(rep.get("company_changed")))
+
+    # --- shipment legs --------------------------------------------------------
+    leg = shipment("5003-L1", "5003", "acme", vendor_po_raw="VPO-A", stage="Shipped")
+    for how, log in (("its line missing", other),
+                     ("the changelog intact", other + _line("shipment", "5003-L1",
+                                                            {"eta": "2026-09-01", "stage": "Shipped"}))):
+        rec, rep = _merged_one(merge, tmp, "shipments.json", dict(leg, eta="2026-09-01"),
+                               shipment("5003-L1", "5003", "acme", vendor_po_raw="VPO-B"), log)
+        r.check(f"a leg whose vendor PO changed does not carry the old leg's eta ({how})",
+                rec.get("eta") is None and rec.get("vendor_po_raw") == "VPO-B", json.dumps(rec)[:200])
+        dr = rep.get("po_changed") or []
+        r.check(f"... and the report lists the leg, both POs and the value dropped ({how})",
+                len(dr) == 1 and dr[0].get("key") == "5003-L1" and dr[0].get("old_po") == "VPO-A"
+                and dr[0].get("new_po") == "VPO-B" and dr[0].get("dropped") == {"eta": "2026-09-01"},
+                json.dumps(dr))
+        kept = [p_.get("fields", []) for p_ in rep.get("preserved", []) if p_.get("key") == "5003-L1"]
+        r.check(f"... and it is not also listed as an edit that was kept ({how})",
+                not any("eta" in f_ for f_ in kept)
+                and (how != "the changelog intact" or kept == [["stage"]]), json.dumps(rep.get("preserved")))
+    try:
+        text = merge.format_report(rep)
+    except Exception as exc:                                       # noqa: BLE001
+        text = f"<format_report raised {type(exc).__name__}: {exc}>"
+    r.check("the printed report says what was dropped, so it can be re-entered",
+            "VENDOR CHANGED" in text and "VPO-A" in text and "VPO-B" in text and "2026-09-01" in text,
+            text[-300:])
+    for how, old, new, carried in (
+            ("the same PO", "VPO-A", "VPO-A", True),
+            ("a PO differing only by case and whitespace", "VPO-A", " vpo-a ", True),
+            ("a leg that gains a PO it did not have", None, "VPO-A", True),
+            ("a leg that loses its PO", "VPO-A", None, False),
+            ("a leg with no PO on either side", None, None, True)):
+        rec, rep = _merged_one(merge, tmp, "shipments.json",
+                               shipment("5003-L1", "5003", "acme", vendor_po_raw=old, eta="2026-09-01"),
+                               shipment("5003-L1", "5003", "acme", vendor_po_raw=new), other)
+        got = rec.get("eta") == "2026-09-01"
+        r.check(f"{how}: eta {'carried, nothing reported' if carried else 'dropped and reported'}",
+                got == carried and bool(rep.get("po_changed")) == (not carried), json.dumps([rec, rep.get("po_changed")])[:220])
+    rec, rep = _merged_one(merge, tmp, "shipments.json", shipment("5003-L1", "5003", "acme", vendor_po_raw="VPO-A"),
+                           shipment("5003-L1", "5003", "acme", vendor_po_raw="VPO-B"), other)
+    r.check("a PO change with no operator value to drop reports nothing", not rep.get("po_changed"),
+            json.dumps(rep.get("po_changed")))
+
+    # focused review: compare what the merged record KEEPS, not what was stored
+    rec, rep = _merged_one(merge, tmp, "shipments.json",
+                           shipment("5003-L1", "5003", "acme", vendor_po_raw="VPO-A-REV2", eta="2026-10-01"),
+                           shipment("5003-L1", "5003", "acme", vendor_po_raw="VPO-A"),
+                           other + _line("shipment", "5003-L1", {"vendor_po_raw": "VPO-A-REV2"}))
+    r.check("a PO the operator corrected in the app is kept, and so is the leg's eta",
+            rec.get("vendor_po_raw") == "VPO-A-REV2" and rec.get("eta") == "2026-10-01"
+            and not rep.get("po_changed"), json.dumps([rec, rep.get("po_changed")])[:220])
+    rec, rep = _merged_one(merge, tmp, "projects.json",
+                           dict(project("5001", "iron", company_name="Ace Manufacturing"), completed_on="2026-08-01"),
+                           project("5001", "acme", company_name="Ace Manufacturing"),
+                           other + _line("project", "5001", {"company_id": "iron"}))
+    r.check("a project the operator moved to another customer stays there, and no customer change is reported",
+            rec.get("company_id") == "iron" and not rep.get("company_changed"),
+            json.dumps([rec.get("company_id"), rep.get("company_changed")]))
+    rec, rep = _merged_one(merge, tmp, "shipments.json",
+                           shipment("5003-L1", "5003", "acme", vendor_po_raw="VPO-B"),
+                           shipment("5003-L1", "5003", "acme", vendor_po_raw="VPO-B"),
+                           other + _line("shipment", "5003-L1", {"eta": "2026-09-01"}))
+    r.check("an edit no longer on the record (dropped by an earlier import) is not listed as kept",
+            not any(p_.get("key") == "5003-L1" and "eta" in p_.get("fields", []) for p_ in rep.get("preserved", [])),
+            json.dumps(rep.get("preserved")))
+    rec, rep = _merged_one(merge, tmp, "projects.json", project("5002", None),
+                           project("5002", "acme", company_name="Ace Manufacturing"), other)
+    text = merge.format_report(rep)
+    r.check("a project gaining a customer reads 'no customer ->', not an empty name",
+            "no customer" in text and "()" not in text, text[-200:])

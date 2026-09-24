@@ -226,6 +226,20 @@ def _renamed_key(entity, old_key, fields):
     return None
 
 
+def _po(v):
+    """A vendor PO as a person reads it: case and spacing do not make it a
+    different PO."""
+    return " ".join(_s(v).split()).casefold()
+
+
+def _po_changed(prior, rec):
+    """The leg at this position is a different delivery. A PO that appears
+    where there was none is the same leg being filled in; a PO that changes,
+    or disappears, cannot be confirmed as the same delivery."""
+    old = _po(prior.get("vendor_po_raw"))
+    return bool(old) and old != _po(rec.get("vendor_po_raw"))
+
+
 def _entities_in_changelog(store_dir):
     """Entity names appearing in changelog.jsonl -- evidence a file existed."""
     seen = set()
@@ -513,7 +527,8 @@ def merge_all(fresh_files, store_dir):
     operator.setdefault("renamed_from", set())
 
     merged, report = {}, {"refreshed": 0, "preserved": [], "kept": [], "added": 0,
-                      "ambiguous": [], "renamed_away": [], "note": None}
+                      "ambiguous": [], "renamed_away": [], "note": None,
+                      "company_changed": [], "po_changed": []}
     for fname, fresh in fresh_files.items():
         if fname in REGENERATED:
             merged[fname] = fresh
@@ -593,13 +608,52 @@ def merge_all(fresh_files, store_dir):
             for field in OPERATOR_ONLY.get(fname, ()):
                 if merged_rec.get(field) is None and field in prior:
                     merged_rec[field] = prior[field]
+            # Merge follows the key; when the workbook changes what stands
+            # behind it, say so (0.1.43, the operator's decision).
+            #   A project listed under another customer: the number is unique
+            #   across the business, so this is a correction -- the operator's
+            #   fields carry, and the report names both customers and them.
+            #   A shipment leg's id is its position on the sheet, so a leg
+            #   whose vendor PO changed is a different delivery: its operator
+            #   fields do NOT carry (not even through the changelog), and the
+            #   report lists what was dropped so it can be re-entered.
+            # Both compare the stored record with what the MERGED record keeps,
+            # not with the workbook's row: a company or PO the operator changed
+            # in the app is kept by the touched loop above, so the workbook
+            # disagreeing with it is not a change (focused review of 0.1.43).
+            dropped = {}
+            if fname == "projects.json" and \
+                    _s(prior.get("company_id")) != _s(merged_rec.get("company_id")):
+                report["company_changed"].append({
+                    "key": str(k),
+                    "old": _s(prior.get("company_id")), "new": _s(merged_rec.get("company_id")),
+                    "old_name": _s(prior.get("company_name")),
+                    "new_name": _s(merged_rec.get("company_name")),
+                    "carried": sorted(f for f in OPERATOR_ONLY[fname]
+                                      if rec.get(f) is None and merged_rec.get(f) is not None)})
+            if fname == "shipments.json" and _po_changed(prior, merged_rec):
+                dropped = {f: merged_rec[f] for f in sorted(OPERATOR_ONLY[fname])
+                           if rec.get(f) is None and merged_rec.get(f) is not None}
+                for f in dropped:
+                    if f in rec:
+                        merged_rec[f] = rec[f]
+                    else:
+                        merged_rec.pop(f, None)
+                if dropped:
+                    report["po_changed"].append({
+                        "key": str(k), "old_po": _s(prior.get("vendor_po_raw")),
+                        "new_po": _s(merged_rec.get("vendor_po_raw")), "dropped": dropped})
             # soft-delete is always the operator's, never the workbook's
             for field in ("archived", "archived_at"):
                 if field in prior:
                     merged_rec[field] = prior[field]
-            if touched:
+            # what was actually kept: a touched field is copied only when the
+            # stored record has it, and a dropped one was not kept at all --
+            # listing the changelog's names said "kept eta" on a leg with none
+            kept = {f for f in touched if f in prior} - set(dropped)
+            if kept:
                 report["preserved"].append(
-                    {"file": fname, "key": str(k), "fields": sorted(touched)})
+                    {"file": fname, "key": str(k), "fields": sorted(kept)})
             report["refreshed"] += 1
             out.append(merged_rec)
 
@@ -641,6 +695,27 @@ def format_report(report):
             L.append(f"  {p['file']} {p['key']}: {', '.join(p['fields'])}")
         if len(report["preserved"]) > 40:
             L.append(f"  ... and {len(report['preserved']) - 40} more")
+    if report.get("company_changed"):
+        L.append(f"\nCUSTOMER CHANGED on {len(report['company_changed'])} project(s): the "
+                 f"workbook now lists these numbers under a different customer. "
+                 f"Your own fields were carried onto them:")
+        for c in report["company_changed"][:40]:
+            old = f"{c.get('old_name') or c['old']} ({c['old']})" if c["old"] else "no customer"
+            new = f"{c.get('new_name') or c['new']} ({c['new']})" if c["new"] else "no customer"
+            L.append(f"  project {c['key']}: {old} -> {new}; carried: "
+                     f"{', '.join(c['carried']) or 'none'}")
+        if len(report["company_changed"]) > 40:
+            L.append(f"  ... and {len(report['company_changed']) - 40} more")
+    if report.get("po_changed"):
+        L.append(f"\nDELIVERY VENDOR CHANGED on {len(report['po_changed'])} shipment leg(s): "
+                 f"the workbook now has a different vendor PO at this position, so "
+                 f"your own dates for the old one were NOT carried. Re-enter them "
+                 f"if they still apply:")
+        for c in report["po_changed"][:40]:
+            L.append(f"  {c['key']}: {c['old_po'] or '(no PO)'} -> {c['new_po'] or '(no PO)'}; "
+                     f"dropped " + ", ".join(f"{f} {v}" for f, v in c["dropped"].items()))
+        if len(report["po_changed"]) > 40:
+            L.append(f"  ... and {len(report['po_changed']) - 40} more")
     if report.get("ambiguous"):
         L.append(f"\nCOULD NOT MATCH {len(report['ambiguous'])} workbook row(s): "
                  f"the store holds more than one record under each of these "
