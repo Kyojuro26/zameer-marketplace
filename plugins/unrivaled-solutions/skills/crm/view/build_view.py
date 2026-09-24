@@ -283,6 +283,7 @@ TEMPLATE = r"""<!DOCTYPE html>
         <button data-f="project">Projects<span class="fcount" id="fc_project"></span></button>
           <button data-f="receivable">Receivables<span class="fcount" id="fc_receivable"></span></button>
           <button data-f="quotes">Quotes</button>
+          <button data-f="rankings">Rankings</button>
           <button data-f="cfo">CFO</button>
       </div>
       <div class="subfilters" id="subfilters">
@@ -787,7 +788,7 @@ function opts(list, current){
 }
 
 function companyMatches(c){
-  if(filter!=='all' && filter!=='cfo' && filter!=='quotes' && c.role!==filter) return false;
+  if(filter!=='all' && filter!=='cfo' && filter!=='quotes' && filter!=='rankings' && c.role!==filter) return false;
   if(!query) return true;
   const q=query.toLowerCase();
   if(sv(c.display_name).includes(q)) return true;
@@ -1794,7 +1795,7 @@ function renderList(){
 
 function select(id){
   selected=id;
-  if(filter === 'project' || filter === 'receivable' || filter === 'live'){ setFilter('all'); fetchEnrichment(id); return; }
+  if(filter === 'project' || filter === 'receivable' || filter === 'live' || filter === 'rankings'){ setFilter('all'); fetchEnrichment(id); return; }
   renderList(); renderMain(); fetchEnrichment(id);
 }
 
@@ -2119,6 +2120,82 @@ function renderQuotes(){
     + P.map(x => { const key = `${st(x.project_no)}|${st(x.company_id)}`;
         return `<tr data-key="${esc(key)}"><td>${proj(x)}</td><td>${name(x)}</td><td>${esc(fmtDate(x.last_activity_on)||'no dated activity')}</td><td class="num">${x.days_since_activity == null ? '\u2014' : x.days_since_activity}</td>${acts(key, x, false)}</tr>`; }).join('')
     + `</tbody></table></div>`;
+  return h;
+}
+
+/* -------------------------------------------------------- Rankings page --
+   crm_metrics(report="rankings") ranks on the SERVER. Every toggle asks it
+   again; the page only renders the answer -- nothing is summed, divided or
+   sorted here. A row opens the project or company drawer that already
+   exists. Embedded, the page shows the ranking built with it and the toggles
+   are off: changing it needs the server. */
+const RK = {metric:'quoted_revenue', group_by:'customer', status:'won', year:''};
+const RK_METRICS = [['quoted_revenue','Quoted revenue'],['quoted_gross_profit','Quoted gross profit'],
+  ['quoted_margin_pct','Quoted margin %'],['qbo_invoiced','QuickBooks invoiced'],
+  ['po_costed_margin_pct','PO-costed margin %'],['project_count','Project count']];
+const RK_GROUPS = [['customer','Customer'],['project','Project'],['year','Year'],['owner','Owner']];
+const RK_STATUSES = [['won','Won'],['pending','Pending'],['lost','Lost'],['all','All']];
+let rkSeq = 0, rkMsg = '';
+async function loadRankings(){
+  if(CRM.mode === 'embedded') return;
+  const seq = ++rkSeq;
+  const args = {report:'rankings', metric:RK.metric, group_by:RK.group_by, status:RK.status};
+  if(RK.year) args.year = Number(RK.year);
+  let r;
+  try{ r = await CRM.call('crm_metrics', args); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
+  if(seq !== rkSeq) return;             // a later toggle has asked since
+  if(r && r.ok && r.reports && r.reports.rankings){ DATA.rankings = r.reports.rankings; rkMsg = ''; }
+  else { DATA.rankings = null; rkMsg = (r && r.error) || 'the server did not answer'; }
+  if(filter === 'rankings') renderMain();
+}
+function rkSet(k, v){ RK[k] = v; return loadRankings(); }
+function rkValue(sh){
+  if(!sh || sh.value == null) return `<span class="muted">${cfoWhy(sh, 'nothing to count', 'project')}</span>`;
+  if(sh.unit === 'usd') return moneyCents(sh.value_cents);
+  if(sh.unit === 'ratio') return (sh.value * 100).toFixed(1) + '%';
+  return esc(String(sh.value));
+}
+function rkExcluded(sh){
+  const ex = Object.entries((sh && sh.excluded) || {});
+  return ex.length ? ex.map(([k, n]) => `${n} ${esc(reasonLabel(k))}`).join(' \u00b7 ') : '\u2014';
+}
+function renderRankings(){
+  const R = DATA.rankings, live = CRM.mode !== 'embedded';
+  const cur = R ? {metric:R.metric, group_by:R.group_by, status:R.status, year:R.year == null ? '' : String(R.year)} : RK;
+  const years = [...new Set((DATA.projects||[]).map(p => st(p.year)).filter(y => /^\d{4}$/.test(y)))].sort().reverse();
+  const sel = (id, k, opts) => `<label class="muted" style="font-size:12px">${esc(id.label)} <select id="${id.id}" ${live ? '' : 'disabled'} onchange="rkSet('${k}', this.value)">`
+    + opts.map(([v, t]) => `<option value="${esc(v)}"${String(cur[k]) === String(v) ? ' selected' : ''}>${esc(t)}</option>`).join('') + `</select></label> `;
+  let h = `<div class="co-head"><h1>Rankings</h1><span class="muted">ranked on the server \u00b7 margins are quoted or PO-costed estimates, not realized results</span></div>`;
+  h += `<div class="rk-toggles" style="display:flex;gap:10px;flex-wrap:wrap;margin:6px 0">`
+    + sel({id:'rk-metric', label:'Rank'}, 'metric', RK_METRICS)
+    + sel({id:'rk-group', label:'by'}, 'group_by', RK_GROUPS)
+    + sel({id:'rk-status', label:'Status'}, 'status', RK_STATUSES)
+    + sel({id:'rk-year', label:'Year'}, 'year', [['', 'All years']].concat(years.map(y => [y, y])))
+    + `</div>`;
+  if(!live) h += `<p class="muted" id="rk-note" style="font-size:12px">This is the ranking built with the page. Changing it needs the server.</p>`;
+  if(rkMsg) h += `<p id="rk-msg" style="color:var(--red)">\u2717 ${esc(rkMsg)}</p>`;
+  if(!R) return h + `<div class="empty">The rankings need the server.</div>`;
+  const tot = R[R.metric] || {}, c = R.concentration || {};
+  h += `<p id="rk-conc" data-top5="${c.top5_share == null ? '' : c.top5_share}" data-top10="${c.top10_share == null ? '' : c.top10_share}">`
+    + (c.top5_share == null ? `Concentration: <span class="muted">${esc(c.basis || '')}</span>`
+       : `Top 5: <b>${(c.top5_share * 100).toFixed(1)}%</b> \u00b7 Top 10: <b>${(c.top10_share * 100).toFixed(1)}%</b> <span class="muted" style="font-size:12px">\u2014 ${esc(c.basis || '')}</span>`)
+    + `</p>`;
+  h += `<p>Total: <b>${rkValue(tot)}</b> over ${tot.counted || 0} of ${tot.population || 0} projects <span class="muted" style="font-size:12px">\u2014 ${esc(tot.basis || '')}</span></p>`;
+  if(R.group_by === 'owner') h += `<p class="muted" id="rk-owner">${esc(R.owner_coverage || '')}</p>`;
+  const rows = R.rows || [];
+  h += `<table id="rk-table"><thead><tr><th class="num">#</th><th>${esc((RK_GROUPS.find(g => g[0] === R.group_by) || ['', ''])[1])}</th><th class="num">Value</th><th class="num">Projects</th><th>Excluded</th></tr></thead><tbody>`
+    + rows.map((x, i) => {
+        const sh = x[R.metric] || {};
+        // a project with no number has no drawer to open (openProject refuses it)
+        const open = R.group_by === 'project' ? (st(x.project_no).trim() ? `openProject('${jesc(st(x.project_no))}','${jesc(st(x.company_id))}')` : '')
+          : R.group_by === 'customer' ? `select('${jesc(st(x.company_id))}')` : '';
+        const label = open ? `<a href="#" onclick="${open};return false">${esc(st(x.label))}</a>` : esc(st(x.label));
+        const raw = sh.value == null ? '' : (sh.unit === 'usd' ? sh.value_cents : sh.value);
+        return `<tr data-key="${esc(st(x.key))}"><td class="num">${i + 1}</td><td>${label}</td><td class="num" data-value="${raw}">${rkValue(sh)}</td><td class="num">${sh.counted || 0} of ${sh.population || 0}</td><td class="muted" style="font-size:12px">${rkExcluded(sh)}</td></tr>`;
+      }).join('')
+    + `</tbody></table>`;
+  if(R.rows_total > rows.length) h += `<p class="muted">Showing ${rows.length} of ${R.rows_total} rows.</p>`;
   return h;
 }
 
@@ -2451,6 +2528,10 @@ function renderMain(){
   }
   if(filter === 'quotes'){
     document.getElementById('main').innerHTML = renderQuotes();
+    return;
+  }
+  if(filter === 'rankings'){
+    document.getElementById('main').innerHTML = renderRankings();
     return;
   }
   if(filter === 'receivable'){
@@ -3903,16 +3984,17 @@ function setFilter(f){
   const isProj = (f === 'project');
   const isRecv = (f === 'receivable');
   const isLive = (f === 'live');
-  const isCfo = (f === 'cfo'), isQuotes = (f === 'quotes');
+  const isCfo = (f === 'cfo'), isQuotes = (f === 'quotes'), isRank = (f === 'rankings');
   // both cross-company views own the sub-filter row and neither wants the
   // "+ Add customer/vendor/lead" buttons, which act on the company list
   if(sf) sf.style.display = (isProj || isRecv) ? 'flex' : 'none';
-  if(add) add.style.display = (isProj || isRecv || isLive || isCfo || isQuotes) ? 'none' : 'flex';
+  if(add) add.style.display = (isProj || isRecv || isLive || isCfo || isQuotes || isRank) ? 'none' : 'flex';
   if(isProj || isRecv) renderSubfilters();
   renderList();
   if(isCfo) loadCfo();
   if(isQuotes) loadQuotes();
-  if(isProj || isRecv || isLive || isCfo || isQuotes) renderMain();
+  if(isRank) loadRankings();
+  if(isProj || isRecv || isLive || isCfo || isQuotes || isRank) renderMain();
   else if(selected) renderMain();
   else document.getElementById('main').innerHTML =
     '<div class="empty">Select a company to begin. <button class="pill-btn" onclick="setFilter(\'live\')">Show Live projects</button></div>';
@@ -4017,10 +4099,14 @@ def _attach_metrics(data, store_dir):
         ctx = _srv._MetricsCtx()
         data["companies"] = [dict(c, metrics=ctx.company_metrics(c))
                              for c in data["companies"]]
-        # The CFO and Quotes pages, from the same builder -- each re-read live
-        # when its tab opens. Each in its own guard: a bad settings.json costs
-        # the Quotes page, not the company figures, and the warning says which.
-        for key, build in (("cfo", ctx.cfo), ("quotes", ctx.quotes)):
+        # The CFO, Quotes and Rankings pages, from the same builder -- each
+        # re-read live when its tab opens (Rankings embeds its default: won
+        # quoted revenue by customer). Each in its own guard: a bad
+        # settings.json costs the Quotes page, not the company figures, and
+        # the warning says which.
+        for key, build in (("cfo", ctx.cfo), ("quotes", ctx.quotes),
+                           ("rankings", lambda: ctx.rankings(
+                               "quoted_revenue", "customer", "won", None, None))):
             try:
                 data[key] = build()
             except Exception as ex:                           # noqa: BLE001

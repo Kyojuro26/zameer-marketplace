@@ -178,7 +178,12 @@ def _body(r, server, tmp):
             _rows(rk, "quoted_revenue"))
     rk, _ = rank(st, metric="quoted_revenue", group_by="project", limit=2)
     r.check("limit 2: two rows, and the report says how many there were",
-            len(rk.get("rows") or []) == 2 and rk.get("rows_total") == 7, rk.get("rows_total"))
+            len(rk.get("rows") or []) == 2 and rk.get("rows_total") == 8, rk.get("rows_total"))
+    rk, _ = rank(st, metric="quoted_revenue", group_by="project")
+    r.check("a project with no value is still a row, null and last, saying why",
+            (rk.get("rows") or [{}])[-1].get("key") == "4700|gamma"
+            and ((rk.get("rows") or [{}])[-1].get("quoted_revenue") or {}).get("excluded")
+            == {"no_revenue_on_project": 1}, (rk.get("rows") or [{}])[-1])
     for label, kw in (("an unknown metric", {"metric": "vibes"}),
                       ("an unknown grouping", {"metric": "quoted_revenue", "group_by": "rep"}),
                       ("an unknown status", {"metric": "quoted_revenue", "status": "open"})):
@@ -209,13 +214,17 @@ def _body(r, server, tmp):
     r.check("PO-costed margin: 4521 (6,000 - 3,500) / 6,000; 4600 (18,000 - 12,500) / 18,000",
             abs(((pm.get("4521|acme") or {}).get("value") or 0) - 2500 / 6000) < 1e-9
             and abs(((pm.get("4600|beta") or {}).get("value") or 0) - 5500 / 18000) < 1e-9, pm)
-    r.check("... a leg with no PO resolving is po_not_resolved",
-            (pm.get("4800|gamma") or {}).get("excluded") == {"po_not_resolved": 1}, pm.get("4800|gamma"))
+    r.check("... a job whose legs carry no PO is no_po_on_job, as in the CFO report",
+            (pm.get("4800|gamma") or {}).get("excluded") == {"no_po_on_job": 1}, pm.get("4800|gamma"))
     r.check("... and it carries its warning",
             "PO-costed: excludes costs paid directly as expenses, so it overstates margin"
             in str((rk.get("po_costed_margin_pct") or {}).get("basis")))
 
-    import test_metrics as TM
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("_metrics_invariants",
+                                         Path(__file__).resolve().parent / "test_metrics.py")
+    TM = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(TM)
     for kw in ({"metric": "quoted_margin_pct", "group_by": "customer"},
                {"metric": "po_costed_margin_pct", "group_by": "owner"},
                {"metric": "qbo_invoiced", "group_by": "year", "status": "all"}):
@@ -223,3 +232,27 @@ def _body(r, server, tmp):
     before = st.raw("projects")
     rank(st, metric="quoted_revenue")
     r.check("rankings write nothing", st.raw("projects") == before)
+
+    r.section("projects with no number are still separate projects")
+    nn = Store(server, tmp / "nn" / "store")
+    nn.reset(companies=[company("acme", "Ace Manufacturing")],
+             projects=[P("", "acme", "won", 2026, 1000, 500), P(None, "acme", "won", 2026, 3000, 1000),
+                       P("4521", "acme", "won", 2026, 2000, 1500)])
+    rk, _ = rank(nn, metric="quoted_revenue", group_by="project")
+    r.check("two numberless projects of one customer are two rows, not one merged row",
+            [v for _k, v in _rows(rk, "quoted_revenue")] == [300000, 200000, 100000]
+            and len({k for k, _v in _rows(rk, "quoted_revenue")}) == 3, _rows(rk, "quoted_revenue"))
+    r.check("... and a numberless row says it has no number",
+            all("no number" in str(x.get("label")) for x in rk.get("rows") or []
+                if not x.get("project_no")), [x.get("label") for x in rk.get("rows") or []])
+
+    r.section("the built page embeds the default ranking")
+    import subprocess
+    crm = Path(server.__file__).resolve().parents[1]
+    out = subprocess.run([sys.executable, str(crm / "view" / "build_view.py"),
+                          "--store", str(st.path), "--out", str(tmp / "page.html")],
+                         capture_output=True, text=True)
+    html = (tmp / "page.html").read_text() if (tmp / "page.html").exists() else ""
+    r.check("won quoted revenue by customer, as the server ranks it",
+            '"rankings": {"metric": "quoted_revenue", "group_by": "customer", "status": "won"' in html
+            and '"rows": [{"key": "beta"' in html, (out.stdout + out.stderr)[-300:])

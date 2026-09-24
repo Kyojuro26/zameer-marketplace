@@ -95,6 +95,17 @@ Use the read tools; they are side-effect-free:
     yourself). Quote the turnaround and win rate WITH their bases.
   - The SLA (2 business days) and the stale threshold (60 days) are the
     operator's: `update_store_settings`.
+- **Rankings** ("who are our biggest customers", "best years", "which
+  projects made the most", "rank by margin"): `crm_metrics(report="rankings",
+  metric=, group_by=, status=, year=, limit=)`. Metrics: `quoted_revenue`,
+  `quoted_gross_profit`, `quoted_margin_pct`, `qbo_invoiced`,
+  `po_costed_margin_pct`, `project_count`; group by `customer`, `project`,
+  `year` or `owner`; status defaults to won. Give each row with its count
+  ("across 12 of 14 projects; 2 have no revenue") and the top 5 / top 10
+  concentration line. Margin rankings are quoted (or PO-costed) estimates,
+  not realized results -- say so. The owner ranking reads the rep field,
+  which is mostly empty: lead with its `owner_coverage` sentence, and show
+  initials as stored until the operator gives a legend.
 - **The weekly CFO review** ("how are we doing", "cash position", "the CFO
   numbers"):
   1. Get a current snapshot. With the Intuit QuickBooks connector available

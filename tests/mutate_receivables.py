@@ -191,8 +191,8 @@ M = [
   """         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setFilter('${jesc(go)}')}\"""",
   '         data-nokeys="1"'),
  ("selecting a company leaves you stranded in the receivables list",
-  "  if(filter === 'project' || filter === 'receivable' || filter === 'live'){ setFilter('all'); fetchEnrichment(id); return; }",
-  "  if(filter === 'project' || filter === 'live'){ setFilter('all'); fetchEnrichment(id); return; }"),
+  "  if(filter === 'project' || filter === 'receivable' || filter === 'live' || filter === 'rankings'){ setFilter('all'); fetchEnrichment(id); return; }",
+  "  if(filter === 'project' || filter === 'live' || filter === 'rankings'){ setFilter('all'); fetchEnrichment(id); return; }"),
 ]
 
 sys.exit(mutate(SRC, "./tests/regression/test_receivables.js", F, M))

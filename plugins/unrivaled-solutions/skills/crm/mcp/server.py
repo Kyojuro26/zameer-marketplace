@@ -1873,17 +1873,39 @@ EXCLUSION_REASONS = (
     "no_po_on_job",
     # the quote pipeline (0.1.41)
     "no_request_date", "not_decided",
+    # rankings (0.1.42)
+    "no_owner",
 )
 # A leg in one of these stages has left the vendor. The importer sets Shipped
 # exactly when a ship date exists; Delivered and Installed are later states of
 # the same fact. Ordered and On Hold have not shipped; Cancelled never will.
 SHIPPED_STAGES = {"Shipped", "Delivered", "Installed"}
 METRIC_REPORTS = ("customer_concentration", "receivables_ageing", "vendor_on_time",
-                  "qbo_drift", "cfo", "quotes")
+                  "qbo_drift", "cfo", "quotes", "rankings")
 # "cfo" composes the QuickBooks figures into one report and repeats qbo_drift,
-# and "quotes" is a working list rather than a metric: both are returned only
-# when named
-DEFAULT_METRIC_REPORTS = tuple(r_ for r_ in METRIC_REPORTS if r_ not in ("cfo", "quotes"))
+# "quotes" is a working list rather than a metric, and "rankings" answers one
+# chosen metric and grouping: all three are returned only when named
+DEFAULT_METRIC_REPORTS = tuple(r_ for r_ in METRIC_REPORTS
+                               if r_ not in ("cfo", "quotes", "rankings"))
+# rankings (0.1.42): the additive metrics carry a concentration line; a
+# percentage is not additive, so it has none
+RANKING_METRICS = ("quoted_revenue", "quoted_gross_profit", "quoted_margin_pct",
+                   "qbo_invoiced", "po_costed_margin_pct", "project_count")
+RANKING_RATIOS = ("quoted_margin_pct", "po_costed_margin_pct")
+RANKING_GROUPS = ("project", "customer", "year", "owner")
+RANKING_STATUSES = ("won", "pending", "lost", "all")
+
+
+def _owners(p):
+    """A project's owners as stored (initials), sorted and de-duplicated; a
+    bare string is one owner."""
+    o = p.get("owner")
+    if isinstance(o, str):
+        o = [o]
+    if not isinstance(o, list):
+        return []
+    return sorted({str(x).strip() for x in o
+                   if isinstance(x, (str, int)) and not isinstance(x, bool) and str(x).strip()})
 AGE_BUCKETS = ("not_yet_due", "0-30", "31-60", "61-90", "90+")
 
 
@@ -1995,6 +2017,24 @@ VENDOR_LOAD_HINT = ("no QuickBooks vendor transactions are loaded: export "
                     "Transaction List by Vendor and load it")
 PO_COSTED_WORDS = ("PO-costed: excludes costs paid directly as expenses, so it "
                    "overstates margin")
+# the rankings' bases (0.1.42); each names which figure it is
+RANKING_BASIS = {
+    "quoted_revenue": "sum of quoted revenue (the deal log); quoted at the deal, "
+                      "not invoiced",
+    "quoted_gross_profit": "quoted revenue minus quoted total cost; quoted at the "
+                           "deal, not realized",
+    "quoted_margin_pct": "quoted gross profit over quoted revenue, as the group's "
+                         "totals over projects with revenue above zero -- never an "
+                         "average of project percentages; quoted at the deal, not "
+                         "realized",
+    "qbo_invoiced": QBO_INVOICED_BASIS + "; summed over each project's invoices, "
+                    "every one of which must match",
+    "po_costed_margin_pct": PO_COSTED_WORDS + ". QuickBooks invoiced minus the "
+                            "QuickBooks POs on the job's legs, over QuickBooks "
+                            "invoiced, as the group's totals -- the CFO report's "
+                            "PO-costed figure",
+    "project_count": "number of projects",
+}
 
 
 def _cents_shape(cents, unit, counted, excluded, basis):
@@ -3086,6 +3126,195 @@ class _MetricsCtx:
         sh["rows"] = rows
         return sh
 
+    # ---- rankings (0.1.42) ----
+    def rankings(self, metric, group_by, status, year, limit):
+        """One metric, grouped, ranked largest first. Every row's value is a
+        shape over the projects that fed it; a ratio is the group's totals
+        divided, never an average of its projects' ratios."""
+        pop = [p for p in self.projects if status == "all" or p.get("status") == status]
+        if year is not None:
+            pop = [p for p in pop if _key(p.get("year")) == _key(year)]
+        value_of = self._rank_value_fn(metric)
+        groups, top_exc = {}, []
+        for i, p in enumerate(pop):
+            gk, label, why = self._rank_group(p, group_by, i)
+            if why:
+                top_exc.append(why); continue
+            g = groups.setdefault(gk, {"key": gk, "label": label, "num": 0, "den": 0,
+                                       "n": 0, "exc": [], "p": p})
+            num, den, why = value_of(p)
+            if why:
+                g["exc"].append(why); continue
+            g["num"] += num; g["den"] += den; g["n"] += 1
+        basis = (RANKING_BASIS[metric] + f"; status {status}, "
+                 + (f"year {year}" if year is not None else "all years")
+                 + f", grouped by {group_by}")
+        rows = []
+        for g in groups.values():
+            row = {"key": g["key"], "label": g["label"]}
+            if group_by == "project":
+                row["project_no"] = g["p"].get("project_no")
+                row["company_id"] = g["p"].get("company_id")
+            elif group_by == "customer":
+                row["company_id"] = g["p"].get("company_id")
+            row[metric] = self._rank_shape(metric, g["num"], g["den"], g["n"],
+                                           _tally(g["exc"]), basis)
+            rows.append(row)
+        rows.sort(key=lambda r_: (r_[metric]["value"] is None,
+                                  -(r_[metric]["value"] or 0), str(r_["key"])))
+        n = sum(g["n"] for g in groups.values())
+        total = self._rank_shape(metric, sum(g["num"] for g in groups.values()),
+                                 sum(g["den"] for g in groups.values()), n,
+                                 _tally(top_exc + [w for g in groups.values()
+                                                   for w in g["exc"]]), basis)
+        owned = sum(1 for p in self.projects if _owners(p))
+        out = {"metric": metric, "group_by": group_by, "status": status, "year": year,
+               metric: total, "rows_total": len(rows),
+               "rows": rows[:limit] if limit else rows,
+               "concentration": self._rank_concentration(metric, rows, total),
+               "owner_coverage": f"{owned} of {len(self.projects)} projects have an "
+                                 f"owner; owners are shown as stored (initials)"}
+        return out
+
+    def _rank_group(self, p, group_by, i):
+        """(group key, label, exclusion reason) for one project. A project
+        with no number is its own row, keyed by its place in the list: two
+        numberless projects of one customer are two projects, not one."""
+        cid = _hk(p.get("company_id"))
+        if group_by == "project":
+            c = self._company_by_id().get(cid) or {}
+            name = c.get("display_name") or cid
+            pno = _key(p.get("project_no"))
+            if not pno:
+                return f"#{i}|{cid}", f"(no number) {name}", None
+            return f"{pno}|{cid}", f"{pno} {name}", None
+        if group_by == "customer":
+            c = self._company_by_id().get(cid) or {}
+            return cid, c.get("display_name") or str(cid), None
+        if group_by == "year":
+            y = _key(p.get("year"))
+            return (y, y, None) if y else (None, None, "no_date")
+        owners = _owners(p)
+        if not owners:
+            return None, None, "no_owner"
+        k = " + ".join(owners)
+        return k, k, None
+
+    def _company_by_id(self):
+        if getattr(self, "_cby", None) is None:
+            self._cby = {}
+            for c in self.companies:
+                self._cby.setdefault(_hk(c.get("company_id")), c)
+        return self._cby
+
+    def _rank_value_fn(self, metric):
+        """p -> (numerator, denominator, exclusion reason). Money in cents."""
+        def cents(v):
+            return round(_num(v) * 100)
+
+        def revenue(p):
+            if _num(p.get("revenue")) is None:
+                return None, 0, "no_revenue_on_project"
+            return cents(p["revenue"]), 0, None
+
+        def gross_profit(p):
+            if _num(p.get("revenue")) is None:
+                return None, 0, "no_revenue_on_project"
+            if _num(p.get("total_cost")) is None:
+                return None, 0, "no_cost_on_project"
+            return cents(p["revenue"]) - cents(p["total_cost"]), 0, None
+
+        def margin(p):
+            if (_num(p.get("revenue")) or 0) <= 0:
+                return None, 0, "no_revenue_on_project"
+            gp, _d, why = gross_profit(p)
+            return (None, 0, why) if why else (gp, cents(p["revenue"]), None)
+
+        def po_costed(p):
+            inv, _d, why = self._rank_invoiced(p)
+            if why:
+                return None, 0, why
+            jobs = self._rank_po_jobs()
+            if jobs is None:
+                return None, 0, "no_qbo_snapshot"
+            job = jobs.get((_key(p.get("project_no")), _hk(p.get("company_id"))))
+            if job is None:
+                return None, 0, "no_qbo_invoice"
+            if job["excluded"]:
+                return None, 0, next(iter(job["excluded"]))
+            if inv <= 0:
+                return None, 0, "no_qbo_invoice"
+            return job["value_cents"], inv, None
+        return {"quoted_revenue": revenue, "quoted_gross_profit": gross_profit,
+                "quoted_margin_pct": margin, "qbo_invoiced": self._rank_invoiced,
+                "po_costed_margin_pct": po_costed,
+                "project_count": lambda p: (1, 0, None)}[metric]
+
+    def _rank_invoiced(self, p):
+        """(QuickBooks cents over the project's invoices, 0, reason). Every
+        invoice must match; one that does not says why."""
+        if not self.qbo:
+            return None, 0, "no_qbo_snapshot"
+        k = (_key(p.get("project_no")), _hk(p.get("company_id")))
+        invs = [i for i in self.inv_by_cid.get(k[1], []) if _key(i.get("project_no")) == k[0]]
+        if not k[0] or not invs:
+            return None, 0, "no_qbo_invoice"
+        total = 0
+        for i in invs:
+            m, why = self.qbo_match(i)
+            if why:
+                return None, 0, why
+            total += m["amount_cents"]
+        return total, 0, None
+
+    def _rank_po_jobs(self):
+        """{(project_no, company_id): the CFO report's PO-costed margin shape}
+        -- the same figure, never a second derivation -- or None when the
+        vendor transactions are not loaded."""
+        if not hasattr(self, "_po_jobs"):
+            try:
+                vt = _load_qbo_snapshot("vendor_transactions")
+            except StoreError:
+                vt = None
+            self._po_jobs = None
+            if not vt:
+                return None
+            spend, pos, bills, _other = self._cfo_vendor_rows(vt)
+            self._po_jobs = {}
+            for row in self._cfo_margin(vt, spend, pos, bills)["jobs"]:
+                j = row["job"]
+                if j.get("kind") == "project":
+                    self._po_jobs[(_key(j.get("project_no")), _hk(j.get("company_id")))] = \
+                        row["po_costed_margin_usd"]
+        return self._po_jobs
+
+    def _rank_shape(self, metric, num, den, n, exc, basis):
+        if metric in RANKING_RATIOS:
+            return _shape(num / den if n and den else None, "ratio", n, exc, basis)
+        if metric == "project_count":
+            return _shape(n, "projects", n, exc, basis)
+        return _cents_shape(num, "usd", n, exc, basis)
+
+    def _rank_concentration(self, metric, rows, total):
+        """The top 5 and top 10 rows' share of the COUNTED total --
+        customer_concentration's rule, so a share is read beside its
+        denominator."""
+        if metric in RANKING_RATIOS:
+            return {"top5_share": None, "top10_share": None,
+                    "basis": "a percentage is not additive, so it has no share "
+                             "of a total"}
+        vals = [r_[metric].get("value_cents", r_[metric]["value"]) for r_ in rows
+                if r_[metric]["value"] is not None]
+        tot = sum(vals)
+        if tot <= 0:
+            return {"top5_share": None, "top10_share": None,
+                    "basis": "the counted total is not above zero, so no share "
+                             "of it is meaningful"}
+        return {"top5_share": sum(vals[:5]) / tot, "top10_share": sum(vals[:10]) / tot,
+                "rows": len(vals),
+                "basis": f"the top 5 and top 10 of {len(vals)} rows as a share of "
+                         f"the counted total"}
+
     def receivables_ageing(self):
         as_of = self.today.isoformat()
         buckets = {b: [] for b in AGE_BUCKETS}
@@ -3499,7 +3728,8 @@ def find_contacts(company: str = None, query: str = None,
 
 @mcp.tool()
 @_store_errors
-def crm_metrics(report: str = None, year: int = None) -> dict:
+def crm_metrics(report: str = None, year: int = None, metric: str = None,
+                group_by: str = None, status: str = None, limit: int = None) -> dict:
     """Cross-record metrics, each in the counted/population/excluded shape:
     customer_concentration (won revenue by customer with share of total; the
     only report `year` applies to), receivables_ageing (unpaid invoices in
@@ -3515,9 +3745,31 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
     waiting to be sent (flagged past the SLA), quotes sent and awaiting a
     decision (flagged with no follow-up set), stale pending projects (listed,
     never changed), the median turnaround in business days and the win rate
-    over decided projects. Read-only; nothing is persisted."""
+    over decided projects. "rankings" -- also only when named -- ranks one
+    `metric` (quoted_revenue, quoted_gross_profit, quoted_margin_pct,
+    qbo_invoiced, po_costed_margin_pct, project_count; default
+    quoted_revenue) by `group_by` (project, customer, year, owner; default
+    customer), over projects of `status` (won, pending, lost, all; default
+    won) and `year` (one year, or omit for all), largest first, `limit` rows;
+    each row's value is a shape over the projects that fed it, with a top 5
+    / top 10 concentration line. Margins are quoted or PO-costed estimates,
+    never realized. `metric`, `group_by`, `status` and `limit` apply only to
+    rankings. Read-only; nothing is persisted."""
     if report is not None and report not in METRIC_REPORTS:
         return _err(f"report must be one of {list(METRIC_REPORTS)} or omitted")
+    if report == "rankings":
+        metric = metric or "quoted_revenue"
+        group_by = group_by or "customer"
+        status = status or "won"
+        if metric not in RANKING_METRICS:
+            return _err(f"metric must be one of {list(RANKING_METRICS)}")
+        if group_by not in RANKING_GROUPS:
+            return _err(f"group_by must be one of {list(RANKING_GROUPS)}")
+        if status not in RANKING_STATUSES:
+            return _err(f"status must be one of {list(RANKING_STATUSES)}")
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
+                                  or limit < 1):
+            return _err("limit must be a whole number of rows, 1 or more, or omitted")
     ctx = _MetricsCtx()
     want = [report] if report else list(DEFAULT_METRIC_REPORTS)
     reports = {}
@@ -3532,6 +3784,8 @@ def crm_metrics(report: str = None, year: int = None) -> dict:
             reports[name] = ctx.cfo()
         elif name == "quotes":
             reports[name] = ctx.quotes()
+        elif name == "rankings":
+            reports[name] = ctx.rankings(metric, group_by, status, year, limit)
         else:
             reports[name] = ctx.vendor_on_time()
     return {"ok": True, "interface_version": VERSION,
