@@ -2125,6 +2125,12 @@ function qboShape(v, key){
 function qboCell(v, key){
   const sh = qboShape(v, key);
   if(!sh) return '<span class="muted" title="needs the server">—</span>';
+  // the number matched but QuickBooks names another customer: say whose (0.1.44)
+  const per = ((companyById[v.company_id]||{}).metrics||{}).qbo_invoices;
+  const mm = per && per[st(v.invoice_no)] && per[st(v.invoice_no)].qbo_customer_mismatch;
+  if(sh.value_cents == null && mm){
+    return `<span class="muted" title="${esc(`QuickBooks lists this invoice under ${st(mm.qbo)}, not ${st(mm.crm)}`)}">— other customer</span>`;
+  }
   if(sh.value_cents == null){
     const why = Object.keys(sh.excluded||{}).map(reasonLabel).join(', ') || 'not priced';
     return `<span class="muted" title="${esc(why)}">—</span>`;
@@ -2611,8 +2617,9 @@ function noAmountKey(v){
 /* An exclusion reason as the operator reads it. Most read fine with the
    underscores dropped; a split-billed invoice has to say it is linked. */
 function reasonLabel(k){
-  return k === 'multiple_invoices_on_project'
-    ? 'on a project with more than one invoice' : String(k).replace(/_/g,' ');
+  return k === 'multiple_invoices_on_project' ? 'on a project with more than one invoice'
+    : k === 'qbo_customer_mismatch' ? 'under another customer in QuickBooks'
+    : String(k).replace(/_/g,' ');
 }
 
 /* What is still to collect. "partial:30%" means 30% has been RECEIVED, so the

@@ -1954,6 +1954,8 @@ EXCLUSION_REASONS = (
     # QuickBooks snapshot joins (0.1.38)
     "no_qbo_snapshot", "ambiguous_qbo_match", "outside_snapshot_window",
     "not_in_qbo_snapshot", "qbo_match_shared", "partial_qbo_match",
+    # a QuickBooks match must agree on the customer (0.1.44)
+    "qbo_customer_mismatch",
     # the CFO report's margin and cash (0.1.40)
     "no_qbo_invoice", "cost_incomplete", "cost_not_billed_yet",
     "bills_not_linkable_from_export", "po_status_unknown", "po_not_resolved",
@@ -2332,6 +2334,8 @@ class _MetricsCtx:
                 return None, "partial_qbo_match"
             if any(self.qbo_claims.get(k, 0) > 1 for k in keys):
                 return None, "qbo_match_shared"
+            if self.qbo_customer_verdict(inv, matched)[0] == "mismatch":
+                return None, "qbo_customer_mismatch"
             if len(matched) == 1:
                 return matched[0], None
             return {"amount_cents": sum(r_["amount_cents"] for r_ in matched),
@@ -2345,6 +2349,52 @@ class _MetricsCtx:
         if not ws <= d.date() <= we:
             return None, "outside_snapshot_window"
         return None, "not_in_qbo_snapshot"
+
+    def qbo_customer_verdict(self, inv, rows):
+        """("agrees" | "mismatch" | "unverified", the QuickBooks name).
+
+        The number matched; does the customer (0.1.44)? The company is TIED
+        to a QuickBooks name when it has a qbo_name, or when its display name
+        (normalised) is a customer name the snapshot uses. A row that names
+        the company -- qbo_name exactly, or the display name normalised --
+        agrees. A tied company whose row names someone else is a mismatch:
+        one wrong CRM invoice claiming another customer's number was priced
+        silently. With no tie, or a row naming nobody, it is unverified:
+        priced as before and counted in the basis, never excluded, or every
+        unlinked customer's figure would silently shrink."""
+        c = self.company_by_id().get(_hk(inv.get("company_id"))) or {}
+        q = c.get("qbo_name").strip() if isinstance(c.get("qbo_name"), str) else ""
+        dk = _name_key(c.get("display_name"))
+        tied = bool(q) or (bool(dk) and dk in self.qbo_customer_keys())
+        verdict, other = "agrees", None
+        for row in rows:
+            name = row.get("name")
+            if not isinstance(name, str) or not name.strip():
+                verdict = "unverified"
+                continue
+            if (q and name.strip() == q) or (dk and _name_key(name) == dk):
+                continue
+            if tied:
+                return "mismatch", name.strip()
+            verdict = "unverified"
+        return verdict, other
+
+    def company_by_id(self):
+        if getattr(self, "_co_by_id", None) is None:
+            self._co_by_id = {_hk(c.get("company_id")): c for c in self.companies}
+        return self._co_by_id
+
+    def qbo_customer_keys(self):
+        """The customer names the snapshot's invoices use, normalised."""
+        if getattr(self, "_qbo_cust_keys", None) is None:
+            self._qbo_cust_keys = {_name_key(r_.get("name"))
+                                   for r_ in (self.qbo or {}).get("rows", [])
+                                   if r_.get("type") == "Invoice" and _name_key(r_.get("name"))}
+        return self._qbo_cust_keys
+
+    def qbo_rows_for(self, inv):
+        return [h[0] for h in (self.qbo_by_num.get(k, []) for k in _qbo_invoice_keys(inv.get("invoice_no")))
+                if len(h) == 1]
 
     def qbo_shape(self, cents, counted, excluded, basis):
         """A QuickBooks-basis money shape: dollars in value, exact integer
@@ -2363,19 +2413,30 @@ class _MetricsCtx:
 
     def qbo_totals(self, invoices):
         """(invoiced_usd, qbo_open_receivable_usd) over these invoices."""
-        amt, opn, n, exc = 0, 0, 0, []
+        amt, opn, n, exc, unverified = 0, 0, 0, [], 0
         for i in invoices:
             row, why = self.qbo_match(i)
             if why:
                 exc.append(why); continue
             amt += row["amount_cents"]; opn += row["open_cents"]; n += 1
-        return (self.qbo_shape(amt, n, _tally(exc), QBO_INVOICED_BASIS),
-                self.qbo_shape(opn, n, _tally(exc), QBO_OPEN_BASIS))
+            if self.qbo_customer_verdict(i, self.qbo_rows_for(i))[0] == "unverified":
+                unverified += 1
+        # priced, but nothing ties the company to a QuickBooks name: said, not hidden
+        tail = f"; customer not verified: {unverified}" if unverified else ""
+        return (self.qbo_shape(amt, n, _tally(exc), QBO_INVOICED_BASIS + tail),
+                self.qbo_shape(opn, n, _tally(exc), QBO_OPEN_BASIS + tail))
 
     def invoice_qbo(self, inv):
-        """The per-invoice pair, a population of one each. Responses only."""
+        """The per-invoice pair, a population of one each. Responses only.
+        A customer mismatch names both customers, so the screen can say
+        whose invoice QuickBooks thinks it is."""
         a, o = self.qbo_totals([inv])
-        return {"qbo_amount_usd": a, "qbo_open_usd": o}
+        out = {"qbo_amount_usd": a, "qbo_open_usd": o}
+        if self.qbo and self.qbo_match(inv)[1] == "qbo_customer_mismatch":
+            _, other = self.qbo_customer_verdict(inv, self.qbo_rows_for(inv))
+            c = self.company_by_id().get(_hk(inv.get("company_id"))) or {}
+            out["qbo_customer_mismatch"] = {"crm": c.get("display_name"), "qbo": other}
+        return out
 
     def qbo_drift(self):
         """Both directions, read-only. The report IS the shape of the first:

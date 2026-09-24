@@ -48,9 +48,10 @@ M = [
  ("the split note is shown whenever the project has two invoices, before the no-amount reason",
   "  if(invoiceAmount(v) == null) return 'no_amount';\n  if(splitBilled(v)) return 'split';",
   "  if(splitBilled(v)) return 'split';\n  if(invoiceAmount(v) == null) return 'no_amount';"),
+ # re-anchored 0.1.44: reasonLabel gained a second named reason
  ("the caveat label loses its words",
-  "    ? 'on a project with more than one invoice' : String(k).replace(/_/g,' ');",
-  "    ? 'multiple invoices on project' : String(k).replace(/_/g,' ');"),
+  "  return k === 'multiple_invoices_on_project' ? 'on a project with more than one invoice'\n",
+  "  return k === 'multiple_invoices_on_project' ? 'multiple invoices on project'\n"),
 ]
 
 sys.exit(mutate(SRC, TEST, F, M))

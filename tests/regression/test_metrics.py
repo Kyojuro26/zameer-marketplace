@@ -44,6 +44,8 @@ VOCAB = {
     # QuickBooks snapshot joins (0.1.38)
     "no_qbo_snapshot", "ambiguous_qbo_match", "outside_snapshot_window",
     "not_in_qbo_snapshot", "qbo_match_shared", "partial_qbo_match",
+    # a QuickBooks match must agree on the customer (0.1.44)
+    "qbo_customer_mismatch",
     # the CFO report (0.1.40)
     "no_qbo_invoice", "cost_incomplete", "cost_not_billed_yet",
     "bills_not_linkable_from_export", "po_status_unknown", "po_not_resolved",
@@ -927,7 +929,7 @@ def run(server, crm_dir=None):
     import tempfile as _tf
     qdir = Path(_tf.mkdtemp(prefix="crmqbo-"))
     qs = Store(srv, qdir / "store")
-    qs.reset(companies=[company("acme", "Ace Manufacturing"),
+    qs.reset(companies=[company("acme", "Ace Manufacturing", qbo_name="Ace Mfg"),
                         company("beta", "Beta Works")],
              invoices=[invoice("8001", "acme", invoice_date="2026-02-01"),
                        invoice("8002", "acme", invoice_date="2026-03-01"),
@@ -936,13 +938,17 @@ def run(server, crm_dir=None):
                        invoice("8004", "acme", invoice_date="2026-02-01"),
                        invoice("8004", "beta", invoice_date="2026-02-01"),
                        # a pair with only one of its two invoices in QuickBooks
-                       invoice("8005 and 8006", "acme", invoice_date="2026-02-01")])
+                       invoice("8005 and 8006", "acme", invoice_date="2026-02-01"),
+                       # QuickBooks lists 8007 under another customer (0.1.44)
+                       invoice("8007", "acme", invoice_date="2026-02-01")])
     srv._save_qbo_snapshot("invoices", "export", "2026-08-30", "2026-01-01",
                            "2026-08-30",
                            [{"type": "Invoice", "num": "8001", "amount_cents": 100,
                              "open_cents": 0}] * 2
                            + [{"type": "Invoice", "num": n, "amount_cents": 100,
-                               "open_cents": 0} for n in ("8004", "8005")])
+                               "open_cents": 0} for n in ("8004", "8005")]
+                           + [{"type": "Invoice", "num": "8007", "name": "Beta Works",
+                               "amount_cents": 100, "open_cents": 0}])
     qbo_responses = [qs.call("get_company", ref="acme"), qs.call("crm_metrics")]
     # the CFO report's reasons: its own fixture, on the connector path and the
     # export path (which excludes bills as a block and knows no PO status)
@@ -983,8 +989,8 @@ def run(server, crm_dir=None):
     r.section("the exclusion vocabulary is a closed, exported constant")
     vocab = getattr(srv, "EXCLUSION_REASONS", None)
     r.check("server exports EXCLUSION_REASONS", vocab is not None)
-    r.check("and it is exactly the thirty-three reasons this suite knows",
-            vocab is not None and set(vocab) == VOCAB and len(vocab) == 33,
+    r.check("and it is exactly the thirty-four reasons this suite knows",
+            vocab is not None and set(vocab) == VOCAB and len(vocab) == 34,
             f"server={sorted(vocab or [])}")
     seen = set()
     for res in list(responses.values()) + [empty, c25] + split_responses + qbo_responses:
