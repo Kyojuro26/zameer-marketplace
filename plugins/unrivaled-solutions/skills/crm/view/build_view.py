@@ -2769,9 +2769,7 @@ function renderMain(){
       <td>${statusBadge(p.status)}</td><td>${esc(arr(p.owner).join(', '))||'—'}</td>
       <td class="num">${money(p.revenue)}</td><td class="num">${pct(p.margin)}</td>
       <td>${statusPill(p.collection_status)}</td></tr>`).join('')+
-    `</tbody><tfoot><tr><td colspan="4">Total</td>
-      <td class="num">${money(prs.reduce((a,p)=>a+numv(p.revenue),0))}</td>
-      <td class="num"></td><td></td></tr></tfoot></table>`
+    `</tbody>${statusTotals(prs)}</table>`
     :emptyState('No projects yet.', sells
       ? `<button class="pill-btn" onclick="openNewProject('${jesc(selected)}')">+ New project</button>`
       : '<span class="muted">Projects belong to customers, not suppliers.</span>');
@@ -3402,12 +3400,43 @@ async function saveNewShipment(pno, cid){
 }
 
 /* ------------------------------------------- company / vendor create+delete */
+/* The customer's Projects footer: won, pending and lost revenue, each on its
+   own row and only when non-zero, so lost revenue is never folded into a total
+   (0.1.43). Summed from the rows on the page, as the single "Total" was. */
+function statusTotals(prs){
+  const rows = ['won', 'pending', 'lost']
+    .map(s=>[s, prs.filter(p=>sv(p.status).trim()===s).reduce((a,p)=>a+numv(p.revenue),0)])
+    .filter(([, t])=>t !== 0);
+  if(!rows.length) return '';
+  return `<tfoot>${rows.map(([s, t])=>`<tr data-total="${s}"><td colspan="4">${s[0].toUpperCase()+s.slice(1)}</td>
+      <td class="num">${money(t)}</td><td class="num"></td><td></td></tr>`).join('')}</tfoot>`;
+}
+/* "Add lead": the existing customers and leads a typed name matches -- case and
+   spacing ignored, never a vendor or an archived company (projectOwners) -- so
+   a company already in the CRM gets a new project, not a second record
+   (0.1.43). The server's refusal of a name it already holds stays the backstop. */
+function nameKey(v){ return st(v).trim().replace(/\s+/g, ' ').toLowerCase(); }
+function leadMatches(){
+  const box = document.getElementById('c_matches'); if(!box) return;
+  const q = nameKey((document.getElementById('c_name')||{}).value);
+  const hits = q ? projectOwners().filter(c=>nameKey(c.display_name||c.company_id).includes(q)).slice(0, 8) : [];
+  box.innerHTML = hits.length
+    ? `<p class="muted" style="font-size:12px;margin:6px 0 4px">Already in the CRM \u2014 add a new project for them instead:</p>`
+      + hits.map(c=>`<button class="pill-btn" data-match-cid="${esc(c.company_id)}" onclick="leadToProject('${jesc(c.company_id)}')">${esc(c.display_name||c.company_id)}${c.role==='lead'?' (lead)':''} \u2014 new project</button>`).join(' ')
+    : '';
+}
+function leadToProject(cid){
+  openNewProject(cid);                       // no company is created
+  const s = document.getElementById('n_status'); if(s) s.value = 'pending';
+}
+
 function openNewCompany(role){
   const isV = role==='vendor';
   const label = isV ? 'vendor' : (role==='lead' ? 'lead' : 'customer');
   document.getElementById('dtitle').textContent = 'Add ' + label;
   document.getElementById('dbody').innerHTML=`
-    <div class="field"><label>${label[0].toUpperCase()+label.slice(1)} name (required)</label><input id="c_name"/></div>
+    <div class="field"><label>${label[0].toUpperCase()+label.slice(1)} name (required)</label><input id="c_name"${role==='lead'?' oninput="leadMatches()"':''}/>
+      ${role==='lead'?'<div id="c_matches"></div>':''}</div>
     ${isV?`
       <div class="row2">
         <div class="field"><label>Rep / contact</label><input id="c_rep"/></div>
