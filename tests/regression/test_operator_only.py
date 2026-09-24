@@ -54,6 +54,7 @@ CASES = {
         "quote_requested_on": "2026-07-01",
         "quote_sent_on": "2026-07-03",
         "quote_revisions": [{"requested_on": "2026-07-05", "sent_on": None, "note": "two more options"}],
+        "completed_on": "2026-08-01",
         "tracker_key": "5001",
     },
     "shipments.json": {"eta": "2026-09-01"},

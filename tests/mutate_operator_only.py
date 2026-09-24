@@ -24,13 +24,15 @@ TEST = "./tests/regression/test_operator_only.py"
 # The set exactly as merge.py writes it; each per-field mutant removes one
 # member. If the source drifts, every one of these reads ANCHOR-MISSING.
 _OO = [("projects.json", ["next_action", "next_action_on", "quote_requested_on",
-                          "quote_sent_on", "quote_revisions", "tracker_key"]),
+                          "quote_sent_on", "quote_revisions", "completed_on",
+                          "tracker_key"]),
        ("shipments.json", ["eta"]),
        ("invoices.json", ["due_on", "source"]),
        ("companies.json", ["notes", "linked_vendor_id", "qbo_name"]),
        ("vendors.json", ["notes", "qbo_name"])]
 _PROJECTS_AS_WRITTEN = ('{"next_action", "next_action_on", "quote_requested_on",\n'
-                        '                      "quote_sent_on", "quote_revisions", "tracker_key"}')
+                        '                      "quote_sent_on", "quote_revisions", "completed_on",\n'
+                        '                      "tracker_key"}')
 
 
 def _block(drop=None):

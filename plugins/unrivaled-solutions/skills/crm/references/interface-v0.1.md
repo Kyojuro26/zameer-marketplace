@@ -100,9 +100,13 @@ Project fields, editable through `update_project` / `create_project`: `quote_req
 |---|---|---|
 | `update_store_settings` | `fields` | the store's own settings in `settings.json`: `quote_sla_business_days` (default 2, 1–30) and `stale_pending_days` (default 60, 1–3650). Whole numbers in range only; logged. |
 
+### Completed (v0.1.43)
+
+Project field, editable through `update_project` / `create_project`: `completed_on` — the work is done (shipped or installed), stored as given in the `next_action_on` grammar; `null` reopens. An unreadable date is refused naming the value; a date after today is refused naming both dates; a date before the project's `date` is saved, and the response carries `warnings` naming both. It is not payment (`collection_status` is untouched) and it does not clear `tracker_status`: a project with `completed_on` set is not live, whatever its bucket. Operator-owned (in `merge.OPERATOR_ONLY`) and never backfilled.
+
 ### Re-imports keep operator-only fields (v0.1.43)
 
-Every field the importer never produces (`merge.OPERATOR_ONLY` — on projects `next_action`, `next_action_on`, the three quote fields, `tracker_key`; a shipment's `eta`; an invoice's `due_on` and `source`; a company's `notes`, `linked_vendor_id`, `qbo_name`; a vendor's `notes`, `qbo_name`) is carried from the store whenever the workbook's record does not supply it (absent or null), whether or not its changelog line exists. Contacts have none: the importer writes every contact field. `pipeline/audit_operator_fields.py --store <dir>` (read-only) lists records where the changelog's last value for one of these fields disagrees with the store.
+Every field the importer never produces (`merge.OPERATOR_ONLY` — on projects `next_action`, `next_action_on`, the three quote fields, `completed_on`, `tracker_key`; a shipment's `eta`; an invoice's `due_on` and `source`; a company's `notes`, `linked_vendor_id`, `qbo_name`; a vendor's `notes`, `qbo_name`) is carried from the store whenever the workbook's record does not supply it (absent or null), whether or not its changelog line exists. Contacts have none: the importer writes every contact field. `pipeline/audit_operator_fields.py --store <dir>` (read-only) lists records where the changelog's last value for one of these fields disagrees with the store.
 
 ### Rankings (v0.1.42): `crm_metrics(report="rankings")`
 

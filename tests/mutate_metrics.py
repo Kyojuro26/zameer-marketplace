@@ -254,8 +254,9 @@ M = [
   '    return projects'),
  ("metrics becomes a writable project field",
   # re-anchored 0.1.41: the quote fields now close PROJECT_FIELDS
-  '    "quote_requested_on", "quote_sent_on", "quote_revisions",\n}',
-  '    "quote_requested_on", "quote_sent_on", "quote_revisions", "metrics",\n}'),
+  # re-anchored 0.1.43: completed_on now closes it
+  '    "completed_on",\n}',
+  '    "completed_on", "metrics",\n}'),
  ("an unknown report is served as all three instead of refused",
   '    if report is not None and report not in METRIC_REPORTS:\n'
   '        return _err(f"report must be one of {list(METRIC_REPORTS)} or omitted")\n',

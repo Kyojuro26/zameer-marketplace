@@ -110,6 +110,14 @@ PROJECT_FIELDS = {
     # like next_action: never in merge's IMPORTER_OWNED, never backfilled -- a
     # project's `date` is NOT a request date.
     "quote_requested_on", "quote_sent_on", "quote_revisions",
+    # The work is done: shipped or installed (0.1.43). NOT payment --
+    # collection_status stays its own field -- and it does not clear
+    # tracker_status, which stays as provenance: a project with completed_on
+    # set is not live, whatever its bucket. Stored as given, like
+    # next_action_on; null reopens. Operator-owned: merge.OPERATOR_ONLY carries
+    # it over a re-import with or without its changelog line. Never backfilled
+    # from ship dates, leg stages or collection status.
+    "completed_on",
 }
 SHIPMENT_FIELDS = {
     "shipment_id", "project_no", "all_project_nos", "vendor_po_raw", "ship_date",
@@ -1111,6 +1119,12 @@ def _validate(fields, allowed, entity):
     for k in ("quote_requested_on", "quote_sent_on"):
         if k in fields and fields[k] is not None:
             _check_date_text(fields[k], k)
+    if "completed_on" in fields and fields["completed_on"] is not None:
+        v = fields["completed_on"]
+        readable = isinstance(v, str) and bool(_NEXT_ACTION_DATE_RE.fullmatch(v.strip()))
+        if not (readable and _parse_date_loose(v)):
+            raise StoreError(f"completed_on must be a date (YYYY-MM-DD or M/D/YYYY) "
+                             f"or null, not {v!r}")
     if "quote_revisions" in fields and fields["quote_revisions"] is not None:
         revs = fields["quote_revisions"]
         if not isinstance(revs, list):
@@ -1151,6 +1165,29 @@ def _check_sent_after(requested, sent, what):
     if rq and se and se.date() < rq.date():
         raise StoreError(f"{what}: sent on {sent} is before it was requested on "
                          f"{requested}")
+
+
+def _check_completed(record, fields):
+    """The completion date as it will be saved, judged against the clock and
+    the deal. Returns warnings; raises on a date after today.
+
+    Only when this call sets it: an unrelated edit must not repeat a warning
+    the operator already saw. Today comes through _today(), the hook the tests
+    freeze. A completion before the deal date is ALLOWED -- the deal date is
+    often messy, and a real job must never be refused over it -- but the
+    response names both dates."""
+    v = fields.get("completed_on")
+    if v is None:
+        return []
+    done = _parse_date_loose(v).date()
+    if done > _today():
+        raise StoreError(f"completed_on {v} is after today ({_today().isoformat()}) "
+                         f"-- a job cannot be finished in the future")
+    deal = _parse_date_loose(record.get("date")) if isinstance(record.get("date"), str) else None
+    if deal and done < deal.date():
+        return [f"completed_on {v} is before the project's deal date "
+                f"{record.get('date')} -- saved as given; check both dates"]
+    return []
 
 
 def _check_quote_order(record):
@@ -4114,6 +4151,7 @@ def update_project(project_no: str, fields: dict,
                     f"give that customer the number twice, and nothing could "
                     f"then tell them apart. Rename one of them first.")
             _check_quote_order(dict(target[0], **fields))
+            warnings = _check_completed(dict(target[0], **fields), fields)
             target[0].update(fields)
             updates = {"projects": projects}
             moved_ship = moved_inv = 0
@@ -4142,6 +4180,8 @@ def update_project(project_no: str, fields: dict,
             STORE.log("update", "project", want, fields,
                       company_id=target[0].get("company_id"))
             out = {"ok": True, "interface_version": VERSION, "project": target[0]}
+            if warnings:
+                out["warnings"] = warnings
             if new_cid != old_cid:
                 out["shipments_moved"] = moved_ship
                 out["invoices_moved"] = moved_inv
@@ -4569,11 +4609,15 @@ def create_project(fields: dict) -> dict:
             record.update({"owner": [], "annotations": [], "po_flag": False, "archived": False})
             record.update(fields)
             _check_quote_order(record)
+            warnings = _check_completed(record, fields)
             projects.append(record)
             STORE.save("projects", projects)
             STORE.log("create", "project", str(pn), fields,
                       company_id=fields.get("company_id"))
-            return {"ok": True, "interface_version": VERSION, "project": record}
+            out = {"ok": True, "interface_version": VERSION, "project": record}
+            if warnings:
+                out["warnings"] = warnings
+            return out
     except StoreError as e:
         return _err(e)
 

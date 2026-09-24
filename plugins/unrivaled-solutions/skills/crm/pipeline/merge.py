@@ -92,7 +92,8 @@ IMPORTER_OWNED = {"tracker_status", "tracker_row"}
 # set equal to "PROJECT_FIELDS the importer does not emit".
 OPERATOR_ONLY = {
     "projects.json": {"next_action", "next_action_on", "quote_requested_on",
-                      "quote_sent_on", "quote_revisions", "tracker_key"},
+                      "quote_sent_on", "quote_revisions", "completed_on",
+                      "tracker_key"},
     "shipments.json": {"eta"},
     "invoices.json": {"due_on", "source"},
     "companies.json": {"notes", "linked_vendor_id", "qbo_name"},
