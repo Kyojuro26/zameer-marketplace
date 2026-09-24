@@ -55,6 +55,7 @@ PY_MODULES = [
     ("regression.test_entity_links", "regression/test_entity_links.py"),
     ("regression.test_cfo", "regression/test_cfo.py"),
     ("regression.test_quotes", "regression/test_quotes.py"),
+    ("regression.test_rankings", "regression/test_rankings.py"),
     ("regression.test_number_lookup", "regression/test_number_lookup.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
