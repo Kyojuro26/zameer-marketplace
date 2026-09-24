@@ -62,6 +62,7 @@ PY_MODULES = [
     ("regression.test_new_project", "regression/test_new_project.py"),
     ("regression.test_completed_chat", "regression/test_completed_chat.py"),
     ("regression.test_temp_cleanup", "regression/test_temp_cleanup.py"),
+    ("regression.test_local_server", "regression/test_local_server.py"),
     ("shapes.test_shape_parity", "shapes/test_shape_parity.py"),
     ("shapes.test_shape_verifiers", "shapes/test_shape_verifiers.py"),
     ("shapes.test_shape_guarantees", "shapes/test_shape_guarantees.py"),

@@ -40,8 +40,10 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import secrets
 import sys
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -122,6 +124,41 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[local-server] {args[0]} {args[1]}", file=sys.stderr)
 
 
+class Server(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second process bind a port another one is
+    # already listening on, so the "is the port free" answer below would be a
+    # lie there. Elsewhere it only allows reuse after a close (0.1.44).
+    allow_reuse_address = os.name != "nt"
+
+
+def probe_holder(port, timeout=10):
+    """What is listening on `port`: ("crm", version or None) or ("other", None).
+
+    Asks the app the way its own page does -- GET / (which carries the page's
+    per-launch token), then /health with that token, whose crm_info names the
+    server_version. That works for apps from before this release too, which
+    have no route of their own for it."""
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with urllib.request.urlopen(base + "/", timeout=timeout) as resp:
+            page = resp.read().decode("utf-8", "replace")
+    except Exception:                                  # noqa: BLE001 -- anything else
+        return "other", None
+    if "<title>Unrivaled CRM</title>" not in page:
+        return "other", None
+    m = re.search(r"const BRIDGE_TOKEN = '([^']+)'", page)
+    if not m:
+        return "crm", None
+    try:
+        req = urllib.request.Request(base + "/health", headers={"X-Bridge-Token": m.group(1)})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:                                  # noqa: BLE001
+        return "crm", None
+    v = body.get("server_version") or body.get("version") if isinstance(body, dict) else None
+    return "crm", (str(v) if v else None)
+
+
 def main():
     global STORE_DIR
     ap = argparse.ArgumentParser()
@@ -146,16 +183,25 @@ def main():
     STORE_DIR = Path(args.store).resolve()
     server.STORE = server.Store(STORE_DIR)
     url = f"http://127.0.0.1:{args.port}/"
+    # BIND FIRST. This printed the banner and opened the browser and only then
+    # bound: with an older app still on the port, the browser landed on the
+    # OLD app under a banner naming the new version, and it looked like a
+    # clean start (0.1.44). Nothing is printed or opened until the port is ours.
+    try:
+        httpd = Server(("127.0.0.1", args.port), Handler)
+    except OSError as e:
+        kind, version = probe_holder(args.port)
+        if kind == "crm":
+            sys.exit(f"Another CRM app{f' (v{version})' if version else ''} is already "
+                     f"running on port {args.port}. Close its window, then start this "
+                     f"one again.")
+        sys.exit(f"Port {args.port} is in use by another program ({e}). Close that "
+                 f"program, or start the CRM app on another port with --port.")
     print(f"[local-server] CRM v{server.SERVER_VERSION} store={STORE_DIR}", file=sys.stderr)
     print(f"[local-server] {url}", file=sys.stderr)
     if not args.no_browser:
         webbrowser.open(url)
-    try:
-        ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
-    except OSError as e:
-        sys.exit(f"couldn't bind 127.0.0.1:{args.port} ({e}) -- "
-                 f"is the CRM app already open? Try the existing browser tab, "
-                 f"or close whatever else is using that port.")
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

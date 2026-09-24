@@ -221,6 +221,9 @@ an update — do Step 6 instead.
 desktop shortcut afterward. The running process holds the old code in
 memory until restarted — the files being newer on disk doesn't change that
 until you do.
+If the shortcut says **"Another CRM app (vX) is already running"**, the old
+app's window is still open: close it, then start the app again (from 0.1.44 the
+new one says so instead of quietly opening the old one).
 
 **Only `skills/crm/mcp` and `skills/crm/view` are ever touched.** Your
 actual data lives in a completely separate folder (`C:\UnrivaledCRM\store`)
@@ -240,6 +243,7 @@ Get-Content "$env:TEMP\unrivaled-crm-launch.log" -Tail 10
 - **`FATAL: mcp import failed`** → wrong Python answered, or the wrong `mcp`: run `python3 -m pip install "mcp<2" --force-reinstall` and retry. The pin matters — mcp 2.x renamed `FastMCP`, so an unpinned install reproduces exactly this crash.
 - **Loading a QuickBooks export fails with `openpyxl is not installed`** → the export reader needs the `openpyxl` package, which installs before 0.1.38 did not include: run `python3 -m pip install openpyxl`, then load the export again. Nothing is loaded partly — the previous export stays as it was.
 - **`FATAL: no store configured`** → pointer file missing or empty (Step 3).
+- **The desktop app says "Another CRM app (vX) is already running on port 8765"** → an older copy of the app is still open, and its window must be closed before the new one can start; if it says the port is in use by another program instead, close that program.
 - **A follow-up date, quote date, due date, ETA or note you typed in the app has gone missing after a workbook import** → imports before 0.1.43 could drop these when the app's edit log had missed a line. Ask Claude to run `pipeline/audit_operator_fields.py --store <your store folder>`: it only reads your records, changes nothing, and lists each value the edit log says you set that the store no longer holds, with the date you set it, so you can re-enter it.
 - **`FATAL: store at ... is missing [...]`** → store path wrong or files missing; the message names exactly which.
 - **Ends with `store ok`** → server is healthy; the problem is on Claude's side — full quit, relaunch, new chat, and if it persists send Zeeshan the log lines.
