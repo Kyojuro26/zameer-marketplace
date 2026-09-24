@@ -81,10 +81,16 @@ SERVER = [
  ("a completed project is still due",
   "                and not p.get(\"archived\") \\\n"
   "                and not _is_completed(p)", "                and not p.get(\"archived\")"),
+ # re-anchored review round 1: _is_completed / isCompleted read a non-blank STRING only
  ("a blank completed_on counts as complete",
-  '    return v is not None and str(v).strip() != ""', '    return v is not None'),
+  '    return isinstance(v, str) and v.strip() != ""', '    return isinstance(v, str)'),
  ("completion is read as truthiness, so '  ' is complete",
-  '    return v is not None and str(v).strip() != ""', '    return bool(v)'),
+  '    return isinstance(v, str) and v.strip() != ""', '    return bool(v)'),
+ ("a completed_on that is not a string counts as complete (round 1)",
+  '    return isinstance(v, str) and v.strip() != ""', '    return v is not None and str(v).strip() != ""'),
+ ("the list_projects description drops the completed exclusion (round 1)",
+  "    archived, status not lost, not completed (completed_on set) -- \"what is\n",
+  "    archived, status not lost -- \"what is\n"),
 ]
 
 # G2: the Live screen, graded through the real click path on a live server
@@ -92,9 +98,15 @@ VIEW = [
  ("a completed job stays on the Live screen",
   "st(p.tracker_status) && !isCompleted(p) && liveMatches(p, q))",
   "st(p.tracker_status) && liveMatches(p, q))"),
+ # re-anchored review round 1: _is_completed / isCompleted read a non-blank STRING only
  ("isCompleted reads a blank as complete",
-  "function isCompleted(p){ return st(p && p.completed_on).trim() !== ''; }",
-  "function isCompleted(p){ return st(p && p.completed_on) !== ''; }"),
+  "function isCompleted(p){ const v = p && p.completed_on; return typeof v === 'string' && v.trim() !== ''; }",
+  "function isCompleted(p){ const v = p && p.completed_on; return typeof v === 'string'; }"),
+ ("isCompleted reads a non-string as complete (round 1)",
+  "function isCompleted(p){ const v = p && p.completed_on; return typeof v === 'string' && v.trim() !== ''; }",
+  "function isCompleted(p){ return st(p && p.completed_on).trim() !== ''; }"),
+ ("demo mode finds a project by number alone (round 1)",
+  "    && (cid == null || String(x.company_id) === String(cid)));", "    );"),
  ("the Completed list is oldest first",
   "return a.iso < b.iso ? 1 : -1; }", "return a.iso < b.iso ? -1 : 1; }"),
  ("the date does not default to today",

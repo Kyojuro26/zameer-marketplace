@@ -1168,11 +1168,14 @@ def _check_sent_after(requested, sent, what):
 
 
 def _is_completed(p):
-    """The job is done: completed_on present and not blank. The one reading of
+    """The job is done: completed_on is a non-blank STRING. The one reading of
     "complete" -- the view's isCompleted() is the same test -- so a project is
-    off the Live screen exactly when it is out of next_action_due."""
+    off the Live screen exactly when it is out of next_action_due. The server
+    only ever stores a string here; anything else on disk (a list, a bool, a
+    number) is not a completion. Stringifying it made "[]" complete here while
+    the view read it as "" and kept the job live (review round 1)."""
     v = p.get("completed_on")
-    return v is not None and str(v).strip() != ""
+    return isinstance(v, str) and v.strip() != ""
 
 
 def _check_completed(record, fields):
@@ -1725,6 +1728,21 @@ def _require_company(company_id):
         raise StoreError(f"company '{company_id}' has been deleted -- a record "
                          f"attached to it would not appear anywhere. Restore it "
                          f"first with restore_company.")
+
+
+def _require_project_owner(company_id):
+    """A project belongs to a customer or a lead (0.1.43). _require_company
+    checks liveness, never role, so a vendor took a project and the job sat
+    under a supplier. Checked wherever a project gets its company -- created,
+    or moved by update_project (review round 1: the move was the way round
+    it). Only for projects: a vendor still has contacts, notes and its own
+    records."""
+    co = next((c for c in STORE.load("companies")
+               if c.get("company_id") == company_id), {})
+    if str(co.get("role") or "").strip().lower() == "vendor":
+        raise StoreError(
+            f"company '{company_id}' ({co.get('display_name') or 'no name'}) "
+            f"is a vendor -- a project belongs to a customer or a lead")
 
 
 def _archived_ids():
@@ -3625,7 +3643,8 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
     year, and/or collection_status (paid|open|partial). Projects of archived
     companies are excluded unless include_archived=True. next_action_due=True
     keeps only projects whose next_action_on is today or earlier, not
-    archived, status not lost -- "what is due back today"."""
+    archived, status not lost, not completed (completed_on set) -- "what is
+    due back today"."""
     out = STORE.load("projects")
     if not include_archived:
         arch = _archived_ids()
@@ -4143,6 +4162,7 @@ def update_project(project_no: str, fields: dict,
             _validate(fields, PROJECT_FIELDS - {"project_no"}, "project")
             if "company_id" in fields:
                 _require_company(fields["company_id"])
+                _require_project_owner(fields["company_id"])
             projects = STORE.load("projects")
             want = _resolve(project_no, _project_keys(projects))
             hit = _one_project(projects, want, "Editing it", company_id) if want else None
@@ -4364,9 +4384,13 @@ def rename_project(old_project_no: str, new_project_no: str,
             if touched_invoices:
                 updates["invoices"] = invoices
             STORE.save_many(updates)
+            # company_id rides along (0.1.43) so a reader can tell which of two
+            # customers' numbers moved; merge replays renames by key and fields
+            # only, so its behaviour does not change
             STORE.log("rename", "project", old_pn,
                       {"new_project_no": new_pn, "shipments_updated": touched_shipments,
-                       "invoices_updated": touched_invoices})
+                       "invoices_updated": touched_invoices},
+                      company_id=target[0].get("company_id"))
             return {"ok": True, "interface_version": VERSION, "project": target[0],
                     "shipments_updated": touched_shipments,
                     "invoices_updated": touched_invoices}
@@ -4631,16 +4655,7 @@ def create_project(fields: dict) -> dict:
                 raise StoreError("create_project needs project_no and company_id")
             fields["project_no"] = pn
             _require_company(fields["company_id"])
-            # A project belongs to a customer or a lead (0.1.43). _require_company
-            # checks liveness, never role, so a vendor took a project and the job
-            # sat under a supplier. Refused here only: a vendor still has
-            # contacts, notes and its own records.
-            co = next((c for c in STORE.load("companies")
-                       if c.get("company_id") == fields["company_id"]), {})
-            if str(co.get("role") or "").strip().lower() == "vendor":
-                raise StoreError(
-                    f"company '{fields['company_id']}' ({co.get('display_name') or 'no name'}) "
-                    f"is a vendor -- a project belongs to a customer or a lead")
+            _require_project_owner(fields["company_id"])
             projects = STORE.load("projects")
             if any(_key(p.get("project_no")) == pn for p in projects):
                 raise StoreError(f"project '{pn}' already exists")

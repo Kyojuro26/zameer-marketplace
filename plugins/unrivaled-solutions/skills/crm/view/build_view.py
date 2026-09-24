@@ -383,10 +383,17 @@ const CRM = {
 };
 
 function demoSlug(s){ return (s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,''); }
+/* The demo's project lookup: the number, and the customer when the call
+   names one -- as the server's _one_project does. By number alone, completing
+   one customer's 4521 completed (and overwrote with) the other's (0.1.43). */
+function demoProject(no, cid){
+  return DATA.projects.find(x => String(x.project_no) === String(no)
+    && (cid == null || String(x.company_id) === String(cid)));
+}
 function embeddedCall(tool, args){   // demo fallback — session-only mutation
   const f = args.fields || {};
   if (tool === 'update_project'){
-    const p = DATA.projects.find(x => String(x.project_no) === String(args.project_no));
+    const p = demoProject(args.project_no, args.company_id);
     if (!p) return {ok:false, error:'project not found'};
     Object.assign(p, args.fields); return {ok:true, project:p};
   }
@@ -438,7 +445,7 @@ function embeddedCall(tool, args){   // demo fallback — session-only mutation
   if (tool === 'rename_project'){
     if(DATA.projects.some(p=>String(p.project_no)===String(args.new_project_no) && String(p.project_no)!==String(args.old_project_no)))
       return {ok:false, error:"project '"+args.new_project_no+"' already exists"};
-    const p = DATA.projects.find(x=>String(x.project_no)===String(args.old_project_no));
+    const p = demoProject(args.old_project_no, args.company_id);
     if(!p) return {ok:false, error:'project not found'};
     return {ok:true, project:Object.assign({}, p, {project_no:args.new_project_no}),
       shipments_updated:0, invoices_updated:0};
@@ -1217,10 +1224,10 @@ function unlinkedMatches(u, q){
       || sv(u.open_orders_notes).includes(q) || sv(u.client_po).includes(q);
 }
 /* A job with completed_on set is done: off the Live screen whatever its
-   bucket (the bucket stays, as provenance), and listed under Completed. Present
-   and not blank -- the server's _is_completed() is the same test, so a job
+   bucket (the bucket stays, as provenance), and listed under Completed. A
+   non-blank STRING -- the server's _is_completed() is the same test, so a job
    leaves the Live screen exactly when it leaves next_action_due. */
-function isCompleted(p){ return st(p && p.completed_on).trim() !== ''; }
+function isCompleted(p){ const v = p && p.completed_on; return typeof v === 'string' && v.trim() !== ''; }
 function _jobLegs(p){
   return (DATA.shipments||[]).filter(s=>
     st(s.company_id)===st(p.company_id) &&

@@ -78,6 +78,23 @@ def run(server, crm_dir=None):
     r.check("the same company, once its role is customer, is allowed", res.get("ok") is True,
             json.dumps(res)[:200])
 
+    # review round 1: the rule is who a project belongs to, not how it got
+    # there -- moving one under a vendor through update_project was allowed
+    s.write("companies", [c if c["company_id"] != "gamma" else dict(c, role="vendor")
+                          for c in s.read("companies")])
+    before = ids()
+    res = s.call("update_project", project_no="5003", company_id="acme",
+                 fields={"company_id": "gamma"})
+    err = str(res.get("error"))
+    r.check("moving a project under a vendor is refused, naming it",
+            res.get("ok") is False and "gamma" in err and "Gamma Tooling" in err and "vendor" in err, err[:200])
+    r.check("... and nothing moved", ids() == before, json.dumps(ids()))
+    res = s.call("update_project", project_no="5003", company_id="acme", fields={"company_id": "beta"})
+    r.check("moving one under a lead is allowed", res.get("ok") is True and ("5003", "beta") in ids(),
+            json.dumps(res)[:200])
+    s.write("companies", [c if c["company_id"] != "gamma" else dict(c, role="customer")
+                          for c in s.read("companies")])
+
     r.section("a project number is unique across the business")
     before = ids()
     for cid, pno in (("beta", "4521"), ("acme", "4521"), ("gamma", " 4521 ")):

@@ -462,6 +462,7 @@ def _audit_checks(r, crm, tmp):
 
     # simulated disagreements the merge cannot produce, one per rule
     _audit_simulated(r, aud, crm, tmp)
+    _audit_review1(r, aud, crm, tmp)
 
 
 def _audit_simulated(r, aud, crm, tmp):
@@ -520,3 +521,109 @@ def _audit_simulated(r, aud, crm, tmp):
     r.check("a recorded null against a missing field is not a finding",
             ("project", "4900", "next_action") not in got, json.dumps(res)[:200])
     r.check("and exactly those five findings", len(got) == 5, sorted(got))
+
+
+def _audit_review1(r, aud, crm, tmp):
+    """Review round 1 found five ways to get a wrong answer out of the audit."""
+    import os
+    from lib.harness import Store, load_server
+    srv = load_server(str(crm))
+    script = str(Path(crm) / "pipeline" / "audit_operator_fields.py")
+
+    # 1. a changelog with malformed lines: no crash, and the skips are counted
+    s = Store(srv, tmp / "audit-malformed")
+    s.reset(companies=[company("acme", "Ace Manufacturing")], projects=[project("4521", "acme")])
+    s.call("update_project", project_no="4521", company_id="acme", fields={"next_action": "Call"})
+    ps = s.read("projects"); ps[0].pop("next_action"); s.write("projects", ps)
+    bad = ['{"torn": ', '[]', '"text"',
+           json.dumps({"op": "update", "entity": ["project"], "key": "4521", "fields": {"next_action": "x"}}),
+           json.dumps({"op": "update", "entity": {"a": 1}, "key": "4521", "fields": {"next_action": "x"}}),
+           json.dumps({"op": "update", "entity": "project", "key": "4521", "company_id": ["acme"],
+                       "fields": {"next_action": "x"}}),
+           json.dumps({"op": "update", "entity": "project", "key": "4521", "fields": "next_action"}),
+           json.dumps({"op": "update", "entity": "project", "key": ["4521"], "fields": {"next_action": "x"}})]
+    with open(s.path / "changelog.jsonl", "a") as f:
+        f.write("\n".join(bad) + "\n")
+    try:
+        res = aud.audit(str(s.path))
+        crashed = None
+    except Exception as exc:                                       # noqa: BLE001
+        res, crashed = {}, f"{type(exc).__name__}: {exc}"
+    r.check("audit: malformed changelog lines do not crash it", crashed is None, str(crashed))
+    r.check("... every unreadable line is counted, not silently dropped",
+            res.get("skipped_lines") == len(bad), json.dumps(res.get("skipped_lines")))
+    r.check("... and the readable lines are still audited",
+            [(f["key"], f["field"]) for f in res.get("findings", [])] == [("4521", "next_action")],
+            json.dumps(res.get("findings"))[:200])
+
+    # 2. no changelog: never a clean result
+    s = Store(srv, tmp / "audit-nolog")
+    s.reset(companies=[company("acme", "Ace Manufacturing")], projects=[project("4521", "acme")])
+    res = aud.audit(str(s.path))
+    r.check("audit: a store with no changelog says so, not 'nothing differs'",
+            res.get("changelog") == "missing", json.dumps(res)[:200])
+    out = subprocess.run([sys.executable, script, "--store", str(s.path)], capture_output=True, text=True, timeout=60)
+    r.check("... the command line says it is not a clean result, and exits non-zero",
+            out.returncode != 0 and "not a clean result" in out.stdout, (out.stdout + out.stderr)[-200:])
+
+    # 3. a superseded entry with no customer is not compared
+    s = Store(srv, tmp / "audit-superseded")
+    s.reset(companies=[company("acme", "Ace Manufacturing")],
+            projects=[project("4521", "acme", next_action_on="2026-09-01")])
+    with open(s.path / "changelog.jsonl", "w") as f:
+        f.write(json.dumps({"ts": "1", "op": "update", "entity": "project", "key": "4521",
+                            "fields": {"next_action_on": "2026-08-01"}}) + "\n")
+        f.write(json.dumps({"ts": "2", "op": "update", "entity": "project", "key": "4521", "company_id": "acme",
+                            "fields": {"next_action_on": "2026-09-01"}}) + "\n")
+    res = aud.audit(str(s.path))
+    r.check("audit: a newer entry for the customer supersedes an older one without a customer",
+            not res["findings"] and not res["ambiguous"], json.dumps(res)[:200])
+    s.reset(companies=[company("acme", "Ace Manufacturing")],
+            projects=[project("4521", "acme", next_action="Second")])
+    with open(s.path / "changelog.jsonl", "w") as f:
+        for ts, v in (("1", "First"), ("2", "Second")):
+            f.write(json.dumps({"ts": ts, "op": "update", "entity": "project", "key": "4521",
+                                "fields": {"next_action": v}}) + "\n")
+    res = aud.audit(str(s.path))
+    r.check("audit: of two entries without a customer on a one-holder number, the later wins",
+            not res["findings"] and res["fields_checked"] == 1, json.dumps(res)[:200])
+
+    # 4. a rename moves only the renamed customer's entries
+    s = Store(srv, tmp / "audit-rename-shared")
+    s.reset(companies=[company("acme", "Ace Manufacturing"), company("beta", "Beta Works")],
+            projects=[project("4600", "acme"), project("4600", "beta")])
+    s.call("update_project", project_no="4600", company_id="beta", fields={"quote_sent_on": "2026-07-03"})
+    s.call("rename_project", old_project_no="4600", new_project_no="4999", company_id="acme")
+    log = [json.loads(l) for l in (s.path / "changelog.jsonl").read_text().splitlines() if l.strip()]
+    r.check("rename_project logs which customer's project it renamed",
+            any(e.get("op") == "rename" and e.get("company_id") == "acme" for e in log), json.dumps(log)[-200:])
+    ps = s.read("projects")
+    for p in ps:
+        if p["company_id"] == "beta":
+            p.pop("quote_sent_on", None)
+    s.write("projects", ps)
+    res = aud.audit(str(s.path))
+    r.check("audit: another customer's rename does not carry this customer's entries away",
+            any(f["key"] == "4600" and f["company_id"] == "beta" and f["field"] == "quote_sent_on"
+                for f in res["findings"]), json.dumps(res)[:240])
+
+    # 5. --out resolving into the store, by any spelling, is refused
+    s = Store(srv, tmp / "audit-outstore")
+    s.reset(companies=[company("acme", "Ace Manufacturing")], projects=[project("4521", "acme")])
+    before = _digest(s.path)
+    outside = tmp / "audit-outside"
+    outside.mkdir()
+    os.link(s.path / "projects.json", outside / "hard.json")
+    (outside / "lnk").symlink_to(s.path, target_is_directory=True)
+    tries = [("a hard link to a store file", outside / "hard.json"),
+             ("a path through a symlinked directory", outside / "lnk" / "report.txt")]
+    other_case = s.path.parent / s.path.name.swapcase()
+    if other_case.exists():                       # a case-insensitive filesystem
+        tries.append(("the store's path spelled in another case", other_case / "projects.json"))
+    r.check("the case-variant probe applies here (a case-insensitive filesystem)", other_case.exists()
+            or sys.platform != "darwin", str(other_case))
+    for what, dest in tries:
+        out = subprocess.run([sys.executable, script, "--store", str(s.path), "--out", str(dest)],
+                             capture_output=True, text=True, timeout=60)
+        r.check(f"--out as {what} is refused", out.returncode != 0, (out.stdout + out.stderr)[-160:])
+    r.check("... and the store is byte-identical after every attempt", _digest(s.path) == before)

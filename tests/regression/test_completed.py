@@ -208,8 +208,22 @@ def run(server, crm_dir=None):
             json.dumps(due()))
     s.call("update_project", project_no="4521", company_id="acme", fields={"completed_on": None})
     r.check("reopened, it is due again", ("4521", "acme") in due(), json.dumps(due()))
+    import inspect
+    r.check("the list_projects description the chat model reads says completed jobs are not due",
+            "completed" in (inspect.getdoc(getattr(srv, "list_projects", None)) or ""),
+            (inspect.getdoc(getattr(srv, "list_projects", None)) or "")[-160:])
     r.check("without the flag, completed projects are still listed",
             len(s.call("list_projects").get("projects", [])) == 5)
+    # review round 1: "complete" is a non-blank STRING, on the server and in
+    # the view alike -- a raw list read "[]" (complete) here and "" (live) there
+    ps = s.read("projects")
+    extra = [("4550", []), ("4551", {}), ("4552", True), ("4553", False), ("4554", 0), ("4555", 20260919)]
+    for pno, v in extra:
+        ps.append(project(pno, "acme", next_action_on="2026-08-01", completed_on=v))
+    s.write("projects", ps)
+    got = due()
+    r.check("a raw completed_on that is not a string -- list, object, bool, number -- is not a completion",
+            all((pno, "acme") in got for pno, _ in extra), json.dumps(got))
 
     # ---- 4a. a fresh process reads it back -----------------------------------------
     r.section("round trip through a fresh process")

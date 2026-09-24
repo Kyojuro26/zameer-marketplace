@@ -22,15 +22,18 @@ T_SERVER = "./tests/regression/test_new_project.py"
 T_VIEW = "./tests/regression/test_new_project_view.js"
 
 SERVER = [
+ # re-anchored review round 1: the owner rule moved into _require_project_owner
  ("a vendor takes a project again",
-  '            if str(co.get("role") or "").strip().lower() == "vendor":\n',
-  "            if False:\n"),
+  '    if str(co.get("role") or "").strip().lower() == "vendor":\n', "    if False:\n"),
  ("a lead is refused as well",
-  '            if str(co.get("role") or "").strip().lower() == "vendor":\n',
-  '            if str(co.get("role") or "").strip().lower() in ("vendor", "lead"):\n'),
+  '    if str(co.get("role") or "").strip().lower() == "vendor":\n',
+  '    if str(co.get("role") or "").strip().lower() in ("vendor", "lead"):\n'),
  ("the refusal does not name the company",
-  "                    f\"company '{fields['company_id']}' ({co.get('display_name') or 'no name'}) \"\n",
-  "                    f\"that company \"\n"),
+  "            f\"company '{company_id}' ({co.get('display_name') or 'no name'}) \"\n",
+  "            f\"that company \"\n"),
+ ("moving a project under a vendor is allowed again (round 1)",
+  '                _require_company(fields["company_id"])\n                _require_project_owner(fields["company_id"])\n',
+  '                _require_company(fields["company_id"])\n'),
  ("a number is unique per customer, not across the business",
   "            if any(_key(p.get(\"project_no\")) == pn for p in projects):\n"
   "                raise StoreError(f\"project '{pn}' already exists\")",

@@ -39,7 +39,9 @@ st.reset(companies=[company("acme", "Ace Manufacturing"), company("beta", "Beta 
                            completed_on="2026-09-01", collection_status="paid"),
                    project("", "acme", tracker_status="action_admin", open_orders_notes="No number yet"),
                    project("4800", "acme", tracker_status="action_admin", description="Blank date",
-                           completed_on="  ")],
+                           completed_on="  "),
+                   project("4810", "acme", tracker_status="action_admin", completed_on=[]),
+                   project("4811", "acme", tracker_status="action_admin", completed_on=20260919)],
          shipments=[shipment("4600-L1", "4600", "acme", stage="Delivered"),
                     shipment("4700-L1", "4700", "acme", stage="Installed")])
 (Path(sys.argv[3]) / "tracker_buckets.json").write_text(json.dumps([
@@ -167,6 +169,11 @@ async function run(crmDir) {
       { click: `${CARD('acme', '4600')} button[data-act="confirm-complete"]` },
       { wait: 400 },
       { eval: LIVE_IDS, as: 'live' }, { eval: DONE_IDS, as: 'done' },
+      // review round 1: two customers' 4521 in demo mode
+      { click: `${CARD('beta', '4521')} button[data-act="complete"]` },
+      { click: `${CARD('beta', '4521')} button[data-act="confirm-complete"]` },
+      { wait: 400 },
+      { eval: LIVE_IDS, as: 'live2' }, { eval: DONE_IDS, as: 'done2' },
     ]);
   } catch (err) {
     r.check('the store seeded, the page built and the server started', false, String(err).slice(0, 300));
@@ -183,7 +190,7 @@ async function run(crmDir) {
   // as it opens
   r.check('a completed job (4700) is not on the Live screen', !has(a.live0, 'acme::4700'), JSON.stringify(a.live0));
   const same = (x, y) => JSON.stringify([...(x || [])].sort()) === JSON.stringify([...(y || [])].sort());
-  r.check('the Live sidebar lists exactly the main pane\'s numbered jobs', (a.live0 || []).length === 4
+  r.check('the Live sidebar lists exactly the main pane\'s numbered jobs', (a.live0 || []).length === 6
     && same(a.side0, a.live0), JSON.stringify([a.side0, a.live0]));
   r.check('... and it is listed under Completed', JSON.stringify(a.done0) === JSON.stringify(['acme::4700']),
     JSON.stringify(a.done0));
@@ -194,6 +201,9 @@ async function run(crmDir) {
   r.check('... nor a hidden confirm with an empty number behind it', JSON.stringify(a.numberlessBox) === '[false]',
     JSON.stringify(a.numberlessBox));
   r.check('... and says why', /mark(ed)? complete/i.test(a.numberless || ''), a.numberless);
+  r.check('a raw completed_on that is not a string (a list, a number) is not a completion, as on the server',
+    has(a.live0, 'acme::4810') && has(a.live0, 'acme::4811') && !has(a.done0, 'acme::4810') && !has(a.done0, 'acme::4811'),
+    JSON.stringify([a.live0, a.done0]));
   r.check('a completed_on of blanks is not a completion: 4800 is live, not under Completed',
     has(a.live0, 'acme::4800') && !has(a.done0, 'acme::4800'), JSON.stringify([a.live0, a.done0]));
 
@@ -246,6 +256,9 @@ async function run(crmDir) {
   r.check('demo mode: the built page runs embedded', emb.mode === 'embedded', emb.mode);
   r.check('demo mode: Mark complete moves the card to Completed for the session',
     !has(emb.live, 'acme::4600') && has(emb.done, 'acme::4600'), JSON.stringify([emb.live, emb.done]));
+  r.check("demo mode: completing Beta Works' 4521 completes that one, not Ace Manufacturing's",
+    has(emb.done2, 'beta::4521') && !has(emb.done2, 'acme::4521') && has(emb.live2, 'acme::4521'),
+    JSON.stringify([emb.live2, emb.done2]));
   return r;
 }
 
