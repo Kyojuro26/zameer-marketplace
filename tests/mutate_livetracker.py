@@ -463,18 +463,22 @@ VIEW = [
   "  return `<span class=\"owed\">${nr+na} flag${nr+na>1?'s':''}</span>`;"),
 
  # ---- who is on the screen ---------------------------------------------------
+ # re-anchored 0.1.43 G2: liveRows also drops completed jobs
  ("archived projects come back onto the live screen",
-  "    .filter(p=>p && !p.archived && st(p.tracker_status) && liveMatches(p, q))",
-  "    .filter(p=>p && st(p.tracker_status) && liveMatches(p, q))"),
+  "    .filter(p=>p && !p.archived && st(p.tracker_status) && !isCompleted(p) && liveMatches(p, q))",
+  "    .filter(p=>p && st(p.tracker_status) && !isCompleted(p) && liveMatches(p, q))"),
+ # re-anchored 0.1.43 G2: liveRows also drops completed jobs
  ("every project is treated as live work",
-  "    .filter(p=>p && !p.archived && st(p.tracker_status) && liveMatches(p, q))",
-  "    .filter(p=>p && !p.archived && liveMatches(p, q))"),
+  "    .filter(p=>p && !p.archived && st(p.tracker_status) && !isCompleted(p) && liveMatches(p, q))",
+  "    .filter(p=>p && !p.archived && !isCompleted(p) && liveMatches(p, q))"),
+ # re-anchored 0.1.43 G2: the leg match moved into _jobLegs, shared by the
+ # Live cards and the Completed list
  ("legs are matched on the number alone, ignoring the company",
-  "      const legs = (DATA.shipments||[]).filter(s=>\n"
-  "        st(s.company_id)===st(p.company_id) &&\n"
-  "        _shipmentProjectNos(s).has(st(p.project_no)));",
-  "      const legs = (DATA.shipments||[]).filter(s=>\n"
-  "        _shipmentProjectNos(s).has(st(p.project_no)));"),
+  "  return (DATA.shipments||[]).filter(s=>\n"
+  "    st(s.company_id)===st(p.company_id) &&\n"
+  "    _shipmentProjectNos(s).has(st(p.project_no)));",
+  "  return (DATA.shipments||[]).filter(s=>\n"
+  "    _shipmentProjectNos(s).has(st(p.project_no)));"),
  ("the busiest row sorts last instead of first",
   "    if(a.flags.red.length !== b.flags.red.length) return b.flags.red.length - a.flags.red.length;",
   "    if(a.flags.red.length !== b.flags.red.length) return a.flags.red.length - b.flags.red.length;"),
@@ -599,9 +603,10 @@ VIEW = [
  ("clearing the note sends null, which reads as 'never set'",
   "    open_orders_notes: document.getElementById('f_oon').value,",
   "    open_orders_notes: document.getElementById('f_oon').value || null,"),
+ # re-anchored 0.1.43 G2: liveRows also drops completed jobs
  ("search stops narrowing the live cards",
-  "    .filter(p=>p && !p.archived && st(p.tracker_status) && liveMatches(p, q))",
-  "    .filter(p=>p && !p.archived && st(p.tracker_status))"),
+  "    .filter(p=>p && !p.archived && st(p.tracker_status) && !isCompleted(p) && liveMatches(p, q))",
+  "    .filter(p=>p && !p.archived && st(p.tracker_status) && !isCompleted(p))"),
  ("search stops narrowing the unlinked rows",
   "    .filter(x=>x.u && typeof x.u === 'object' && unlinkedMatches(x.u, q));",
   "    .filter(x=>x.u && typeof x.u === 'object');"),
@@ -728,9 +733,10 @@ VIEW = [
   "    <div class=\"lt-top\">"),
  ("the bucket headings are dropped",
   "    h += `<div class=\"due-group sw-${g.key?bucketClass(g.key):'b-stage'}\" style=\"padding:8px 12px 2px\">${esc(g.label)}</div>`;\n", ""),
+ # re-anchored 0.1.43 G2: the sidebar item carries data-live-key
  ("a sidebar click opens the edit drawer again",
-  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\"`:''}>",
-  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"openProject('${jesc(st(r.p.project_no))}')\"`:''}>"),
+  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`data-live-key=\"${esc(st(r.p.company_id)+'::'+st(r.p.project_no))}\" onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\"`:''}>",
+  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`data-live-key=\"${esc(st(r.p.company_id)+'::'+st(r.p.project_no))}\" onclick=\"openProject('${jesc(st(r.p.project_no))}')\"`:''}>"),
  ("the jump no longer marks the card it reached",
   "  el.classList.add('lt-hit');\n", ""),
  ("cards lose their ids, so the jump has nothing to reach",

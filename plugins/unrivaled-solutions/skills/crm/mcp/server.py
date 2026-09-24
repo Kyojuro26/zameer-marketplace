@@ -1167,6 +1167,14 @@ def _check_sent_after(requested, sent, what):
                          f"{requested}")
 
 
+def _is_completed(p):
+    """The job is done: completed_on present and not blank. The one reading of
+    "complete" -- the view's isCompleted() is the same test -- so a project is
+    off the Live screen exactly when it is out of next_action_due."""
+    v = p.get("completed_on")
+    return v is not None and str(v).strip() != ""
+
+
 def _check_completed(record, fields):
     """The completion date as it will be saved, judged against the clock and
     the deal. Returns warnings; raises on a date after today.
@@ -3621,13 +3629,15 @@ def list_projects(status: str = None, owner: str = None, year: int = None,
     if next_action_due:
         # <= today through _today(), the hook the metrics freeze; a date
         # _parse_date_loose cannot read is not due, and an archived or lost
-        # project is not due whatever its date says
+        # project is not due whatever its date says. Nor is a completed one
+        # (0.1.43): the Live screen's rule -- a finished job is not chased.
         today = _today()
         def _due(p):
             d = _parse_date_loose(p.get("next_action_on"))
             return bool(d) and d.date() <= today \
                 and str(p.get("status") or "").strip().lower() != "lost" \
-                and not p.get("archived")
+                and not p.get("archived") \
+                and not _is_completed(p)
         out = [p for p in out if _due(p)]
     return {"ok": True, "interface_version": VERSION,
             "count": len(out), "projects": _with_project_metrics(_MetricsCtx(), out)}

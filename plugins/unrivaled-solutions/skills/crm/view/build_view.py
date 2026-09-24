@@ -159,6 +159,8 @@ TEMPLATE = r"""<!DOCTYPE html>
   .lt-next{margin-top:6px;font-size:13px;font-weight:500}
   .lt-legs{margin-top:10px;display:flex;flex-direction:column;gap:4px}
   .lt-leg{display:flex;gap:10px;align-items:center;font-size:13px;flex-wrap:wrap}
+  .lt-done-meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;margin-top:6px}
+  .lt-done:not([hidden]){display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 0;font-size:13px}
   .lt-po{color:var(--muted);min-width:190px}
   .lt-bad{color:var(--red);font-weight:500}
   .lt-warn{color:var(--amber);font-weight:500}
@@ -251,6 +253,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   .saved.show{opacity:1}
   .saved.okc{color:var(--green)}
   .saved.errc{color:var(--red)}
+  .lt-done-msg.errc{color:var(--red);font-size:12px}
   .kv{display:flex;gap:8px;margin:4px 0;font-size:14px}
   .kv .k{color:var(--muted);min-width:110px}
   .pill-btn{background:var(--accent-soft);color:var(--accent);border:none;padding:5px 10px;border-radius:7px;
@@ -700,6 +703,9 @@ function arr(v){ return Array.isArray(v) ? v : (v===null||v===undefined||v==='' 
    rendered clickable anyway -- click, and nothing happened. Such a row is
    rendered inert and says why: the fix is a number, given in chat. */
 const NO_NUMBER_NOTE = 'no number \u2014 give it one in chat to edit here';
+// update_project cannot reach a job with no number, so it cannot be marked
+// complete either; the card says so rather than offering a button that fails
+const NO_NUMBER_LIVE_NOTE = 'no number \u2014 give it one in chat to edit here; it cannot be marked complete until then';
 function hasProjectNo(p){ return st(p && p.project_no).trim() !== ''; }
 function projRowClick(p){ return hasProjectNo(p) ? `class="click" onclick="openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')"` : ''; }
 function projItemClick(p){ return hasProjectNo(p) ? `onclick="openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')"` : ''; }
@@ -1201,14 +1207,22 @@ function unlinkedMatches(u, q){
   return sv(u.client).includes(q) || sv(u.raw_key).includes(q)
       || sv(u.open_orders_notes).includes(q) || sv(u.client_po).includes(q);
 }
+/* A job with completed_on set is done: off the Live screen whatever its
+   bucket (the bucket stays, as provenance), and listed under Completed. Present
+   and not blank -- the server's _is_completed() is the same test, so a job
+   leaves the Live screen exactly when it leaves next_action_due. */
+function isCompleted(p){ return st(p && p.completed_on).trim() !== ''; }
+function _jobLegs(p){
+  return (DATA.shipments||[]).filter(s=>
+    st(s.company_id)===st(p.company_id) &&
+    _shipmentProjectNos(s).has(st(p.project_no)));
+}
 function liveRows(){
   const q = sv(query).trim();
   const rows = (DATA.projects||[])
-    .filter(p=>p && !p.archived && st(p.tracker_status) && liveMatches(p, q))
+    .filter(p=>p && !p.archived && st(p.tracker_status) && !isCompleted(p) && liveMatches(p, q))
     .map(p=>{
-      const legs = (DATA.shipments||[]).filter(s=>
-        st(s.company_id)===st(p.company_id) &&
-        _shipmentProjectNos(s).has(st(p.project_no)));
+      const legs = _jobLegs(p);
       return {p, legs, flags: liveFlags(p, legs)};
     });
   // red count desc, then the next action's date ascending with none last,
@@ -1223,6 +1237,87 @@ function liveRows(){
     return st(a.p.project_no).localeCompare(st(b.p.project_no));
   });
   return rows;
+}
+
+/* The Completed list: most recent first, an unreadable date last. A list,
+   not a report -- no date filters, nothing summed. */
+function completedRows(){
+  const q = sv(query).trim();
+  const rows = (DATA.projects||[])
+    .filter(p=>p && !p.archived && isCompleted(p) && liveMatches(p, q))
+    .map(p=>({p, legs: _jobLegs(p), iso: isoDate(p.completed_on) || ''}));
+  rows.sort((a,b)=>{
+    if(a.iso !== b.iso){ if(!a.iso) return 1; if(!b.iso) return -1; return a.iso < b.iso ? 1 : -1; }
+    return st(a.p.project_no).localeCompare(st(b.p.project_no));
+  });
+  return rows;
+}
+function _liveCardEl(cid, pno){
+  return document.getElementById('lt-' + encodeURIComponent(st(cid)) + '::' + encodeURIComponent(st(pno)));
+}
+function startComplete(cid, pno){
+  const el = _liveCardEl(cid, pno);
+  const box = el && el.querySelector('.lt-done');
+  if(!box) return;
+  box.hidden = false;
+  const inp = box.querySelector('input[data-done]');
+  if(inp && !inp.value) inp.value = todayISO();
+  const m = box.querySelector('.lt-done-msg'); if(m) m.textContent = '';
+}
+function cancelComplete(cid, pno){
+  const el = _liveCardEl(cid, pno);
+  const box = el && el.querySelector('.lt-done');
+  if(box) box.hidden = true;
+}
+/* Saves {completed_on} through update_project. The card moves only when the
+   store says it moved: on a refusal it stays, with the server's words. */
+async function setCompleted(cid, pno, value, msgEl, btn){
+  if(btn) btn.disabled = true;
+  let r;
+  try{ r = await CRM.call('update_project', {project_no: pno, company_id: cid, fields: {completed_on: value}}); }
+  catch(e){ r = {ok:false, error:(e && e.message) || String(e)}; }
+  if(btn) btn.disabled = false;
+  if(!r || !r.ok){
+    if(msgEl){ msgEl.textContent = '\u2717 ' + ((r && r.error) || 'not saved'); }
+    return false;
+  }
+  const p = (DATA.projects||[]).find(x=>st(x.project_no)===st(pno) && st(x.company_id)===st(cid));
+  if(p) Object.assign(p, r.project || {completed_on: value});
+  if((r.warnings||[]).length) noticeToast(r.warnings.join(' \u00b7 '));
+  renderList(); renderMain();
+  return true;
+}
+function confirmComplete(cid, pno){
+  const el = _liveCardEl(cid, pno);
+  const box = el && el.querySelector('.lt-done');
+  if(!box) return;
+  const v = (box.querySelector('input[data-done]')||{}).value || '';
+  const m = box.querySelector('.lt-done-msg');
+  if(!v){ if(m) m.textContent = '\u2717 pick the date the job was finished'; return; }
+  return setCompleted(cid, pno, v, m, box.querySelector('button[data-act="confirm-complete"]'));
+}
+function reopenJob(cid, pno){
+  const row = document.querySelector(`[data-completed-key="${CSS.escape(st(cid)+'::'+st(pno))}"]`);
+  return setCompleted(cid, pno, null, row && row.querySelector('.lt-done-msg'),
+                      row && row.querySelector('button[data-act="reopen"]'));
+}
+function completedCard(r){
+  const p = r.p, co = companyById[p.company_id];
+  const cid = st(p.company_id), pno = st(p.project_no);
+  const stages = r.legs.map(l=>`<span class="badge b-stage">${esc(st(l.stage)||'no stage')}</span>`).join(' ')
+    || '<span class="muted">no vendor legs</span>';
+  const coll = st(p.collection_status).trim();
+  return `<div class="lt-card" data-completed-key="${esc(cid+'::'+pno)}">
+    <div class="lt-top">
+      <a href="#" class="lnk nw" data-open onclick="event.preventDefault();openProject('${jesc(pno)}','${jesc(cid)}')"><b>${esc(pno)}</b></a>
+      <a href="#" class="lnk" onclick="event.preventDefault();select('${jesc(cid)}')">${esc(co?(co.display_name||cid):cid)}</a>
+      <span>${esc(st(p.description))}</span>
+      <span class="muted nw">Completed ${esc(fmtDate(p.completed_on))}</span>
+      <span style="margin-left:auto"><button class="pill-btn" data-act="reopen" onclick="reopenJob('${jesc(cid)}','${jesc(pno)}')">Reopen</button></span>
+    </div>
+    <div class="lt-done-meta">Legs: ${stages} <span class="muted">\u00b7 Collection: ${coll ? esc(coll) : 'not set'}</span></div>
+    <span class="lt-done-msg errc"></span>
+  </div>`;
 }
 
 // Same bound the company, Projects and Receivables lists use. Bounded today
@@ -1340,7 +1435,26 @@ function renderLiveMain(){
     }
     h += `</div>`;
   }
-  if(!rows.length && !unlinked.length && !dismissed.length){
+  // Completed: finished jobs, off the board but findable, one click from
+  // coming back. Counted over the same search as everything above.
+  const done = completedRows();
+  if(done.length){
+    h += `<div class="section lt-section" id="lt-completed"><div class="lt-head">
+      <span class="swatch b-stage"></span>
+      <h2 style="border:0;padding:0;margin:0">Completed</h2>
+      <span class="muted">${done.length} completed</span></div>
+      <p class="muted" style="font-size:12px;margin:0 0 10px">
+        Marked done: shipped or installed. Not the same as paid \u2014 the
+        collection status is shown beside each. Reopen puts a job back on the
+        board in its bucket.</p>`;
+    h += done.slice(0, LIVE_CAP).map(completedCard).join('');
+    if(done.length > LIVE_CAP){
+      h += `<div class="muted" style="font-size:12px;padding:4px 2px">Showing
+        the first ${LIVE_CAP} of ${done.length}.</div>`;
+    }
+    h += `</div>`;
+  }
+  if(!rows.length && !unlinked.length && !dismissed.length && !done.length){
     h += `<div class="empty">No live projects yet. <button class="pill-btn" onclick="setFilter('all')">Browse companies</button></div>`;
   }
   return h;
@@ -1371,9 +1485,15 @@ function liveCard(r){
       <span class="muted nw">${liveStart(p)}</span>
       ${r.flags.red.map(f=>`<span class="badge b-lost">${esc(f)}</span>`).join('')}${r.flags.amber.map(f=>`<span class="badge b-pending">${esc(f)}</span>`).join('')}
       <span style="margin-left:auto">${hasProjectNo(p)
-        ? `<button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')">Edit</button>`
-        : `<span class="muted nw">${esc(NO_NUMBER_NOTE)}</span>`}</span>
+        ? `<button class="pill-btn" data-act="complete" onclick="startComplete('${jesc(st(p.company_id))}','${jesc(st(p.project_no))}')">Mark complete</button>
+           <button class="pill-btn" onclick="openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')">Edit</button>`
+        : `<span class="muted nw">${esc(NO_NUMBER_LIVE_NOTE)}</span>`}</span>
     </div>
+    ${hasProjectNo(p) ? `<div class="lt-done" hidden>
+      Finished on <input type="date" data-done/>
+      <button class="pill-btn" data-act="confirm-complete" onclick="confirmComplete('${jesc(st(p.company_id))}','${jesc(st(p.project_no))}')">Mark complete</button>
+      <button class="pill-btn" data-act="cancel-complete" onclick="cancelComplete('${jesc(st(p.company_id))}','${jesc(st(p.project_no))}')">Cancel</button>
+      <span class="lt-done-msg errc"></span></div>` : ''}
     <div class="lt-note">${esc(st(p.open_orders_notes)||'')||'<span class="muted">no note</span>'}</div>
     ${liveNext(p)}
     <div class="lt-legs">${legs}</div>
@@ -1725,7 +1845,7 @@ function renderLiveList(){
     const shown = g.cap === false ? g.rows : g.rows.slice(0, LIVE_CAP);
     shown.forEach(r=>{
       const co = companyById[r.p.company_id];
-      h += `<div class="citem" ${hasProjectNo(r.p)?`onclick="liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')"`:''}>
+      h += `<div class="citem" ${hasProjectNo(r.p)?`data-live-key="${esc(st(r.p.company_id)+'::'+st(r.p.project_no))}" onclick="liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')"`:''}>
       <div class="cn">${hasProjectNo(r.p)?esc(st(r.p.project_no)):'<span class="muted">no number</span>'} <span class="muted">${esc(co?(co.display_name||''):'')}</span></div>
       <div class="cm">${liveFlagLine(r)}</div>
     </div>`;
@@ -2830,6 +2950,11 @@ function openProject(pno, cid){
       <div class="field"><label>Next action</label><input id="f_na" value="${esc(p.next_action||'')}" placeholder="e.g. chase the revised PO"/></div>
       <div class="field"><label>By when</label>${dateInput('f_nao', p.next_action_on)}</div>
     </div>
+    <div class="field"><label>Completed on <span class="muted"
+      style="text-transform:none;font-weight:400">(the work is done \u2014 not
+      the same as paid)</span></label>${dateInput('f_done', p.completed_on)}
+      <p class="muted" style="margin:4px 0 0;font-size:11px">While set, the job
+        is off the Live screen and listed under Completed. Clear it to reopen.</p></div>
     <div class="field"><label>Notes</label><textarea id="f_notes">${esc(p.notes||'')}</textarea></div>
     <div class="field"><label>Annotations (one per line)</label><textarea id="f_annos">${esc(arr(p.annotations).join('\n'))}</textarea></div>
     <button class="btn" id="saveBtn" onclick="saveProject('${jesc(pno)}','${jesc(cid)}')">Save changes</button>
@@ -2849,7 +2974,7 @@ function openProject(pno, cid){
   // The deal date was a plain text box showing "2026-06-17 00:00:00" and was
   // sent on every save. Same rule as every other date field now: baseline
   // from the control, sent only if he touched it.
-  snapDates(['f_date','f_nao']);
+  snapDates(['f_date','f_nao','f_done']);
   document.getElementById('drawerNote').textContent = CRM.mode==='embedded'
     ? 'Demo mode: this save lasts only for this browser session.'
     : 'Saves persist to your CRM records through the validated write interface.';
@@ -2906,6 +3031,7 @@ async function saveProject(pnoArg, cid){
   };
   dateIfChanged('f_date', fields, 'date');     // never send a date he did not touch
   dateIfChanged('f_nao', fields, 'next_action_on');   // same rule for "by when"
+  dateIfChanged('f_done', fields, 'completed_on');     // and for "completed on"
   // Sent ONLY when he actually changed it. Every other field here is sent
   // unconditionally, which is fine for fields the form always shows correctly
   // -- but this one can hold a value the server now refuses, and resending

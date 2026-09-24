@@ -30,13 +30,17 @@ M = [
  ("the projects sidebar item keeps its onclick",
   "    <div class=\"citem\" ${projItemClick(p)}>",
   "    <div class=\"citem\" onclick=\"openProject('${jesc(st(p.project_no))}')\">"),
+ # re-anchored 0.1.43 G2: the card also offers Mark complete, and a
+ # numberless card says why it cannot be marked complete
  ("the Live card offers Edit on a job it cannot open",
   "      <span style=\"margin-left:auto\">${hasProjectNo(p)\n"
-  "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button>`\n"
-  "        : `<span class=\"muted nw\">${esc(NO_NUMBER_NOTE)}</span>`}</span>",
+  "        ? `<button class=\"pill-btn\" data-act=\"complete\" onclick=\"startComplete('${jesc(st(p.company_id))}','${jesc(st(p.project_no))}')\">Mark complete</button>\n"
+  "           <button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button>`\n"
+  "        : `<span class=\"muted nw\">${esc(NO_NUMBER_LIVE_NOTE)}</span>`}</span>",
   "      <span style=\"margin-left:auto\"><button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button></span>"),
+ # re-anchored 0.1.43 G2: the sidebar item carries data-live-key
  ("the Live sidebar item keeps its onclick",
-  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\"`:''}>",
+  "      h += `<div class=\"citem\" ${hasProjectNo(r.p)?`data-live-key=\"${esc(st(r.p.company_id)+'::'+st(r.p.project_no))}\" onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\"`:''}>",
   "      h += `<div class=\"citem\" onclick=\"liveJump('${jesc(st(r.p.company_id))}','${jesc(st(r.p.project_no))}')\">"),
  ("a save no longer re-baselines the drawer's snapshotted controls",
   "      if(body.querySelectorAll){\n"
@@ -88,9 +92,10 @@ M = [
   "                         if not _srv._shipment_hidden(x, arch)]",
   "    data[\"shipments\"] = [x for x in data[\"shipments\"]\n"
   "                         if not _srv._shipment_project_nos(x) <= arch.archived]"),
+ # re-anchored 0.1.43 G2: Edit now follows Mark complete on its own line
  ("the Live card Edit passes the number alone",
-  "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button>`",
-  "        ? `<button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}')\">Edit</button>`"),
+  "           <button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\">Edit</button>`",
+  "           <button class=\"pill-btn\" onclick=\"openProject('${jesc(st(p.project_no))}')\">Edit</button>`"),
  ("the table rows pass the number alone",
   "function projRowClick(p){ return hasProjectNo(p) ? `class=\"click\" onclick=\"openProject('${jesc(st(p.project_no))}','${jesc(st(p.company_id))}')\"` : ''; }",
   "function projRowClick(p){ return hasProjectNo(p) ? `class=\"click\" onclick=\"openProject('${jesc(st(p.project_no))}')\"` : ''; }"),
@@ -149,8 +154,9 @@ M = [
  ("the deal date goes back to a plain text box",
   "      <div class=\"field\"><label>Deal date</label>${dateInput('f_date', p.date)}</div>",
   "      <div class=\"field\"><label>Deal date</label><input id=\"f_date\" value=\"${esc(p.date||'')}\"/></div>"),
+ # re-anchored 0.1.43 G2: completed_on joins the snapshotted dates
  ("the deal date is never snapshotted, so a change is never sent",
-  "  snapDates(['f_date','f_nao']);\n", ""),
+  "  snapDates(['f_date','f_nao','f_done']);\n", ""),
  ("the invoice table header says Invoiced again",
   "<th class=\"num\">Invoice date</th><th class=\"num\">Outstanding</th>",
   "<th class=\"num\">Invoiced</th><th class=\"num\">Outstanding</th>"),

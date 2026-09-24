@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Mutation-test completed_on (0.1.43 G1) in mcp/server.py, graded by
+"""Mutation-test completed_on (0.1.43 G1, G2). SERVER mutants in mcp/server.py are graded by
 tests/regression/test_completed.py: a dated, operator-owned project field,
 refused when unreadable or in the future (through the frozen clock), warned
 about before the deal date, touching neither the bucket nor the collection
 status. Its carry-over on a re-import is graded with the rest of
-OPERATOR_ONLY by tests/mutate_operator_only.py.
+OPERATOR_ONLY by tests/mutate_operator_only.py. G2 adds next_action_due's
+named exception (a completed job is not due) to the server set, and a VIEW set
+in view/build_view.py graded by tests/regression/test_completed_view.js through
+the real click path: Mark complete, the Completed list, Reopen, the drawer.
 
 Scoring, baseline and anchor guards live in tests/lib/mutate_lib.py.
 """
@@ -14,6 +17,7 @@ from mutate_lib import mutate
 
 SRC = "plugins/unrivaled-solutions/skills/crm"
 T_COMPLETED = "./tests/regression/test_completed.py"
+T_VIEW = "./tests/regression/test_completed_view.js"
 
 _GATE = ("        readable = isinstance(v, str) and bool(_NEXT_ACTION_DATE_RE.fullmatch(v.strip()))\n"
          "        if not (readable and _parse_date_loose(v)):\n")
@@ -73,12 +77,68 @@ SERVER = [
   "            warnings = _check_completed(dict(target[0], **fields), fields)\n"
   "            if fields.get(\"completed_on\"):\n"
   "                fields[\"collection_status\"] = \"paid\"\n"),
+ # G2: next_action_due, the named exception
+ ("a completed project is still due",
+  "                and not p.get(\"archived\") \\\n"
+  "                and not _is_completed(p)", "                and not p.get(\"archived\")"),
+ ("a blank completed_on counts as complete",
+  '    return v is not None and str(v).strip() != ""', '    return v is not None'),
+ ("completion is read as truthiness, so '  ' is complete",
+  '    return v is not None and str(v).strip() != ""', '    return bool(v)'),
+]
+
+# G2: the Live screen, graded through the real click path on a live server
+VIEW = [
+ ("a completed job stays on the Live screen",
+  "st(p.tracker_status) && !isCompleted(p) && liveMatches(p, q))",
+  "st(p.tracker_status) && liveMatches(p, q))"),
+ ("isCompleted reads a blank as complete",
+  "function isCompleted(p){ return st(p && p.completed_on).trim() !== ''; }",
+  "function isCompleted(p){ return st(p && p.completed_on) !== ''; }"),
+ ("the Completed list is oldest first",
+  "return a.iso < b.iso ? 1 : -1; }", "return a.iso < b.iso ? -1 : 1; }"),
+ ("the date does not default to today",
+  "  if(inp && !inp.value) inp.value = todayISO();\n", ""),
+ ("the card moves on a refusal too (optimistic)",
+  "  if(!r || !r.ok){\n    if(msgEl){ msgEl.textContent = '\\u2717 ' + ((r && r.error) || 'not saved'); }\n    return false;\n  }\n",
+  "  if(!r || !r.ok){\n    if(msgEl){ msgEl.textContent = '\\u2717 ' + ((r && r.error) || 'not saved'); }\n  }\n"),
+ ("the refusal is not shown",
+  "    if(msgEl){ msgEl.textContent = '\\u2717 ' + ((r && r.error) || 'not saved'); }\n",
+  "    if(msgEl){ msgEl.textContent = ''; }\n"),
+ ("the local record is found by number alone, across customers",
+  "  const p = (DATA.projects||[]).find(x=>st(x.project_no)===st(pno) && st(x.company_id)===st(cid));\n  if(p) Object.assign(p, r.project || {completed_on: value});",
+  "  const p = (DATA.projects||[]).find(x=>st(x.project_no)===st(pno));\n  if(p) Object.assign(p, r.project || {completed_on: value});"),
+ ("the sidebar is not repainted after a save",
+  "  renderList(); renderMain();\n  return true;", "  renderMain();\n  return true;"),
+ ("a numberless job is offered Mark complete",
+  "    ${hasProjectNo(p) ? `<div class=\"lt-done\" hidden>", "    ${true ? `<div class=\"lt-done\" hidden>"),
+ ("a numberless job is offered the Mark complete button",
+  ": `<span class=\"muted nw\">${esc(NO_NUMBER_LIVE_NOTE)}</span>`}</span>",
+  ": `<button class=\"pill-btn\" data-act=\"complete\" onclick=\"startComplete('${jesc(st(p.company_id))}','')\">Mark complete</button><span class=\"muted nw\">${esc(NO_NUMBER_LIVE_NOTE)}</span>`}</span>"),
+ ("the numberless card does not say why",
+  "'no number \\u2014 give it one in chat to edit here; it cannot be marked complete until then'",
+  "'no number \\u2014 give it one in chat to edit here'"),
+ ("Reopen sends an empty string instead of null",
+  "  return setCompleted(cid, pno, null, row && row.querySelector('.lt-done-msg'),",
+  "  return setCompleted(cid, pno, '', row && row.querySelector('.lt-done-msg'),"),
+ ("the Completed count is dropped",
+  '<span class="muted">${done.length} completed</span>', '<span class="muted"></span>'),
+ ("collection status is not shown on a completed job",
+  "Collection: ${coll ? esc(coll) : 'not set'}", "${''}"),
+ ("leg stages are not shown on a completed job",
+  "  const stages = r.legs.map(l=>`<span class=\"badge b-stage\">${esc(st(l.stage)||'no stage')}</span>`).join(' ')",
+  "  const stages = [].join(' ')"),
+ ("the drawer does not show completed_on",
+  "${dateInput('f_done', p.completed_on)}", "${dateInput('f_done', null)}"),
+ ("the drawer never sends a corrected completed_on",
+  "  dateIfChanged('f_done', fields, 'completed_on');     // and for \"completed on\"\n", ""),
 ]
 
 def main():
     worst = 0
     for title, test, target, mutants in (
-            ("SERVER -- mcp/server.py", T_COMPLETED, "mcp/server.py", SERVER),):
+            ("SERVER -- mcp/server.py", T_COMPLETED, "mcp/server.py", SERVER),
+            ("VIEW -- view/build_view.py", T_VIEW, "view/build_view.py", VIEW)):
         print(f"\n=== {title}  ({len(mutants)} mutants) ===")
         worst = max(worst, mutate(SRC, test, target, mutants))
     return worst

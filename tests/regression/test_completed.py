@@ -183,6 +183,34 @@ def run(server, crm_dir=None):
             res.get("ok") is True and "2026-04-01" in warn and "2026-05-01" in warn,
             json.dumps(res)[:200])
 
+    # ---- 3b. next_action_due: a completed job is not due (G2) --------------------
+    r.section("next_action_due drops a completed project, the Live screen's rule")
+    s.reset(companies=[company("acme", "Ace Manufacturing"), company("beta", "Beta Works")],
+            projects=[project("4521", "acme", next_action_on="2026-08-01"),
+                      project("4521", "beta", next_action_on="2026-08-01"),
+                      project("4540", "acme", next_action_on="2026-08-01", completed_on=""),
+                      project("4541", "acme", next_action_on="2026-08-01", completed_on="  "),
+                      project("4542", "acme", next_action_on="2026-08-01", completed_on="8/2/26")])
+
+    def due():
+        res = s.call("list_projects", next_action_due=True)
+        return sorted((str(p["project_no"]), p["company_id"]) for p in res.get("projects", []))
+    r.check("before: every past-due next action is due",
+            due() == [("4521", "acme"), ("4521", "beta"), ("4540", "acme"), ("4541", "acme")],
+            json.dumps(due()))
+    s.call("update_project", project_no="4521", company_id="acme", fields={"completed_on": "2026-08-05"})
+    r.check("a project marked complete drops out of next_action_due",
+            ("4521", "acme") not in due(), json.dumps(due()))
+    r.check("... and the other customer's 4521 is still due", ("4521", "beta") in due(), json.dumps(due()))
+    r.check("a completed_on of '' or blanks is not a completion (the view reads it the same way)",
+            ("4540", "acme") in due() and ("4541", "acme") in due(), json.dumps(due()))
+    r.check("a tracker-style completed_on on disk is a completion", ("4542", "acme") not in due(),
+            json.dumps(due()))
+    s.call("update_project", project_no="4521", company_id="acme", fields={"completed_on": None})
+    r.check("reopened, it is due again", ("4521", "acme") in due(), json.dumps(due()))
+    r.check("without the flag, completed projects are still listed",
+            len(s.call("list_projects").get("projects", [])) == 5)
+
     # ---- 4a. a fresh process reads it back -----------------------------------------
     r.section("round trip through a fresh process")
     seed()
