@@ -566,7 +566,15 @@ function setModePill(){
   }[CRM.mode];
   el.classList.toggle('live', CRM.mode !== 'embedded');
   const add = document.getElementById('addrow');
-  if (add) add.style.display = 'flex';   // add/delete available in every mode (session-only in demo)
+  // add/delete available in every mode (session-only in demo) -- but on the
+  // tabs that hide the row, still hidden. Forcing 'flex' here showed it on the
+  // Live tab, the landing screen, every time the app connected (0.1.43).
+  if (add) add.style.display = addRowShown(filter) ? 'flex' : 'none';
+}
+/* The "+ Add customer / vendor / lead" row acts on the company list, so the
+   cross-company tabs hide it. One rule for setFilter and setModePill. */
+function addRowShown(f){
+  return !['project', 'receivable', 'live', 'cfo', 'quotes', 'rankings'].includes(f);
 }
 
 /* ---------------------------------------------------------- indexes/util -- */
@@ -915,7 +923,8 @@ function renderProjectsMain(){
   const totalRev = rows.reduce((a,p)=>a+(Number(p.revenue)||0),0);
   let h = `<div class="co-head"><h1>Projects</h1>
     <span class="muted">${rows.length} of ${(DATA.projects||[]).length}</span>
-    <span class="muted">· ${money(totalRev)} revenue</span></div>`;
+    <span class="muted">· ${money(totalRev)} revenue</span>
+    <button class="pill-btn" data-act="new-project" style="margin-left:auto" onclick="openNewProject(null,{})">+ New project</button></div>`;
   if(!rows.length){
     return h + '<div class="empty">No projects match these filters.</div>';
   }
@@ -1352,7 +1361,8 @@ function renderLiveMain(){
 
   let h = `<div class="co-head"><h1>Live projects</h1>
     <span class="muted">${rows.length} active</span>
-    ${flagged?`<span class="badge b-lost">${flagged} need a look</span>`:''}</div>`;
+    ${flagged?`<span class="badge b-lost">${flagged} need a look</span>`:''}
+    <button class="pill-btn" data-act="new-project" style="margin-left:auto" onclick="openNewProject(null,{fromLive:true})">+ New project</button></div>`;
   h += `<p class="muted" style="margin:2px 0 16px;font-size:12px">
     Grouped by the status colours from your tracker. Red on a row means
     something is late now: a ship date or estimate that has passed, or a start
@@ -3149,10 +3159,44 @@ function _shipmentProjectNos(s){
 }
 
 /* -------------------------------------------------------- create drawers -- */
-function openNewProject(cid){
-  const c=companyById[cid]; if(!c) return;
-  document.getElementById('dtitle').textContent='New project — '+(c.display_name||cid);
-  document.getElementById('dbody').innerHTML=`
+/* Companies a project may belong to: live customers and leads, never a vendor
+   (the server refuses one) and never an archived company, by display name. */
+function projectOwners(){
+  return (DATA.companies||[])
+    .filter(c=>c && !c.archived && (c.role==='customer' || c.role==='lead'))
+    .sort((a,b)=>st(a.display_name||a.company_id).localeCompare(st(b.display_name||b.company_id), undefined, {sensitivity:'base'}));
+}
+function ownCompany(cid){ return Object.prototype.hasOwnProperty.call(companyById, cid) ? companyById[cid] : null; }
+function filterOwnerPicker(){
+  const q = sv((document.getElementById('n_cfind')||{}).value).trim();
+  const sel = document.getElementById('n_cid'); if(!sel) return;
+  [...sel.options].forEach(o=>{
+    if(!o.value) return;
+    o.hidden = !!q && !sv(o.textContent).includes(q);
+    if(o.hidden && o.selected) sel.value = '';
+  });
+}
+/* From a company's header: that company. From the Projects or Live tab
+   (cid null): a customer picker, and from Live the bucket as well, so the
+   new job lands on the screen it was added from. */
+function openNewProject(cid, opts){
+  opts = opts || {};
+  const c = cid == null ? null : ownCompany(cid);
+  if(cid != null && !c) return;
+  const fromLive = !!opts.fromLive;
+  document.getElementById('dtitle').textContent = c ? 'New project — '+(c.display_name||cid) : 'New project';
+  const picker = c ? '' : `
+    <div class="field"><label>Customer (required)</label>
+      <input id="n_cfind" placeholder="type to search customers and leads" oninput="filterOwnerPicker()"/>
+      <select id="n_cid" size="6" style="width:100%;margin-top:4px">
+        ${projectOwners().map(o=>`<option value="${esc(o.company_id)}">${esc(o.display_name||o.company_id)}${o.role==='lead'?' (lead)':''}</option>`).join('')}
+      </select></div>`;
+  const buckets = trackerBuckets();
+  const bucket = fromLive ? `
+    <div class="field"><label>Live Tracker bucket</label><select id="n_bucket">
+      ${buckets.map((b,i)=>`<option value="${esc(b.key)}"${i===0?' selected':''}>${esc(bucketLabel(b.key))}</option>`).join('')}
+      <option value="">none \u2014 not on the Live screen</option></select></div>` : '';
+  document.getElementById('dbody').innerHTML=`${picker}${bucket}
     <div class="row2">
       <div class="field"><label>Project # (required)</label><input id="n_pno" placeholder="e.g. 1421"/></div>
       <div class="field"><label>Status</label><select id="n_status">
@@ -3164,14 +3208,17 @@ function openNewProject(cid){
       <div class="field"><label>Owner (reps)</label><input id="n_owner" placeholder="D, G"/></div>
     </div>
     <div class="field"><label>Notes</label><textarea id="n_notes"></textarea></div>
-    <button class="btn" id="saveBtn" onclick="saveNewProject('${jesc(cid)}')">Create project</button>
+    <button class="btn" id="saveBtn" onclick="saveNewProject(${c ? `'${jesc(cid)}'` : 'null'}, ${fromLive})">Create project</button>
     <span class="saved" id="savedMsg"></span>`;
   openDrawer();
 }
 
-async function saveNewProject(cid){
+async function saveNewProject(cid, fromLive){
+  const picked = cid == null;
+  if(picked) cid = (document.getElementById('n_cid')||{}).value || '';
   const pno=document.getElementById('n_pno').value.trim();
   const msg=document.getElementById('savedMsg');
+  if(picked && !ownCompany(cid)){ msg.textContent='✗ pick a customer'; msg.className='saved show errc'; return; }
   if(!pno){ msg.textContent='✗ project # is required'; msg.className='saved show errc'; return; }
   const rev=parseFloat(document.getElementById('n_rev').value);
   const fields={project_no:pno, company_id:cid,
@@ -3182,9 +3229,14 @@ async function saveNewProject(cid){
     owner:document.getElementById('n_owner').value.split(',').map(s=>s.trim()).filter(Boolean),
     notes:document.getElementById('n_notes').value||null,
     year:new Date().getFullYear()};
+  const bucket = fromLive ? ((document.getElementById('n_bucket')||{}).value || '') : '';
+  if(bucket) fields.tracker_status = bucket;
   await doSave('create_project', {fields}, (r)=>{
     DATA.projects.push(r.project||fields); reindex(); renderList();
     closeDrawer();
+    // opened from a tab, say where the new job will be found
+    if(picked) noticeToast(`Created ${pno} for ${(companyById[cid]||{}).display_name||cid} \u2014 `
+      + (bucket ? `on the Live screen under ${bucketLabel(bucket)}` : 'not on the Live screen'), '\u2713');
   });
 }
 
@@ -3902,7 +3954,7 @@ async function doSave(tool, args, applyLocal){
   }
 }
 
-function noticeToast(text){
+function noticeToast(text, icon){
   // NOT #savedMsg: doSave's finally schedules a 2.5s class removal on that same
   // element, so a message written after doSave returns was silently faded out.
   // This is the same surface draftReady uses, and it persists until dismissed.
@@ -3912,7 +3964,7 @@ function noticeToast(text){
     d.style.cssText = 'bottom:52px;left:12px;max-width:420px;line-height:1.5';
     document.body.appendChild(d); return d;
   })();
-  el.textContent = '⚠ ' + text + '  (click to dismiss)';
+  el.textContent = (icon || '⚠') + ' ' + text + '  (click to dismiss)';
   el.onclick = ()=>{ el.remove(); };
 }
 /* ---------------------------------------------------- drawer open/close --
@@ -4114,7 +4166,7 @@ function setFilter(f){
   // both cross-company views own the sub-filter row and neither wants the
   // "+ Add customer/vendor/lead" buttons, which act on the company list
   if(sf) sf.style.display = (isProj || isRecv) ? 'flex' : 'none';
-  if(add) add.style.display = (isProj || isRecv || isLive || isCfo || isQuotes || isRank) ? 'none' : 'flex';
+  if(add) add.style.display = addRowShown(f) ? 'flex' : 'none';
   if(isProj || isRecv) renderSubfilters();
   renderList();
   if(isCfo) loadCfo();

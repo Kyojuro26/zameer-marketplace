@@ -4612,6 +4612,16 @@ def create_project(fields: dict) -> dict:
                 raise StoreError("create_project needs project_no and company_id")
             fields["project_no"] = pn
             _require_company(fields["company_id"])
+            # A project belongs to a customer or a lead (0.1.43). _require_company
+            # checks liveness, never role, so a vendor took a project and the job
+            # sat under a supplier. Refused here only: a vendor still has
+            # contacts, notes and its own records.
+            co = next((c for c in STORE.load("companies")
+                       if c.get("company_id") == fields["company_id"]), {})
+            if str(co.get("role") or "").strip().lower() == "vendor":
+                raise StoreError(
+                    f"company '{fields['company_id']}' ({co.get('display_name') or 'no name'}) "
+                    f"is a vendor -- a project belongs to a customer or a lead")
             projects = STORE.load("projects")
             if any(_key(p.get("project_no")) == pn for p in projects):
                 raise StoreError(f"project '{pn}' already exists")
