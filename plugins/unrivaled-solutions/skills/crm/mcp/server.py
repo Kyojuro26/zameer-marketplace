@@ -1587,13 +1587,32 @@ def _one_project(projects, key, what, company_id=None):
         cid = _key(company_id)
         matches = [p for p in matches if _key(p.get("company_id")) == cid]
     if len(matches) > 1:
+        # Say who holds it and what to do. It used to end "no tool here can
+        # tell the two apart" -- untrue since company_id (0.1.41), and it named
+        # nobody, so the operator was sent to edit the store by hand (0.1.43).
+        try:
+            names = {_key(c.get("company_id")): c.get("display_name")
+                     for c in STORE.load("companies")}
+        except StoreError:
+            names = {}
+        def who(m):
+            cid = _key(m.get("company_id"))
+            name = names.get(cid) or m.get("company_name") or "no name"
+            return f"{name} ({cid}{', archived' if m.get('archived') else ''})"
+        holders = [who(m) for m in matches]
+        cids = [_key(m.get("company_id")) for m in matches]
+        if len(set(cids)) == len(cids):
+            raise StoreError(
+                f"{len(matches)} projects share the number '{key}': "
+                f"{'; '.join(holders)}. {what} needs to know which -- pass "
+                f"company_id to say which customer's project.")
+        twice = sorted({f"{names.get(c) or 'no name'} ({c})" for c in cids if cids.count(c) > 1})
         raise StoreError(
-            f"{len(matches)} projects share the number '{key}' "
-            f"(archived: {[bool(m.get('archived')) for m in matches]}). "
-            f"{what} would act on an arbitrary one, and any renumber would "
-            f"drag the other's invoices and shipments with it. This needs the "
-            f"duplicate resolved in the store directly -- no tool here can "
-            f"tell the two apart.")
+            f"{len(matches)} projects share the number '{key}', and "
+            f"{', '.join(twice)} holds it twice. {what} would act on an "
+            f"arbitrary one, and any renumber would drag the other's invoices "
+            f"and shipments with it. One customer's two records cannot be told "
+            f"apart by any tool: resolve the duplicate in the store directly.")
     return matches[0] if matches else None
 
 

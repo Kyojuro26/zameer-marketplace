@@ -99,6 +99,22 @@ M = [
  # argument's key, so the two expressions are the same value by construction
  # and the mutant has no reachable effect. A mutant with no reachable effect
  # is not evidence of anything; it survived, and that is the information.
+ # ---- the refusal names the holders (0.1.43) ------------------------------
+ ("the refusal no longer names the holders",
+  "                f\"{len(matches)} projects share the number '{key}': \"\n"
+  "                f\"{'; '.join(holders)}. {what} needs to know which -- pass \"\n",
+  "                f\"{len(matches)} projects share the number '{key}'. \"\n"
+  "                f\"{what} needs to know which -- pass \"\n"),
+ ("an archived holder is not marked",
+  "            return f\"{name} ({cid}{', archived' if m.get('archived') else ''})\"\n",
+  "            return f\"{name} ({cid})\"\n"),
+ ("two customers get the old store-directly message",
+  "        if len(set(cids)) == len(cids):\n", "        if False:\n"),
+ ("one customer holding it twice is told to pass company_id",
+  "        if len(set(cids)) == len(cids):\n", "        if True:\n"),
+ ("the holder is named by id alone",
+  "            name = names.get(cid) or m.get(\"company_name\") or \"no name\"\n",
+  "            name = cid\n"),
 ]
 
 sys.exit(mutate(SRC, TEST, F, M))

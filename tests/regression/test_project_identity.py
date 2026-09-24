@@ -330,4 +330,31 @@ def run(server, crm_dir=None):
     res = s.call("get_project", project_no="4521", company_id="beta")
     r.check("and the restored twin still has its own leg",
             res.get("ok") and [x["shipment_id"] for x in res["shipments"]] == ["4521-L2"], json.dumps(res)[:200])
+
+    # ---- 5. the refusal says how to proceed (0.1.43) ---------------------------
+    # It used to say "no tool here can tell the two apart" and send the operator
+    # to the store by hand -- untrue since company_id, and it named nobody.
+    r.section("a shared-number refusal names each holder and says to pass company_id")
+    seed(s)
+    ps = s.read("projects")
+    ps[1]["archived"] = True
+    s.write("projects", ps)
+    for tool, args in (("get_project", {"project_no": "4521"}),
+                       ("update_project", {"project_no": "4521", "fields": {"notes": "x"}}),
+                       ("rename_project", {"old_project_no": "4521", "new_project_no": "4599"}),
+                       ("archive_project", {"project_no": "4521"}),
+                       ("create_shipment", {"project_no": "4521", "fields": {"vendor_po_raw": "X"}})):
+        err = str(s.call(tool, **args).get("error"))
+        r.check(f"{tool}: names each holder, customer and company_id",
+                "Ace Manufacturing (acme)" in err and "Beta Works (beta, archived)" in err, err[:220])
+        r.check(f"{tool}: says to pass company_id, not to go to the store",
+                "pass company_id" in err and "no tool here" not in err and "in the store directly" not in err,
+                err[:220])
+    s.reset(companies=[company("acme", "Ace Manufacturing")],
+            projects=[project("4521", "acme", description="one"), project("4521", "acme", description="two")])
+    err = str(s.call("update_project", project_no="4521", company_id="acme", fields={"notes": "x"}).get("error"))
+    r.check("one customer holding a number twice is still refused, naming it",
+            AMBIG in err and "Ace Manufacturing (acme)" in err and "twice" in err, err[:220])
+    r.check("... and there passing company_id cannot help, so it is not suggested",
+            "pass company_id" not in err, err[:220])
     return r
