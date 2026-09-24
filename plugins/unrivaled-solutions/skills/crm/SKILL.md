@@ -106,6 +106,28 @@ Use the read tools; they are side-effect-free:
   not realized results -- say so. The owner ranking reads the rep field,
   which is mostly empty: lead with its `owner_coverage` sentence, and show
   initials as stored until the operator gives a legend.
+- **Completed jobs** (0.1.43). Complete means the work is done -- shipped or
+  installed. It is not the same as paid: leave the collection status alone and
+  say it separately.
+  - "Mark 4521 complete": `lookup_number(n="4521")` first. If more than one
+    customer holds the number, ask which customer before changing anything.
+    Then `update_project(project_no=, company_id=, fields={"completed_on":
+    "YYYY-MM-DD"})` -- today unless the operator gives the date. The job leaves
+    the Live screen; its bucket is kept. A date after today is refused (say so);
+    a date before the deal date saves with a warning -- pass the warning on.
+  - "Reopen 4521": the same customer rule, then `update_project(fields=
+    {"completed_on": null})`. The job goes back to its Live bucket.
+  - "What did we complete this month": `list_projects()` and keep the rows whose
+    `completed_on` falls in the month (a row with no `completed_on` is not
+    complete). Give a list -- customer, number, description, date -- and do not
+    total it: this is not a metric.
+- **Add a project** ("add a project for Ace Manufacturing"): find the company
+  (`list_companies`). A project belongs to a customer or a lead; a vendor is
+  refused. Ask for the project number -- the QuickBooks estimate number, unique
+  across the business, so an existing number is refused -- then
+  `create_project(fields={"project_no": ..., "company_id": ..., "status":
+  "pending", "description": ...})`. It goes on the Live screen only if the
+  operator names a bucket (`tracker_status`).
 - **The weekly CFO review** ("how are we doing", "cash position", "the CFO
   numbers"):
   1. Get a current snapshot. With the Intuit QuickBooks connector available
