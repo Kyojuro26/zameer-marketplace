@@ -139,9 +139,9 @@ PROBE_MAX_BYTES = 8 << 20
 
 
 def _fetch(url, deadline, headers=None, enough=None):
-    """The body at url, read in chunks against ONE deadline and a size cap. A
-    per-read timeout let a holder that sent a byte every few seconds keep the
-    new app waiting forever (0.1.44 review)."""
+    """The body at url, in chunks, stopping at `enough` or a size cap. Each
+    socket wait is bounded by what is left of the deadline; the probe as a
+    whole is hard-bounded by probe_holder's thread (0.1.44 review)."""
     left = deadline - time.monotonic()
     if left <= 0:
         raise TimeoutError("probe budget spent")
@@ -149,8 +149,6 @@ def _fetch(url, deadline, headers=None, enough=None):
     with urllib.request.urlopen(req, timeout=left) as resp:
         chunks, size = [], 0
         while True:
-            if time.monotonic() > deadline:
-                raise TimeoutError("probe budget spent")
             b = resp.read1(65536) if hasattr(resp, "read1") else resp.read(65536)
             if not b:
                 return b"".join(chunks)

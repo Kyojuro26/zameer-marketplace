@@ -47,6 +47,10 @@ SERVER = [
  ("qbo_name is looked up exactly by the name resolver (round 2)",
   "        if isinstance(q, str) and _name_key(q):\n            by_qbo.setdefault(_name_key(q), []).append(cid)\n",
   "        if isinstance(q, str) and q.strip():\n            by_qbo.setdefault(q.strip(), []).append(cid)\n"),
+ # moved from mutate_derived_margin, which filed it under the wrong test
+ ("a customer mismatch is labelled no_qbo_invoice in the CFO report (round 2)",
+  "                      if any(m_[1] == \"qbo_customer_mismatch\" for m_ in matched)\n",
+  "                      if False\n"),
  ("the shape does not carry the unverified count (review)",
   "        if unverified:                      # a count the screen shows beside the figure\n",
   "        if False:\n"),

@@ -41,8 +41,12 @@ M = [
   "    t.join()\n    return tuple(out)\n"),
  ("the probe reads a big page to the end, and calls a CRM app another program (round 2)",
   "            if enough and enough(b\"\".join(chunks)):\n", "            if False:\n"),
- ("the probe has no total budget: a trickling holder hangs the new app (review)",
-  "            if time.monotonic() > deadline:\n                raise TimeoutError(\"probe budget spent\")\n", ""),
+ # RETIRED (round 2), the code it mutated removed: "the probe has no total
+ # budget". Once probe_holder ran the probe in a thread joined for the budget,
+ # the body loop's own deadline check had no observable effect -- a trickling
+ # or silent holder is abandoned at the join either way, the same exit and
+ # message -- so the mutant survived as equivalent and the redundant check was
+ # removed. "the probe is not hard-bounded" grades the bound that remains.
  ("an occupied port exits zero",
   "        sys.exit(f\"Another CRM app{f' (v{version})' if version else ''} is already \"\n",
   "        print(f\"Another CRM app{f' (v{version})' if version else ''} is already \"\n"),

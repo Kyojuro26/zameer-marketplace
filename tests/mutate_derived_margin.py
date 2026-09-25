@@ -56,9 +56,6 @@ SERVER = [
   "    gp, margin = _derived_profit(merged)\n"
   "    if not changed and (_num(merged.get(\"revenue\")) is None or _num(merged.get(\"total_cost\")) is None):\n"
   "        return\n"),
- ("a customer mismatch is labelled no_qbo_invoice in the CFO report (round 2)",
-  "                      if any(m_[1] == \"qbo_customer_mismatch\" for m_ in matched)\n",
-  "                      if False\n"),
  ("the check's list is unbounded (review)",
   "    return {\"checked\": checked, \"count\": len(out), \"projects\": out[:50],\n",
   "    return {\"checked\": checked, \"count\": len(out), \"projects\": out,\n"),

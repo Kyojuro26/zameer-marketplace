@@ -42,6 +42,10 @@ def run(server, crm_dir=None):
     srv._today = lambda: date(2026, 9, 1)
     r.check("the vocabulary has qbo_customer_mismatch",
             "qbo_customer_mismatch" in getattr(srv, "EXCLUSION_REASONS", ()))
+    # a server from before QuickBooks snapshots (0.1.38) has no join to check:
+    # that is the defect, named, not a crash the runner cannot score
+    if not r.check("the server can hold a QuickBooks snapshot", callable(getattr(srv, "_save_qbo_snapshot", None))):
+        return r
     import test_metrics as TM
     tmp = Path(tempfile.mkdtemp(prefix="crm-qcust-"))
     s = Store(srv, tmp / "store")

@@ -102,6 +102,9 @@ def run(server, crm_dir=None):
     res = up("4600", notes="unrelated")
     r.check("a write that does not change revenue or cost leaves profit alone",
             res.get("ok") is True and rec("4600").get("gross_profit") == stale.get("gross_profit"), json.dumps(rec("4600"))[:160])
+    res = up("4600", revenue=1000, total_cost=600)
+    r.check("... including one that re-sends the same revenue and cost, as the drawer does",
+            res.get("ok") is True and rec("4600").get("gross_profit") == stale.get("gross_profit"), json.dumps(rec("4600"))[:160])
     # review of 0.1.44: a write that sends profit or margin is judged whether or
     # not it changes revenue or cost -- {"margin": 40} was stored as 4000%
     for label, fields in (("a profit alone", {"gross_profit": 999}),
