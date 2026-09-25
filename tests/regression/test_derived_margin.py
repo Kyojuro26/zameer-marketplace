@@ -11,8 +11,13 @@ total_cost, the server now recomputes:
 both null when either input is missing, and margin null when revenue is zero
 or negative. A gross_profit or margin passed in the same write that disagrees
 with the recomputed value by more than a cent (0.0001 for margin) is refused,
-naming both values; a consistent one is allowed. A write that does not change
+naming both values; a consistent one is allowed. A write that does not carry
 revenue or cost leaves them alone (the importer is out of scope).
+
+H4b: a write that CARRIES revenue or total_cost, changed or not, recomputes
+when both are present -- the drawer re-sends them on every save, and re-saving
+revenue is how a stale project is corrected. With an input missing, a change
+nulls them and an unchanged resend leaves a hand-entered profit alone.
 
 crm_info's read-only check lists the projects whose stored profit or margin
 disagrees with their revenue and cost, and writes nothing. Fixture names are
@@ -102,9 +107,18 @@ def run(server, crm_dir=None):
     res = up("4600", notes="unrelated")
     r.check("a write that does not change revenue or cost leaves profit alone",
             res.get("ok") is True and rec("4600").get("gross_profit") == stale.get("gross_profit"), json.dumps(rec("4600"))[:160])
-    res = up("4600", revenue=1000, total_cost=600)
-    r.check("... including one that re-sends the same revenue and cost, as the drawer does",
-            res.get("ok") is True and rec("4600").get("gross_profit") == stale.get("gross_profit"), json.dumps(rec("4600"))[:160])
+    # H4b: the drawer re-sends revenue and cost on every save, and re-saving
+    # revenue is the operator's fix for a stale project -- so a resend with
+    # both inputs present recomputes, changed or not
+    s.write("projects", s.read("projects") + [
+        project("4607", "acme", revenue=1000, total_cost=600, gross_profit=999, margin=0.9),
+        project("4608", "acme", revenue=500, gross_profit=120, margin=0.24)])
+    res = up("4607", revenue=1000, total_cost=600)
+    r.check("re-sending the same revenue and cost, as the drawer does, corrects a stale profit and margin",
+            res.get("ok") is True and fresh("4607") == [400, 0.4], json.dumps([res.get("error"), fresh("4607")]))
+    res = up("4608", revenue=500, total_cost=None)
+    r.check("... but a resend on a project with no cost leaves its hand-entered profit and margin alone",
+            res.get("ok") is True and fresh("4608") == [120, 0.24], json.dumps([res.get("error"), fresh("4608")]))
     # review of 0.1.44: a write that sends profit or margin is judged whether or
     # not it changes revenue or cost -- {"margin": 40} was stored as 4000%
     for label, fields in (("a profit alone", {"gross_profit": 999}),
@@ -139,7 +153,7 @@ def run(server, crm_dir=None):
             json.dumps([res.get("error"), fresh("4700")]))
 
     r.section("the read-only check")
-    s.write("projects", [p for p in s.read("projects") if str(p["project_no"]) != "4700"])
+    s.write("projects", [p for p in s.read("projects") if str(p["project_no"]) not in ("4700", "4607")])
     digest = lambda: {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                       for p in sorted(s.path.iterdir()) if p.is_file()}
     before = digest()
@@ -159,4 +173,17 @@ def run(server, crm_dir=None):
     dm = s.call("crm_info").get("derived_mismatch") or {}
     r.check("the list is bounded: 50 shown, the count says 61",
             len(dm.get("projects", [])) == 50 and dm.get("count") == 61, json.dumps({k: dm.get(k) for k in ("count", "checked")}))
+
+    r.section("zero or negative revenue (H4b)")
+    # no margin can be worked out; the workbook stores 0 there, which is not stale
+    s.write("projects", [project("4800", "acme", revenue=0, total_cost=100, gross_profit=-100, margin=0),
+                         project("4801", "acme", revenue=-50, total_cost=0, gross_profit=-50, margin=0),
+                         project("4802", "acme", revenue=0, total_cost=100, gross_profit=-100, margin=0.25),
+                         project("4803", "acme", revenue=0, total_cost=100, gross_profit=5, margin=0)])
+    dm = s.call("crm_info").get("derived_mismatch") or {}
+    got = sorted(str(p.get("project_no")) for p in dm.get("projects", []))
+    r.check("a stored margin of 0 on zero or negative revenue is not a mismatch",
+            "4800" not in got and "4801" not in got, json.dumps(got))
+    r.check("... but any other margin there is, and so is a wrong profit",
+            got == ["4802", "4803"] and dm.get("checked") == 4, json.dumps([got, dm.get("checked")]))
     return r

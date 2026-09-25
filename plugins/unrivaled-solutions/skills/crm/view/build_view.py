@@ -2989,8 +2989,8 @@ function openProject(pno, cid){
       <div class="field"><label>Total cost ($)</label><input id="f_cost" type="number" step="0.01" value="${p.total_cost==null?'':esc(p.total_cost)}"/></div>
     </div>
     <div class="row2">
-      <div class="field"><label>Gross profit ($)</label><input id="f_gp" type="number" readonly title="Worked out from revenue and cost when either changes" value="${p.gross_profit==null?'':esc(p.gross_profit)}"/></div>
-      <div class="field"><label>Margin (%)</label><input id="f_margin" type="number" readonly title="Worked out from revenue and cost when either changes" value="${esc(marginPct)}"/></div>
+      <div class="field"><label>Gross profit ($)</label><input id="f_gp" type="number" readonly title="Worked out from revenue and cost when you save" value="${p.gross_profit==null?'':esc(p.gross_profit)}"/></div>
+      <div class="field"><label>Margin (%)</label><input id="f_margin" type="number" readonly title="Worked out from revenue and cost when you save" value="${esc(marginPct)}"/></div>
     </div>
     <div class="field"><label>Owner (reps, comma-separated)</label><input id="f_owner" value="${esc(arr(p.owner).join(', '))}"/></div>
     <div class="field"><label>Open orders note <span class="muted"

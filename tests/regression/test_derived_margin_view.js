@@ -6,6 +6,8 @@
 // used to send all four on every save, so changing revenue there would have
 // sent the OLD profit and been refused. It now shows profit and margin
 // read-only, sends neither, and shows what the server stored after a save.
+// H4b: a stale project opened and saved WITHOUT an edit is corrected -- the
+// drawer re-sends revenue and cost, and the server recomputes from them.
 // A separate process re-reads projects.json. Generic names only.
 const path = require('path');
 const os = require('os');
@@ -20,11 +22,12 @@ sys.path.insert(0, sys.argv[1] + "/tests")
 from lib.harness import load_server, Store, company, project
 srv = load_server(sys.argv[2]); st = Store(srv, sys.argv[3])
 st.reset(companies=[company("acme", "Ace Manufacturing")],
-         projects=[project("4521", "acme", revenue=1000, total_cost=600, gross_profit=400, margin=0.4)])
+         projects=[project("4521", "acme", revenue=1000, total_cost=600, gross_profit=400, margin=0.4),
+                   project("4522", "acme", revenue=1000, total_cost=600, gross_profit=999, margin=0.9)])
 print("ok")
 `;
 const PY_READ = "import json,sys,os\n"
-  + "p=[x for x in json.load(open(os.path.join(sys.argv[1],'projects.json'))) if x['project_no']=='4521'][0]\n"
+  + "p=[x for x in json.load(open(os.path.join(sys.argv[1],'projects.json'))) if x['project_no']==sys.argv[2]][0]\n"
   + "print(json.dumps([p.get('revenue'),p.get('gross_profit'),p.get('margin')]))";
 const PY_PORT = "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()";
 const PY_WAIT = "import sys,time,urllib.request\n"
@@ -41,7 +44,7 @@ async function run(crmDir) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crmdm-'));
   const store = path.join(tmp, 'm', 'store');
   const repo = path.resolve(__dirname, '..', '..');
-  let a = {}, d1, srv;
+  let a = {}, d1, d2, srv;
   try {
     execFileSync('python3', ['-c', PY_SEED, repo, crmDir, store], { encoding: 'utf8' });
     const port = execFileSync('python3', ['-c', PY_PORT], { encoding: 'utf8' }).trim();
@@ -57,8 +60,14 @@ async function run(crmDir) {
       { click: '#saveBtn' }, { wait: 900 },
       { eval: "((document.getElementById('savedMsg')||{}).textContent||'')", as: 'msg' },
       { eval: VAL('f_gp'), as: 'gp1' }, { eval: VAL('f_margin'), as: 'm1' },
+      { eval: "closeDrawer(), openProject('4522','acme'), true", as: 'o2' }, { wait: 300 },
+      { eval: VAL('f_gp'), as: 'gp2' }, { eval: VAL('f_margin'), as: 'm2' },
+      { click: '#saveBtn' }, { wait: 900 },
+      { eval: "((document.getElementById('savedMsg')||{}).textContent||'')", as: 'msg3' },
+      { eval: VAL('f_gp'), as: 'gp3' }, { eval: VAL('f_margin'), as: 'm3' },
     ]);
-    d1 = JSON.parse(execFileSync('python3', ['-c', PY_READ, store], { encoding: 'utf8' }));
+    d1 = JSON.parse(execFileSync('python3', ['-c', PY_READ, store, '4521'], { encoding: 'utf8' }));
+    d2 = JSON.parse(execFileSync('python3', ['-c', PY_READ, store, '4522'], { encoding: 'utf8' }));
   } catch (err) {
     r.check('the store seeded and the server started', false, String(err).slice(0, 300));
   } finally {
@@ -74,6 +83,13 @@ async function run(crmDir) {
     JSON.stringify(d1) === JSON.stringify([2000, 1400, 0.7]), JSON.stringify(d1));
   r.check('... and the drawer shows the recomputed values', a.gp1 === '1400' && a.m1 === '70',
     JSON.stringify([a.gp1, a.m1]));
+  r.check('a stale project opens showing its stale profit and margin', a.gp2 === '999' && a.m2 === '90',
+    JSON.stringify([a.gp2, a.m2]));
+  r.check('saving it without an edit saves', /Saved/.test(a.msg3 || ''), a.msg3);
+  r.check('... and on disk, read by a separate process, profit and margin are recomputed',
+    JSON.stringify(d2) === JSON.stringify([1000, 400, 0.4]), JSON.stringify(d2));
+  r.check('... and the drawer shows the recomputed values', a.gp3 === '400' && a.m3 === '40',
+    JSON.stringify([a.gp3, a.m3]));
   return r;
 }
 

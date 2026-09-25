@@ -1184,8 +1184,12 @@ def _derived_profit(rec):
 
 def _derive_profit(fields, prior):
     """Profit and margin follow revenue and cost (0.1.44). On a write that
-    CHANGES revenue or total_cost (prior None: a create), the derived pair is
-    written into `fields`, so it is saved and logged with the edit. A
+    CARRIES revenue or total_cost, changed or not, with both present after the
+    merge, the derived pair is written into `fields`, so it is saved and logged
+    with the edit: the drawer re-sends both on every save, and re-saving
+    revenue is how a stale project is corrected (H4b). With an input missing,
+    a CHANGE (prior None: a create) nulls the pair and an unchanged resend
+    leaves a hand-entered profit alone. A
     gross_profit or margin the caller sends that disagrees by more than a cent
     (0.0001 for margin) is refused, naming both; a consistent one is replaced
     by the recomputed value. Editing revenue used to leave a stored profit
@@ -1193,8 +1197,9 @@ def _derive_profit(fields, prior):
     changed = [k for k in ("revenue", "total_cost") if k in fields
                and (prior is None or _num(fields[k]) != _num(prior.get(k))
                     or (fields[k] is None) != (prior.get(k) is None))]
+    carried = [k for k in ("revenue", "total_cost") if k in fields]
     sent = [k for k in ("gross_profit", "margin") if k in fields]
-    if not changed and not sent:
+    if not carried and not sent:
         return
     merged = dict(prior or {}, **fields)
     # A profit or margin sent without a revenue or cost change is judged too
@@ -1212,6 +1217,8 @@ def _derive_profit(fields, prior):
                 f"{key} {fields[key]!r} disagrees with revenue and total_cost, which "
                 f"give {key} {shown(want) if want is not None else 'null'} -- leave "
                 f"{key} out and it is worked out for you")
+    if gp is None and not changed and not sent:
+        return      # an unchanged resend with revenue or cost missing
     fields["gross_profit"], fields["margin"] = gp, margin
 
 
@@ -1230,6 +1237,8 @@ def _derived_mismatch(projects):
         sgp, sm = _num(p.get("gross_profit")), _num(p.get("margin"))
         off_gp = sgp is None or abs(sgp - gp) > PROFIT_TOL
         off_m = (sm is None) != (margin is None) or (sm is not None and abs(sm - margin) > MARGIN_TOL)
+        if margin is None and sm == 0:
+            off_m = False   # revenue zero or negative: no margin, and a stored 0 says so
         if off_gp or off_m:
             out.append({"project_no": p.get("project_no"), "company_id": p.get("company_id"),
                         "revenue": p.get("revenue"), "total_cost": p.get("total_cost"),
@@ -1237,7 +1246,8 @@ def _derived_mismatch(projects):
                         "derived_gross_profit": gp, "derived_margin": margin})
     return {"checked": checked, "count": len(out), "projects": out[:50],
             "basis": "stored gross_profit / margin against revenue - total_cost and "
-                     "(revenue - total_cost) / revenue, over live projects with both; "
+                     "(revenue - total_cost) / revenue, over live projects with both "
+                     "(a margin of 0 on zero or negative revenue agrees); "
                      "re-save a project's revenue to correct it"}
 
 

@@ -44,10 +44,17 @@ SERVER = [
  ("the check ignores a stale margin",
   "        off_m = (sm is None) != (margin is None) or (sm is not None and abs(sm - margin) > MARGIN_TOL)\n",
   "        off_m = False\n"),
+ ("no zero-revenue rule: a margin of 0 on zero or negative revenue is flagged (H4b)",
+  "        if margin is None and sm == 0:\n            off_m = False", "        if False:\n            off_m = False"),
  ("the check counts projects it could not check",
   "        checked += 1\n", ""),
+ # re-anchored in H4b: the gate reads `carried`, not `changed`
  ("a profit or margin sent without a revenue or cost change is not judged (review)",
-  "    if not changed and not sent:\n", "    if not changed:\n"),
+  "    if not carried and not sent:\n", "    if not carried:\n"),
+ ("the changed-only gate is back: a resend does not correct a stale project (H4b)",
+  "    if not carried and not sent:\n", "    if not changed and not sent:\n"),
+ ("no both-inputs guard: a resend with cost missing wipes a hand-entered profit (H4b)",
+  "    if gp is None and not changed and not sent:\n        return", "    if False:\n        return"),
  # RETIRED (review round 2): "with nothing to judge by, a sent profit is
  # refused" targeted the "taken as given" branch, which is gone -- the rule is
  # now one for create and update, below.
