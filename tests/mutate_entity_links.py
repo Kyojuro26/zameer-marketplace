@@ -41,9 +41,10 @@ SERVER = [
   '    holder = _vendor_link_holder(v.get("company_id"),\n'
   '                                 [c for c in companies if not c.get("archived")])',
   '    holder = _vendor_link_holder(v.get("company_id"), companies)'),
+ # re-anchored 0.1.44: qbo_name is looked up normalised, as the invoice match compares it
  ("the display name is read before qbo_name",
-  "        for ids in (by_qbo.get(name.strip()), by_disp.get(_name_key(name))):",
-  "        for ids in (by_disp.get(_name_key(name)), by_qbo.get(name.strip())):"),
+  "        for ids in (by_qbo.get(_name_key(name)), by_disp.get(_name_key(name))):",
+  "        for ids in (by_disp.get(_name_key(name)), by_qbo.get(_name_key(name))):"),
  ("an ambiguous name is given to the first record",
   '            if ids:\n                return None, {"name": name, "reason": "ambiguous",',
   '            if ids:\n                return ids[0], {"name": name, "reason": "ambiguous",'),

@@ -138,7 +138,7 @@ PROBE_BUDGET = 8.0        # seconds for the whole probe, however the holder beha
 PROBE_MAX_BYTES = 8 << 20
 
 
-def _fetch(url, deadline, headers=None):
+def _fetch(url, deadline, headers=None, enough=None):
     """The body at url, read in chunks against ONE deadline and a size cap. A
     per-read timeout let a holder that sent a byte every few seconds keep the
     new app waiting forever (0.1.44 review)."""
@@ -156,11 +156,31 @@ def _fetch(url, deadline, headers=None):
                 return b"".join(chunks)
             chunks.append(b)
             size += len(b)
+            # a big store's page runs to megabytes; what the probe needs is at
+            # its top, so it stops reading as soon as it has it
+            if enough and enough(b"".join(chunks)):
+                return b"".join(chunks)
             if size > PROBE_MAX_BYTES:
                 raise ValueError("probe answer too large")
 
 
 def probe_holder(port, budget=PROBE_BUDGET):
+    """probe() with a HARD bound: it runs in a daemon thread that is abandoned
+    when the budget is spent. The reads' own deadline cannot cover everything
+    -- urlopen reads the status line and headers on a per-byte socket timeout,
+    so a holder trickling them kept the new app waiting (0.1.44 review)."""
+    import threading
+    out = ["other", None]
+
+    def run():
+        out[:] = list(_probe(port, budget))
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(budget + 0.5)
+    return ("other", None) if t.is_alive() else tuple(out)
+
+
+def _probe(port, budget):
     """What is listening on `port`: ("crm", version or None) or ("other", None).
 
     Asks the app the way its own page does -- GET / (which carries the page's
@@ -170,7 +190,9 @@ def probe_holder(port, budget=PROBE_BUDGET):
     base = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + budget
     try:
-        page = _fetch(base + "/", deadline).decode("utf-8", "replace")
+        page = _fetch(base + "/", deadline,
+                      enough=lambda b: b"const BRIDGE_TOKEN = '" in b and b"';" in
+                      b.split(b"const BRIDGE_TOKEN = '", 1)[1]).decode("utf-8", "replace")
     except Exception:                                  # noqa: BLE001 -- anything else
         return "other", None
     if "<title>Unrivaled CRM</title>" not in page:

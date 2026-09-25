@@ -48,8 +48,17 @@ SERVER = [
   "        checked += 1\n", ""),
  ("a profit or margin sent without a revenue or cost change is not judged (review)",
   "    if not changed and not sent:\n", "    if not changed:\n"),
- ("with nothing to judge by, a sent profit is refused (review)",
-  "    if not changed and not derivable:\n        return\n", ""),
+ # RETIRED (review round 2): "with nothing to judge by, a sent profit is
+ # refused" targeted the "taken as given" branch, which is gone -- the rule is
+ # now one for create and update, below.
+ ("with nothing to work it out from, a sent profit is taken as given (round 2)",
+  "    gp, margin = _derived_profit(merged)\n",
+  "    gp, margin = _derived_profit(merged)\n"
+  "    if not changed and (_num(merged.get(\"revenue\")) is None or _num(merged.get(\"total_cost\")) is None):\n"
+  "        return\n"),
+ ("a customer mismatch is labelled no_qbo_invoice in the CFO report (round 2)",
+  "                      if any(m_[1] == \"qbo_customer_mismatch\" for m_ in matched)\n",
+  "                      if False\n"),
  ("the check's list is unbounded (review)",
   "    return {\"checked\": checked, \"count\": len(out), \"projects\": out[:50],\n",
   "    return {\"checked\": checked, \"count\": len(out), \"projects\": out,\n"),

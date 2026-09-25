@@ -98,6 +98,23 @@ class _OldApp(BaseHTTPRequestHandler):
         pass
 
 
+class _BigApp(_OldApp):
+    """The page of a very big store: the title and token, then 20 MB of data."""
+    def do_GET(self):
+        if self.path != "/":
+            return _OldApp.do_GET(self)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"<html><head><title>Unrivaled CRM</title></head><body><script>"
+                         b"const BRIDGE_TOKEN = 'old-token';")
+        try:
+            for _ in range(20):
+                self.wfile.write(b"x" * (1 << 20))
+        except OSError:
+            pass
+
+
 class _Other(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -152,6 +169,16 @@ def run(server, crm_dir=None):
     r.check("the clean start opened the browser once", fout.count(OPENED) == 1, fout[-200:])
     r.check("... printed its banner", f"CRM v{version}" in ferr, ferr[-300:])
 
+    # 3b. a CRM app with a very big store: its page is far larger than the
+    # probe reads, but the title and token are at the top
+    httpd, port = _serve(_BigApp)
+    try:
+        rc, out, err = _second(crm, s.path, port)
+    finally:
+        httpd.shutdown()
+    r.check("a CRM app whose page is huge is still recognised, by what is at its top",
+            rc not in (0, None) and "Another CRM app (v0.1.36) is already running" in err, err[-200:])
+
     # 3. an app from before this release: its version is read from the app itself
     httpd, port = _serve(_OldApp)
     try:
@@ -174,7 +201,8 @@ def run(server, crm_dir=None):
 
     # 5. review of 0.1.44: a holder that never answers, or trickles a byte a
     # second, must not hold the new app up -- the probe has a total budget
-    for label, mode in (("never answers", "silent"), ("trickles a byte a second", "trickle")):
+    for label, mode in (("never answers", "silent"), ("trickles a byte a second", "trickle"),
+                        ("trickles its header lines", "headers")):
         port, stop = _raw_listener(mode)
         try:
             t0 = time.time()
@@ -209,6 +237,16 @@ def _raw_listener(mode):
                 conns.append(c)
             except OSError:
                 continue
+            if mode == "headers":
+                def drip_headers(c=c):
+                    try:
+                        c.sendall(b"HTTP/1.1 200 OK\r\n")
+                        while not stop.is_set():
+                            c.sendall(b"X")
+                            time.sleep(1)
+                    except OSError:
+                        pass
+                threading.Thread(target=drip_headers, daemon=True).start()
             if mode == "trickle":
                 def drip(c=c):
                     try:

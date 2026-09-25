@@ -141,7 +141,8 @@ async function run(crmDir) {
   r.check("a QuickBooks invoice under another customer is not priced: the tile and header leave it out",
     mm.head === '$42,853.13' && mm.recv === mm.head, JSON.stringify([mm.head, mm.recv]));
   r.check('a priced invoice whose customer is not verified is said so on the tile and the header',
-    /1 customer not verified/i.test(mm.text || '') && /1 customer not verified/i.test(mm.recvText || ''),
+    /1 invoice with the customer not verified/i.test(mm.text || '')
+      && /1 invoice with the customer not verified/i.test(mm.recvText || ''),
     JSON.stringify([mm.text, mm.recvText]));
   r.check('... and the invoice names both customers where it is shown',
     /Ace Manufacturing/.test(mm.cell || '') && /Beta Works/.test(mm.cell || ''), mm.cell);

@@ -2116,7 +2116,8 @@ function qboLedger(key){
 /* Priced, but nothing ties the company to a QuickBooks name (0.1.44): said
    beside the figure, on the tile and the header alike. */
 function qboUnverified(q){
-  return q && q.not_verified ? ` \u00b7 ${q.not_verified} customer not verified` : '';
+  return q && q.not_verified
+    ? ` \u00b7 ${q.not_verified} invoice${q.not_verified === 1 ? '' : 's'} with the customer not verified` : '';
 }
 /* The stale marker, one definition for the tile and the Receivables header. */
 function qboStaleBadge(q){

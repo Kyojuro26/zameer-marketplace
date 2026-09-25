@@ -1197,12 +1197,10 @@ def _derive_profit(fields, prior):
     if not changed and not sent:
         return
     merged = dict(prior or {}, **fields)
-    derivable = _num(merged.get("revenue")) is not None and _num(merged.get("total_cost")) is not None
     # A profit or margin sent without a revenue or cost change is judged too
-    # (0.1.44 review: {"margin": 40} was stored as 4000%). With nothing to judge
-    # it by -- no revenue or no cost -- it is taken as given.
-    if not changed and not derivable:
-        return
+    # (0.1.44 review: {"margin": 40} was stored as 4000%). One rule for create
+    # and update: with no revenue or no cost they work out to null, so a sent
+    # value is refused unless it is null.
     gp, margin = _derived_profit(merged)
     for key, want, tol, shown in (("gross_profit", gp, PROFIT_TOL, lambda v: f"{v:.2f}"),
                                   ("margin", margin, MARGIN_TOL, lambda v: f"{v:.4f}")):
@@ -1500,16 +1498,18 @@ def _name_base(s):
 
 def _qbo_name_resolver(records):
     """A resolver for QuickBooks names over these records (each with
-    company_id, display_name and maybe qbo_name): qbo_name first, exactly;
-    then the normalised display name. resolve(name) -> (id, None) or
+    company_id, display_name and maybe qbo_name): qbo_name first, then the
+    display name, both normalised (_name_key). resolve(name) -> (id, None) or
     (None, {"name", "reason": ambiguous|no_match, "candidates"}) -- a name
     that fits two records is never given to either."""
     by_qbo, by_disp = {}, {}
     for rec in records:
         cid = rec.get("company_id")
         q = rec.get("qbo_name")
-        if isinstance(q, str) and q.strip():
-            by_qbo.setdefault(q.strip(), []).append(cid)
+        # compared as QuickBooks compares names -- case, spacing, punctuation
+        # aside -- the same rule the invoice match uses (0.1.44 review)
+        if isinstance(q, str) and _name_key(q):
+            by_qbo.setdefault(_name_key(q), []).append(cid)
         k = _name_key(rec.get("display_name"))
         if k:
             by_disp.setdefault(k, []).append(cid)
@@ -1517,7 +1517,7 @@ def _qbo_name_resolver(records):
     def resolve(name):
         if not isinstance(name, str) or not name.strip():
             return None, None
-        for ids in (by_qbo.get(name.strip()), by_disp.get(_name_key(name))):
+        for ids in (by_qbo.get(_name_key(name)), by_disp.get(_name_key(name))):
             if ids and len(ids) == 1:
                 return ids[0], None
             if ids:
@@ -2899,6 +2899,11 @@ class _MetricsCtx:
             matched = [self.qbo_match(i) for i in j["invoices"]]
             invoiced = (sum(m_[0]["amount_cents"] for m_ in matched)
                         if all(not m_[1] for m_ in matched) else None)
+            # why the job has no invoiced figure: a customer mismatch is named as
+            # such, as rankings names it; anything else stays no_qbo_invoice
+            no_inv = ("qbo_customer_mismatch"
+                      if any(m_[1] == "qbo_customer_mismatch" for m_ in matched)
+                      else "no_qbo_invoice")
             # quoted
             p_ = self.proj_by_key.get((k[1], k[2])) if k[0] == "project" else None
             if not p_:
@@ -2916,7 +2921,7 @@ class _MetricsCtx:
             # realized
             per_leg = job_nums[k]
             if invoiced is None:
-                rw = "no_qbo_invoice"
+                rw = no_inv
             elif not vt:
                 rw = "cost_incomplete"
             elif from_export:
@@ -2944,7 +2949,7 @@ class _MetricsCtx:
                 rv = invoiced - cost - job_expenses.get(k, 0)
             # PO-costed
             if invoiced is None:
-                pw = "no_qbo_invoice"
+                pw = no_inv
             elif not any(per_leg):
                 pw = "no_po_on_job"
             elif any(not nums for nums in per_leg) or any(
@@ -2959,7 +2964,7 @@ class _MetricsCtx:
                                                  "invoice_no", "company_id") if x in j},
                    "invoiced_usd": _cents_shape(invoiced or 0, "usd",
                                                 0 if invoiced is None else 1,
-                                                {"no_qbo_invoice": 1} if invoiced is None else {},
+                                                {no_inv: 1} if invoiced is None else {},
                                                 QBO_INVOICED_BASIS),
                    "quoted_margin_usd": quoted,
                    "realized_margin_usd": _cents_shape(rv or 0, "usd", 0 if rw else 1,

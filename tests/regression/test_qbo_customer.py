@@ -139,8 +139,24 @@ def _review(r, srv, tmp, TM):
             "4100" in jobs and jobs["4100"]["invoiced_usd"].get("value_cents") is None, json.dumps(jobs.get("4100"))[:300])
     r.check("CFO: a job whose only invoice is another customer's stays, with its quoted margin",
             "4200" in jobs and jobs["4200"]["quoted_margin_usd"].get("counted") == 1, json.dumps(jobs.get("4200"))[:300])
+    r.check("CFO: the job's invoiced figure says why -- a customer mismatch, as rankings says",
+            (jobs.get("4200", {}).get("invoiced_usd", {}).get("excluded") or {}) == {"qbo_customer_mismatch": 1}
+            and (jobs.get("4200", {}).get("realized_margin_usd", {}).get("excluded") or {}) == {"qbo_customer_mismatch": 1},
+            json.dumps(jobs.get("4200"))[:300])
     drift = ((s.call("crm_metrics", report="qbo_drift").get("reports") or {}).get("qbo_drift")) or {}
     rows = {str(x.get("num")): x for x in drift.get("rows", [])}
     r.check("drift: a QuickBooks invoice the only CRM claimant is not the customer for is listed as uncarried",
             "9201" in rows and rows["9201"].get("company_id") == "beta", json.dumps(drift.get("rows"))[:300])
+    # one rule for "this QuickBooks name is this company": the resolver the
+    # drift report, the CFO list and the number lookup use agrees with the match
+    srv._save_qbo_snapshot("invoices", "export", "2026-08-30", "2026-01-01", "2026-08-30", [
+        row("9101", "Ace Mfg"), row("9102", "Beta Works"), row("9201", "Beta Works"),
+        row("9301", "ace mfg")])                 # no CRM invoice: uncarried, and whose?
+    s.rebind()
+    drift = ((s.call("crm_metrics", report="qbo_drift").get("reports") or {}).get("qbo_drift")) or {}
+    rows = {str(x.get("num")): x for x in drift.get("rows", [])}
+    r.check("drift names the company a qbo_name matches by case alone, as the match does",
+            (rows.get("9301") or {}).get("company_id") == "acme"
+            and not any(u.get("name", "").lower() == "ace mfg" for u in drift.get("unmatched_names", [])),
+            json.dumps([rows.get("9301"), drift.get("unmatched_names")])[:300])
     TM.check_invariants(r, "qbo-customer review cfo", {"cfo": cfo, "drift": drift})

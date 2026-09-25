@@ -113,9 +113,20 @@ def run(server, crm_dir=None):
     res = up("4600", gross_profit=400)
     r.check("a consistent profit alone is accepted, and corrects the stored one",
             res.get("ok") is True and fresh("4600") == [400, 0.4], json.dumps([res.get("error"), fresh("4600")]))
+    # review round 2: one rule for create and update -- with nothing to work it
+    # out from, a sent profit or margin is refused unless null
     res = up("4603", gross_profit=75)
-    r.check("with no revenue or cost to judge by, a profit is taken as given",
-            res.get("ok") is True and rec("4603").get("gross_profit") == 75, json.dumps(res)[:200])
+    r.check("with no revenue or cost to work it out from, a sent profit is refused",
+            res.get("ok") is False and "null" in str(res.get("error")), json.dumps(res)[:200])
+    s.write("projects", s.read("projects") + [project("4605", "acme", revenue=100)])
+    res = up("4605", margin=40)
+    r.check("... and a margin sent on a project with revenue but no cost (it was stored as 4000%)",
+            res.get("ok") is False and rec("4605").get("margin") is None, json.dumps(res)[:200])
+    res = s.call("create_project", fields={"project_no": "4606", "company_id": "acme",
+                                           "revenue": 100, "gross_profit": 40})
+    r.check("... the same as create_project", res.get("ok") is False, json.dumps(res)[:200])
+    res = up("4605", gross_profit=None, margin=None)
+    r.check("... while null is accepted", res.get("ok") is True, json.dumps(res)[:200])
     import inspect
     r.check("update_project's description says profit and margin are worked out",
             "worked out" in (inspect.getdoc(getattr(srv, "update_project", None)) or ""))
